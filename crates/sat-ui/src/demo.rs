@@ -27,6 +27,20 @@ impl B {
     }
 
     fn track(&mut self, name: &str, color: u8, parent: Option<TrackId>, synth: &str, wave: f32) -> (TrackId, ModuleId) {
+        self.track_with(name, color, parent, synth, wave, sat_modules::PIANO_ROLL, "piano roll")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn track_with(
+        &mut self,
+        name: &str,
+        color: u8,
+        parent: Option<TrackId>,
+        synth: &str,
+        wave: f32,
+        kind: &str,
+        module: &str,
+    ) -> (TrackId, ModuleId) {
         let (id, op) = Op::add_track(name, parent, 99);
         let Op::AddTrack { grids, .. } = &op else { unreachable!() };
         let (src, ins) = (grids.source.unwrap(), grids.instrument.unwrap());
@@ -44,9 +58,9 @@ impl B {
         self.ops.push(Op::AddModule {
             id: seq,
             grid: src,
-            kind: "piano_roll".into(),
-            name: "piano roll".into(),
-            params: OrdMap::new(),
+            kind: kind.into(),
+            name: module.into(),
+            params: sat_modules::default_params(kind),
             pos: (0.0, 0.0),
         });
         (id, seq)
@@ -115,7 +129,7 @@ pub fn demo() -> Demo {
     let mut doc = Document::new(42);
     let mut b = B { ops: Vec::new() };
     let rhythm = b.group("rhythm", 0, 0);
-    let (drums, dseq) = b.track("drums", 0, Some(rhythm), "drum rack", 0.0);
+    let (drums, dseq) = b.track_with("drums", 0, Some(rhythm), "drum rack", 0.0, sat_modules::DRUM_SEQ, "drum seq");
     let kick = |bars: i64| -> Vec<Note> {
         (0..bars * 4)
             .flat_map(|q| {
@@ -155,6 +169,21 @@ pub fn demo() -> Demo {
     let bass_c = vec![n(0, 2, 45, 0.8), n(2, 2, 52, 0.6), n(6, 2, 48, 0.7), n(10, 4, 43, 0.8)];
     b.clip(bass, bseq, "bass c", 1, 1, bass_c, 12, 4);
 
+    let (perc, eseq) = b.track_with("perc", 2, Some(rhythm), "blip", 0.5, sat_modules::EUCLID, "euclid 1");
+    for (k, v) in [("hits", 7.0), ("rot", 2.0), ("acc", 2.0), ("note", 72.0), ("gate", 0.3), ("vel", 0.55)] {
+        b.ops.push(Op::SetValue { target: ParamTarget::Module { module: eseq, param: k.into() }, value: v });
+    }
+    let eclip = b.clip(perc, eseq, "euclid", 2, 1, Vec::new(), 4, 8);
+    // hand edits over the generator: one hit taken out, one added
+    b.ops.push(Op::SetOverrides {
+        module: eseq,
+        clip: eclip,
+        overrides: Overrides {
+            added: Vector::unit(Note { len: Ticks(72), ..n(3, 1, 72, 0.55) }),
+            removed: [(Ticks::sixteenths(9), 72u8)].into_iter().collect(),
+        },
+    });
+
     let tops = b.group("tops", 6, 1);
     let (keys, kseq) = b.track("keys", 6, Some(tops), "piano roll · instrument", 0.0);
     let pads = |root: u8| -> Vec<Note> {
@@ -185,6 +214,7 @@ pub fn demo() -> Demo {
         (rhythm, -3.0),
         (drums, -6.0),
         (bass, -8.2),
+        (perc, -12.0),
         (tops, -4.0),
         (keys, -10.5),
         (vocals, -2.0),

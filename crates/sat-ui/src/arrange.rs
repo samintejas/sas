@@ -752,15 +752,14 @@ fn draw_clip(p: &mut Painter<'_>, th: &Theme, doc: &Document, st: &ArrangeState,
         // note thumbnail
         let body = Rect::new(r.x0 + 2.0, r.y0 + header_h + 3.0, r.x1 - 2.0, r.y1 - 3.0);
         let feed = doc.inlet_cable(clip.id).map(|k| k.from.module);
-        if let Some(pat) = feed.and_then(|m| doc.pattern(m, clip.id))
-            && !pat.notes.is_empty()
-        {
-            let (lo, hi) = pat.notes.iter().fold((127u8, 0u8), |(a, b), n| (a.min(n.pitch), b.max(n.pitch)));
+        let notes = feed.map(|m| sat_modules::effective_notes(doc, m, clip.id)).unwrap_or_default();
+        if !notes.is_empty() {
+            let (lo, hi) = notes.iter().fold((127u8, 0u8), |(a, b), n| (a.min(n.pitch), b.max(n.pitch)));
             let span = (hi - lo).max(6) as f64;
             let nh = (body.height() / (span + 1.0)).clamp(1.5, 3.0);
             let mut k = 0;
             while k * len < pl.offset.0 + pl.length.0 {
-                for n in pat.notes.iter() {
+                for n in notes.iter() {
                     let ct = k * len + n.start.0;
                     if ct < pl.offset.0 || ct >= pl.offset.0 + pl.length.0 || n.start.0 >= len {
                         continue;

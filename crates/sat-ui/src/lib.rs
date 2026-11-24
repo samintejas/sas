@@ -18,3 +18,4 @@ pub mod panel;
 pub mod piano_roll;
 pub mod roll_edit;
 pub mod shell;
+pub mod steps;

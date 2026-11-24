@@ -121,7 +121,7 @@ mod mixer {
         let l = MixerLayout::new(&d.doc, body(), 0.0);
         let kinds: Vec<StripKind> = l.strips.iter().map(|s| s.kind).collect();
         use StripKind::*;
-        assert_eq!(kinds, vec![Group, Child, Child, Group, Child, Group, Child, Return, Return, Master]);
+        assert_eq!(kinds, vec![Group, Child, Child, Child, Group, Child, Group, Child, Return, Return, Master]);
         let master = l.strips.last().unwrap();
         assert_eq!(master.track, d.doc.master);
         assert!((master.rect.x1 - (body().x1 - 12.0)).abs() < 1e-9, "master is pinned right");
@@ -234,5 +234,74 @@ mod roll {
             s = next_snap(s);
         }
         assert_eq!(s, SNAPS[0]);
+    }
+}
+
+mod steps {
+    use sat_doc::sat_time::Ticks;
+    use sat_doc::*;
+    use sat_modules::{Editor, drum};
+    use sat_ui::demo::demo;
+    use sat_ui::steps::{PAGE, StepHit, StepView, geometry, source};
+    use vello::kurbo::Rect;
+
+    fn panel() -> Rect {
+        Rect::new(4.0, 594.0, 1436.0, 896.0)
+    }
+
+    fn clip(d: &Document, name: &str) -> ClipId {
+        d.clips.values().find(|c| c.name == name).unwrap().id
+    }
+
+    #[test]
+    fn piano_roll_clips_get_no_step_editor() {
+        let d = demo();
+        assert_eq!(source(&d.doc, d.selected).unwrap().1, Editor::PianoRoll);
+        assert!(geometry(&d.doc, Some(d.selected), panel(), &StepView::default()).is_none());
+    }
+
+    #[test]
+    fn drum_cells_pages_and_rows_hit_where_laid_out() {
+        let d = demo();
+        let groove = clip(&d.doc, "groove");
+        let g = geometry(&d.doc, Some(groove), panel(), &StepView::default()).unwrap();
+        assert_eq!(g.editor, Editor::Drums);
+        assert_eq!((g.steps, g.pages.len()), (32, 2), "two bars of sixteenths");
+        assert_eq!(g.cells.len(), PAGE * drum::KIT.len());
+        let c = g.cells[PAGE + 5];
+        assert_eq!(c.pitch, drum::KIT[1].1);
+        assert_eq!(g.hit(c.rect.center()), StepHit::Cell { step: 5, pitch: drum::KIT[1].1 });
+        assert_eq!(g.hit(g.pages[1].center()), StepHit::Page(1));
+        // the second page shows steps 16..32, and an out-of-range page clamps
+        let g2 = geometry(&d.doc, Some(groove), panel(), &StepView { page: 7 }).unwrap();
+        assert_eq!(g2.page, 1);
+        assert_eq!(g2.cells[0].step, 16);
+        assert_eq!(g2.tick_of(16), Ticks::sixteenths(16));
+        // cells never overlap and stay inside the panel
+        for w in g.cells.windows(2).filter(|w| w[0].pitch == w[1].pitch) {
+            assert!(w[0].rect.x1 < w[1].rect.x0);
+        }
+        assert!(g.cells.iter().all(|c| panel().contains(c.rect.origin()) && c.rect.y1 <= panel().y1));
+    }
+
+    #[test]
+    fn euclid_knobs_buttons_and_trigs_hit_where_laid_out() {
+        let d = demo();
+        let eu = clip(&d.doc, "euclid");
+        let g = geometry(&d.doc, Some(eu), panel(), &StepView::default()).unwrap();
+        assert_eq!(g.editor, Editor::Euclid);
+        assert_eq!((g.steps, g.cells.len()), (16, 16));
+        assert!(g.pages.is_empty());
+        assert!(g.cells.iter().all(|c| c.pitch == 72));
+        let keys: Vec<&str> = g.knobs.iter().map(|k| k.0).collect();
+        assert_eq!(keys, ["steps", "hits", "rot", "acc", "note", "rate", "gate", "vel"]);
+        assert_eq!(g.hit(g.knobs[1].1.center()), StepHit::Knob("hits"));
+        assert_eq!(g.hit(g.bake.unwrap().center()), StepHit::Bake);
+        assert_eq!(g.hit(g.clear.unwrap().center()), StepHit::Clear);
+        assert_eq!(g.hit(g.mode.unwrap().center()), StepHit::Mode);
+        assert_eq!(g.hit(g.cells[9].rect.center()), StepHit::Cell { step: 9, pitch: 72 });
+        // the demo's hand edits: step 3 added, step 9 removed
+        let on: Vec<i64> = sat_modules::effective_notes(&d.doc, g.module, eu).iter().map(|n| n.start.0 / 240).collect();
+        assert_eq!(on, vec![0, 2, 3, 5, 7, 12, 14]);
     }
 }

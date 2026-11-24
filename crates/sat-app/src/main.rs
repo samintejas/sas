@@ -11,6 +11,10 @@
 //!   move them, drag their right edge to resize, drag in the velocity lane;
 //!   double-click deletes; the select tool drags a box; delete, arrows
 //!   (shift: octave), ctrl+a, escape; alt drags off the grid
+//! - drum seq: click a step to toggle it, shift-click cycles its velocity
+//!   (normal, accent, ghost); page buttons pick the bar shown
+//! - euclid: drag the knobs; click a trig to add or remove a hand edit over the
+//!   generator; clear drops the edits, bake fixes everything into steps
 //! - m / s: mute / solo the selected track; ctrl+z / ctrl+shift+z: undo / redo
 //! - ctrl+o open (or drop a .sat folder on the window), ctrl+s save, ctrl+shift+s save as,
 //!   ctrl+n new, ctrl+q quit
@@ -30,6 +34,7 @@ use sat_compile::Compiled;
 use sat_doc::sat_time::Ticks;
 use sat_doc::{ClipId, Document, History, Note, Op, ParamTarget, TrackFlag, TrackId, TrackKind};
 use sat_engine::{Command, EngineHandle};
+use sat_modules::{Editor, drum, euclid};
 use sat_ui::arrange::{ArrangeLayout, ArrangeState, Hit, TransportView, header_controls};
 use sat_ui::controls::{self, SILENT_DB};
 use sat_ui::mixer::{Knob, Levels, MixHit, MixerLayout};
@@ -38,6 +43,7 @@ use sat_ui::panel::{self, PanelView, Tab};
 use sat_ui::piano_roll::{RollGeom, RollHit, RollView, Tool, clip_notes, next_snap};
 use sat_ui::roll_edit::{self, Edited};
 use sat_ui::shell::{self, Frame, PANEL_H, ShellLayout};
+use sat_ui::steps::{StepGeom, StepHit, StepView};
 use vello::kurbo::{Point, Rect};
 use vello::util::{RenderContext, RenderSurface};
 use vello::{AaConfig, RenderParams, Renderer, RendererOptions, Scene, wgpu};
@@ -208,6 +214,10 @@ fn position_of(doc: &Document, target: &ParamTarget) -> f64 {
             .find(|s| s.target == *target)
             .map(|s| controls::fader_pos(s.level_db))
             .unwrap_or(0.0),
+        ParamTarget::Module { param, .. } => match (euclid::spec(param), doc.base_value(target)) {
+            (Some(s), v) => s.pos(s.clamp(v.unwrap_or(s.default))),
+            _ => 0.0,
+        },
         _ => 0.0,
     }
 }
@@ -216,6 +226,7 @@ fn position_of(doc: &Document, target: &ParamTarget) -> f64 {
 fn value_at(target: &ParamTarget, pos: f64) -> f32 {
     match target {
         ParamTarget::Pan(_) => controls::pan_at(pos),
+        ParamTarget::Module { param, .. } => euclid::spec(param).map_or(0.0, |s| s.at(pos)),
         _ => controls::fader_db(pos),
     }
 }
@@ -224,6 +235,7 @@ fn value_at(target: &ParamTarget, pos: f64) -> f32 {
 fn default_value(target: &ParamTarget) -> f32 {
     match target {
         ParamTarget::SendLevel { .. } => SILENT_DB,
+        ParamTarget::Module { param, .. } => euclid::spec(param).map_or(0.0, |s| s.default),
         _ => 0.0,
     }
 }
@@ -256,6 +268,8 @@ struct App {
     roll: RollView,
     roll_geom: Option<RollGeom>,
     roll_drag: Option<RollDrag>,
+    steps: StepView,
+    step_geom: Option<StepGeom>,
     /// Length of the last drawn or resized note.
     note_len: sat_doc::sat_time::Ticks,
     last_click: Option<(Instant, Point)>,
@@ -273,7 +287,13 @@ impl App {
 
     fn after_change(&mut self, structural: bool, changes: &[sat_doc::Change]) {
         // pattern edits change the note events baked into the schedule
-        let patterns = changes.iter().any(|c| matches!(c, sat_doc::Change::Pattern { .. }));
+        // as do pattern edits and generator knobs
+        let doc = self.history.doc();
+        let patterns = changes.iter().any(|c| match c {
+            sat_doc::Change::Pattern { .. } => true,
+            sat_doc::Change::Value { target, .. } => sat_modules::shapes_notes(doc, target),
+            _ => false,
+        });
         if structural || patterns {
             self.playback.recompile(self.history.doc());
         } else {
@@ -300,6 +320,7 @@ impl App {
         self.levels.clear();
         self.roll = RollView { tool: self.roll.tool, snap: self.roll.snap, ..Default::default() };
         self.roll_drag = None;
+        self.steps = StepView::default();
         self.playback.recompile(&doc);
         self.history = History::new(doc, 500);
         self.playback.locate(Ticks::ZERO);
@@ -397,6 +418,7 @@ impl App {
             levels: &self.levels,
             edited: self.project.edited(self.history.version()),
             roll: &self.roll,
+            steps: &self.steps,
         };
         let mut scene = Scene::new();
         let drawn = shell::draw(&mut scene, &mut self.fonts, &self.theme, &frame, w, h);
@@ -413,6 +435,7 @@ impl App {
             self.roll.lo = Some(g.layout.lo);
         }
         self.roll_geom = drawn.roll;
+        self.step_geom = drawn.steps;
         self.scene.reset();
         self.scene.append(&scene, Some(vello::kurbo::Affine::scale(scale)));
         let dev = &self.ctx.devices[g.surface.dev_id];
@@ -485,6 +508,7 @@ impl App {
         self.history.begin_gesture(match target {
             ParamTarget::Gain(_) => "fader",
             ParamTarget::Pan(_) => "pan",
+            ParamTarget::Module { .. } => "knob",
             _ => "send",
         });
         if !ops.is_empty() {
@@ -520,6 +544,7 @@ impl App {
 
     fn select_clip(&mut self, clip: ClipId) {
         if self.arrange.selected_clip != Some(clip) {
+            self.steps.page = 0;
             self.roll.selected.clear();
             self.roll.lo = None;
         }
@@ -749,6 +774,9 @@ impl App {
             None => {}
         }
         if self.panel == PanelView::Clip {
+            if self.step_geom.is_some() {
+                return self.press_steps(pt, double);
+            }
             return self.press_roll(pt, double);
         }
         let Some(m) = &self.mixer else { return };
@@ -768,6 +796,72 @@ impl App {
             MixHit::Solo(t) => self.toggle_flag(t, TrackFlag::Solo),
             MixHit::Strip(t) => self.arrange.selected_track = Some(t),
             MixHit::Nothing => {}
+        }
+    }
+
+    fn press_steps(&mut self, pt: Point, double: bool) {
+        let Some(g) = self.step_geom.clone() else { return };
+        let doc = self.history.doc();
+        let Some(m) = doc.modules.get(&g.module) else { return };
+        let (module, clip) = (g.module, g.clip);
+        match g.hit(pt) {
+            StepHit::Cell { step, pitch } => {
+                let start = g.tick_of(step);
+                let ops = match g.editor {
+                    Editor::Euclid => {
+                        let p = euclid::Params::of(m);
+                        let note = sat_modules::step_note(start, p.note_len(), pitch, p.vel);
+                        sat_modules::toggle_step(doc, module, clip, note)
+                    }
+                    _ => {
+                        let notes = sat_modules::effective_notes(doc, module, clip);
+                        let on = notes.iter().find(|n| n.start == start && n.pitch == pitch).copied();
+                        match on {
+                            // shift-click cycles an existing step's velocity
+                            Some(n) if self.mods.shift_key() => {
+                                let mut v: Vec<Note> = notes.clone();
+                                for x in v.iter_mut().filter(|x| x.start == start && x.pitch == pitch) {
+                                    x.velocity = drum::next_velocity(n.velocity);
+                                }
+                                vec![Op::WritePattern { module, clip, notes: im::Vector::from(v) }]
+                            }
+                            _ => {
+                                let note = sat_modules::step_note(start, g.rate, pitch, drum::VELOCITIES[0]);
+                                sat_modules::toggle_step(doc, module, clip, note)
+                            }
+                        }
+                    }
+                };
+                self.edit("step", ops);
+            }
+            StepHit::Page(i) => self.steps.page = i,
+            StepHit::Knob(param) => {
+                let target = ParamTarget::Module { module, param: param.into() };
+                self.begin_drag(target, Axis::Vertical { travel: KNOB_TRAVEL }, double);
+            }
+            StepHit::Mode => {
+                let want_fixed = g.mode.is_some_and(|r| pt.x >= r.center().x);
+                let ops = match (want_fixed, sat_modules::generating(m)) {
+                    (true, true) => sat_modules::bake(doc, module, clip),
+                    (false, false) => sat_modules::unbake(module),
+                    _ => Vec::new(),
+                };
+                if !ops.is_empty() {
+                    self.edit(if want_fixed { "bake" } else { "generate" }, ops);
+                }
+            }
+            StepHit::Clear => {
+                let ops = sat_modules::clear_edits(doc, module, clip);
+                if !ops.is_empty() {
+                    self.edit("clear edits", ops);
+                }
+            }
+            StepHit::Bake => {
+                if sat_modules::generating(m) {
+                    self.edit("bake", sat_modules::bake(doc, module, clip));
+                }
+            }
+            StepHit::Nothing => {}
         }
     }
 
@@ -998,6 +1092,8 @@ fn main() {
         roll: RollView::default(),
         roll_geom: None,
         roll_drag: None,
+        steps: StepView::default(),
+        step_geom: None,
         note_len: Ticks::sixteenths(1),
         last_click: None,
         last_frame: Instant::now(),

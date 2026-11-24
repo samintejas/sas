@@ -307,19 +307,18 @@ fn button(p: &mut Painter<'_>, th: &Theme, r: Rect, label: &str) {
     p.text(r.center().x, r.center().y, label, &TextStyle::mono(12.0, th.c.text_strong), Align::Center);
 }
 
-/// Draws the bottom panel for the selected clip and returns its geometry.
-pub fn draw(
+/// Draws the clip panel's tab bar with the clip's name, track, bars and
+/// source, and returns the clip (or `None`, saying so, when none is selected).
+pub fn clip_bar<'d>(
     p: &mut Painter<'_>,
     th: &Theme,
-    doc: &Document,
+    doc: &'d Document,
     clip: Option<ClipId>,
-    view: &RollView,
-    tr: &TransportView,
     r: Rect,
-) -> Option<RollGeom> {
+) -> Option<&'d Clip> {
     let c = &th.c;
     let (tabs, mut x) = panel::draw_bar(p, th, r, PanelView::Clip);
-    let (Some(geom), Some(clip)) = (geometry(doc, clip, r, view), clip.and_then(|id| doc.clips.get(&id))) else {
+    let Some(clip) = clip.and_then(|id| doc.clips.get(&id)) else {
         p.text(x, tabs.center().y, "no clip selected", &TextStyle::mono(12.0, c.text_secondary), Align::Left);
         return None;
     };
@@ -348,8 +347,32 @@ pub fn draw(
     let open = Rect::new(r.x1 - 168.0, cy - 13.0, r.x1 - 40.0, cy + 13.0);
     button(p, th, open, "open source grid");
 
+    Some(clip)
+}
+
+/// Where the playhead is inside `clip`, if it is inside a placement of it.
+pub fn clip_playhead(doc: &Document, clip: &Clip, tr: &TransportView) -> Option<Ticks> {
+    let pl = doc
+        .placements
+        .values()
+        .find(|pl| pl.clip == clip.id && tr.playhead >= pl.start && tr.playhead < pl.start + pl.length)?;
+    Some(Ticks((tr.playhead.0 - pl.start.0 + pl.offset.0).rem_euclid(clip.length.0)))
+}
+
+/// Draws the bottom panel for the selected clip and returns its geometry.
+pub fn draw(
+    p: &mut Painter<'_>,
+    th: &Theme,
+    doc: &Document,
+    clip: Option<ClipId>,
+    view: &RollView,
+    tr: &TransportView,
+    r: Rect,
+) -> Option<RollGeom> {
+    let c = &th.c;
+    let (Some(geom), Some(clip)) = (geometry(doc, clip, r, view), clip_bar(p, th, doc, clip, r)) else { return None };
     // toolbar
-    let tools = Rect::new(r.x0, tabs.y1, r.x1, tabs.y1 + TOOLS_H);
+    let tools = Rect::new(r.x0, r.y0 + TABS_H, r.x1, r.y0 + TABS_H + TOOLS_H);
     let ty = tools.center().y;
     let tg = Rect::new(r.x0 + 12.0, ty - 13.0, r.x0 + 140.0, ty + 13.0);
     p.rrect_stroke(tg.inset(-0.5), 5.0, 1.0, c.border_default);
@@ -457,12 +480,7 @@ pub fn draw(
             p.circle(Point::new(x + 0.5, top), 2.5, col);
         }
         // playhead, if inside a placement of this clip
-        if let Some(pl) = doc
-            .placements
-            .values()
-            .find(|pl| pl.clip == clip.id && tr.playhead >= pl.start && tr.playhead < pl.start + pl.length)
-        {
-            let rel = Ticks((tr.playhead.0 - pl.start.0 + pl.offset.0).rem_euclid(clip.length.0));
+        if let Some(rel) = clip_playhead(doc, clip, tr) {
             p.vline(rl.x_of(rel), area.y0, rl.vel.y1, c.text_max);
         }
     });

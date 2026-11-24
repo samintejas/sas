@@ -13,7 +13,8 @@ repository follows the architecture doc's crate layout and build phases.
 Phase 1 (headless core) is done; its gate passes single-threaded (see below).
 Phase 2 (shell + arrange) is done: the app opens, plays, mixes and saves a
 project file end to end. Phase 3 (source grid) has started: notes are edited
-in the piano roll and heard while the set plays. The arrange view, piano roll and mixer from
+in the piano roll, the drum sequencer or the euclid generator (with hand edits
+over it) and heard while the set plays. The arrange view, piano roll and mixer from
 the prototype are drawn with vello; the engine plays through the default
 audio device and feeds live per-track meters.
 
@@ -23,6 +24,7 @@ audio device and feeds live per-track meters.
 | `sat-doc` | entities, `Op` reducer, transactions, undo with gestures, project bundle with migrations | done |
 | `sat-engine` | flat schedule, mixer strips, test synth, automation, loop, lock-free commands, schedule swap with state carry-over, offline render | done (single-threaded) |
 | `sat-compile` | document → schedule: track tree, solo, sends, placements and looping clips, live parameter mapping | done |
+| `sat-modules` | built-in source modules: which editor each opens, the euclid generator, the drum kit, the hand-edit layer (toggle, clear, bake) | in progress |
 | `sat-theme` | Dots design tokens (`assets/dots/tokens.json`) generated into a Rust `Palette`, plus spacing, radius and type scales | done |
 | `sat-ui` | vello + parley painter, top bar, arrange view, piano roll, mixer, shared controls (faders, knobs, meters), hit-testing, headless GPU rendering | in progress |
 | `sat-app` | the `sat` binary: winit window, vello surface, cpal output running the engine, mixing gestures with undo, open / save / autosave | in progress |
@@ -82,6 +84,9 @@ cargo run --release -p sat-app -- my.sat  # opens a project bundle
 | piano roll: drag a note, its right edge, the velocity lane | move it (time and pitch), resize it, set velocity; the selection moves together |
 | piano roll: double-click a note, Delete, arrows, Ctrl+A, Esc | delete, delete the selection, nudge by the grid or transpose (Shift: octave), select all, clear |
 | piano roll: select tool, shift-click, the grid and quantise buttons | box-select, add to the selection, change the grid (Alt drags off it), snap starts to the grid |
+| drum seq: click a step, Shift-click it, the page buttons | toggle it, cycle its velocity (normal, accent, ghost), show another bar |
+| euclid: drag a knob, click a trig | change steps, hits, rotation, accents, note, rate, gate or velocity; add or remove a hand edit over the generator |
+| euclid: clear, bake, generative / fixed | drop the hand edits, fix generator and edits into plain steps, switch between them |
 | wheel, Shift+wheel, Ctrl+wheel | scroll tracks (or the mixer), scroll time, zoom |
 
 Edits are autosaved every two minutes, and on quit or before opening another
@@ -96,6 +101,7 @@ including Mesa's lavapipe):
 ```sh
 cargo run --release -p sat-ui --example screenshot -- arrange.png 2         # clip panel
 cargo run --release -p sat-ui --example screenshot -- mixer.png 2 mixer     # mixer panel
+cargo run --release -p sat-ui --example screenshot -- euclid.png 2 euclid   # a clip by name
 ```
 
 ## Listening
