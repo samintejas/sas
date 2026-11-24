@@ -8,7 +8,8 @@
 //!
 //! Phase 1 scope: the instrument is the built-in test synth (a module of
 //! kind [`TEST_SYNTH`] on the instrument grid) and a clip plays the pattern
-//! of the source module wired straight into its dock inlet. Processors, fx
+//! of the source module wired straight into its dock inlet (a generator's
+//! output plus the clip's hand edits; see `sat_modules`). Processors, fx
 //! modules and session launching arrive with later phases.
 
 #![warn(missing_docs)]
@@ -110,16 +111,6 @@ fn mix(mut x: u64) -> u64 {
     x ^ (x >> 31)
 }
 
-/// The notes a clip actually plays: the pattern minus hand-removed notes plus
-/// hand-added ones.
-fn effective_notes(p: &Pattern) -> Vec<Note> {
-    let mut v: Vec<Note> =
-        p.notes.iter().filter(|n| !p.overrides.removed.contains(&(n.start, n.pitch))).copied().collect();
-    v.extend(p.overrides.added.iter().copied());
-    v.sort_by(|a, b| a.start.cmp(&b.start).then(a.pitch.cmp(&b.pitch)));
-    v
-}
-
 /// A note placed on the timeline, in ticks.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TimelineNote {
@@ -138,8 +129,7 @@ pub struct TimelineNote {
 pub fn placement_notes(doc: &Document, p: &Placement) -> Vec<TimelineNote> {
     let Some(clip) = doc.clips.get(&p.clip) else { return Vec::new() };
     let Some(feed) = doc.inlet_cable(clip.id) else { return Vec::new() };
-    let Some(pat) = doc.pattern(feed.from.module, clip.id) else { return Vec::new() };
-    let notes = effective_notes(pat);
+    let notes = sat_modules::effective_notes(doc, feed.from.module, clip.id);
     let len = clip.length.0;
     let (win_start, win_end) = (p.offset.0, p.offset.0 + p.length.0);
     let cycles = if clip.looped { ((win_end + len - 1) / len).max(1) } else { 1 };

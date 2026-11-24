@@ -1,6 +1,8 @@
 //! Renders the demo project to a PNG without a window.
 //!
-//! `cargo run -p sat-ui --example screenshot -- out.png [scale] [clip|mixer]`
+//! `cargo run -p sat-ui --example screenshot -- out.png [scale] [clip|mixer|<clip name>]`
+//!
+//! A clip name selects that clip and shows it in the bottom panel.
 
 use sat_doc::sat_time::Ticks;
 use sat_ui::arrange::{ArrangeState, TransportView};
@@ -9,13 +11,18 @@ use sat_ui::paint::{Fonts, color};
 use sat_ui::panel::PanelView;
 use sat_ui::piano_roll::RollView;
 use sat_ui::shell::{self, Frame, PANEL_H};
+use sat_ui::steps::StepView;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let out = args.next().unwrap_or_else(|| "arrange.png".into());
     let scale: f64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1.0);
-    let panel = if args.next().as_deref() == Some("mixer") { PanelView::Mixer } else { PanelView::Clip };
-    let demo = sat_ui::demo::demo();
+    let view = args.next().unwrap_or_default();
+    let panel = if view == "mixer" { PanelView::Mixer } else { PanelView::Clip };
+    let mut demo = sat_ui::demo::demo();
+    if let Some(c) = demo.doc.clips.values().find(|c| c.name == view) {
+        demo.selected = c.id;
+    }
     let theme = sat_theme::Theme::dark();
     let mut fonts = Fonts::new();
     let mut scene = vello::Scene::new();
@@ -37,6 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         levels: &levels,
         edited: false,
         roll: &RollView::default(),
+        steps: &StepView::default(),
     };
     let t = std::time::Instant::now();
     shell::draw(&mut scene, &mut fonts, &theme, &frame, w, h);

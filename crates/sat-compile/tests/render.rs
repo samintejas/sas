@@ -162,3 +162,49 @@ fn strip_meters_follow_the_signal() {
     // master's meter is the output peak
     assert!((master.take().0 - peak).abs() < 1e-6);
 }
+
+#[test]
+fn euclid_sources_play_their_steps_and_hand_edits() {
+    let mut s = song();
+    let d = s.h.doc();
+    let grid = d.tracks[&s.bass].source_grid.unwrap();
+    let old = d.inlet_cable(s.bass_clip).unwrap().id;
+    let before = render(d, 24_000);
+    let eu = ModuleId::new();
+    let mut params = sat_modules::default_params(sat_modules::EUCLID);
+    params.insert("hits".into(), 3.0);
+    params.insert("steps".into(), 8.0);
+    s.h.apply(
+        "euclid",
+        [
+            Op::AddModule {
+                id: eu,
+                grid,
+                kind: sat_modules::EUCLID.into(),
+                name: "euclid".into(),
+                params,
+                pos: (0.0, 0.0),
+            },
+            Op::Disconnect { id: old },
+            Op::Connect { id: CableId::new(), from: PortRef::new(eu, "notes"), to: Endpoint::Inlet(s.bass_clip) },
+        ],
+    )
+    .unwrap();
+    let starts = |s: &Song| -> Vec<i64> {
+        let d = s.h.doc();
+        let p = d.placements.values().find(|p| p.clip == s.bass_clip).unwrap();
+        let first_bar: Vec<i64> =
+            placement_notes(d, p).iter().map(|n| (n.start.0 - p.start.0) / 240).filter(|t| *t < 16).collect();
+        first_bar
+    };
+    // 3 hits over 8 steps, twice per bar
+    assert_eq!(starts(&s), vec![0, 3, 6, 8, 11, 14]);
+    let note = sat_modules::euclid::Params::of(&s.h.doc().modules[&eu]);
+    let edit = sat_modules::step_note(Ticks::sixteenths(3), note.note_len(), note.note, 0.7);
+    let ops = sat_modules::toggle_step(s.h.doc(), eu, s.bass_clip, edit);
+    s.h.apply("edit", ops).unwrap();
+    assert_eq!(starts(&s), vec![0, 6, 8, 11, 14]);
+    let after = render(s.h.doc(), 24_000);
+    assert!(rms(&after.0) > 0.001);
+    assert_ne!(before, after, "the bass now plays the euclid");
+}

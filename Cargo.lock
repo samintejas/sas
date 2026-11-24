@@ -2521,6 +2521,7 @@ dependencies = [
  "sat-compile",
  "sat-doc",
  "sat-engine",
+ "sat-modules",
  "sat-theme",
  "sat-ui",
  "vello",
@@ -2536,6 +2537,7 @@ dependencies = [
  "im",
  "sat-doc",
  "sat-engine",
+ "sat-modules",
 ]
 
 [[package]]
@@ -2562,6 +2564,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sat-modules"
+version = "0.1.0"
+dependencies = [
+ "im",
+ "sat-doc",
+]
+
+[[package]]
 name = "sat-theme"
 version = "0.1.0"
 dependencies = [
@@ -2584,6 +2594,7 @@ dependencies = [
  "png",
  "pollster 0.4.0",
  "sat-doc",
+ "sat-modules",
  "sat-theme",
  "vello",
 ]

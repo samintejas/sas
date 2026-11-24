@@ -12,6 +12,7 @@ use crate::mixer::{self, Levels, MixerLayout};
 use crate::paint::{Align, Fonts, Painter, TextStyle};
 use crate::panel::PanelView;
 use crate::piano_roll::{self, RollGeom, RollView};
+use crate::steps::{self, StepGeom, StepView};
 
 /// Height of the top bar.
 pub const TOPBAR_H: f64 = 40.0;
@@ -40,6 +41,8 @@ pub struct Frame<'a> {
     pub edited: bool,
     /// Piano roll selection, tool and grid.
     pub roll: &'a RollView,
+    /// Step editor page.
+    pub steps: &'a StepView,
 }
 
 /// Layouts of everything drawn, for hit testing.
@@ -53,6 +56,8 @@ pub struct Drawn {
     pub mixer: Option<MixerLayout>,
     /// The clip panel, when it shows a clip.
     pub roll: Option<RollGeom>,
+    /// The step editor, when the clip's source is a drum seq or euclid.
+    pub steps: Option<StepGeom>,
 }
 
 /// Rectangles of the shell's regions.
@@ -205,10 +210,17 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
     p.rrect_stroke(sl.arrange.inset(0.5), 0.0, 1.0, th.c.border_default);
     let mut ml = None;
     let mut rl = None;
+    let mut sg = None;
     if sl.panel.height() > 0.0 {
         p.clip(sl.panel, |p| match f.panel {
             PanelView::Clip => {
-                rl = piano_roll::draw(p, th, f.doc, f.arrange.selected_clip, f.roll, &f.transport, sl.panel)
+                let clip = f.arrange.selected_clip;
+                match clip.and_then(|c| steps::source(f.doc, c)).map(|(_, e)| e) {
+                    Some(sat_modules::Editor::Drums | sat_modules::Editor::Euclid) => {
+                        sg = steps::draw(p, th, f.doc, clip, f.steps, &f.transport, sl.panel)
+                    }
+                    _ => rl = piano_roll::draw(p, th, f.doc, clip, f.roll, &f.transport, sl.panel),
+                }
             }
             PanelView::Mixer => {
                 ml = Some(mixer::draw(p, th, f.doc, f.arrange.selected_track, f.levels, f.mixer_scroll, sl.panel))
@@ -216,5 +228,5 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
         });
         p.rrect_stroke(sl.panel.inset(0.5), 0.0, 1.0, th.c.border_default);
     }
-    Drawn { shell: sl, arrange: al, mixer: ml, roll: rl }
+    Drawn { shell: sl, arrange: al, mixer: ml, roll: rl, steps: sg }
 }

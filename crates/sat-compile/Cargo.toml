@@ -10,6 +10,7 @@ rust-version.workspace = true
 [dependencies]
 sat-doc.workspace = true
 sat-engine.workspace = true
+sat-modules.workspace = true
 im.workspace = true
 
 [dev-dependencies]
