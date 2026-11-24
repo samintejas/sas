@@ -10,8 +10,9 @@
 //! [`build_patch`]), else its drum synth, else the old built-in test synth
 //! (a module of kind [`TEST_SYNTH`]). A clip plays the pattern
 //! of the source module wired straight into its dock inlet (a generator's
-//! output plus the clip's hand edits; see `sat_modules`). Processors, fx
-//! modules and session launching arrive with later phases.
+//! output plus the clip's hand edits; see `sat_modules`). Every track's fx
+//! grid (see [`build_fx`]) runs between its sound and its strip; pre-fader
+//! sends tap after it. Session launching arrives with a later phase.
 
 #![warn(missing_docs)]
 
@@ -21,9 +22,9 @@ use std::sync::Arc;
 use sat_doc::sat_time::{TempoMap, Ticks};
 use sat_doc::*;
 use sat_engine::{
-    AutoCurve, AutoPoint, Automation, Command, Instrument, MAX_MODS, MAX_PARAMS, MAX_REGS, Meter, NONE, NodeId,
-    NodeKind, NoteEvent, Param, Patch, Schedule, ScheduleBuilder, Strip, Synth, SynthParam, VKind, VModule, Wave,
-    db_to_gain,
+    AutoCurve, AutoPoint, Automation, Command, FX_PARAMS, Fx, FxKind, FxModule, Instrument, MAX_FX, MAX_FX_REGS,
+    MAX_MODS, MAX_PARAMS, MAX_REGS, Meter, NONE, NodeId, NodeKind, NoteEvent, Param, Patch, Schedule, ScheduleBuilder,
+    Strip, Synth, SynthParam, VKind, VModule, Wave, db_to_gain,
 };
 use sat_modules::instrument as ins;
 
@@ -101,9 +102,11 @@ impl Compiled {
 const SALT_SYNTH: u128 = 0x5a7_0001;
 const SALT_STRIP: u128 = 0x5a7_0002;
 const SALT_BUS: u128 = 0x5a7_0003;
+const SALT_FX: u128 = 0x5a7_0004;
 
 fn nid(t: TrackId, salt: u128) -> NodeId {
-    NodeId(t.0.as_u128() ^ salt)
+    // salts sit in the middle bits, clear of ids that differ only in their low bits
+    NodeId(t.0.as_u128() ^ (salt << 64))
 }
 
 /// Deterministic hash for note chance (splitmix64).
@@ -226,13 +229,18 @@ fn param_values(m: &Module) -> [f32; MAX_PARAMS] {
     v
 }
 
-/// Builds a voice patch from the patch modules on `grid`, in dependency
-/// order (modules caught in a cycle are left out), with each module's slot.
-pub fn build_patch(doc: &Document, grid: GridId) -> Option<(Patch, Vec<ModuleId>)> {
-    let mods: Vec<&Module> = doc.modules_on(grid).filter(|m| vkind(&m.kind).is_some()).collect();
-    if !mods.iter().any(|m| m.kind == ins::VOICE_OUT) {
-        return None;
-    }
+/// The modules of a grid that `keep` accepts, in dependency order (modules
+/// caught in a cycle are left out), with a register for each connected
+/// output: (module, input registers, output registers) in port order.
+#[allow(clippy::type_complexity)]
+fn graph(
+    doc: &Document,
+    grid: GridId,
+    keep: impl Fn(&str) -> bool,
+    max_mods: usize,
+    max_regs: usize,
+) -> Vec<(&Module, Vec<u8>, Vec<u8>)> {
+    let mods: Vec<&Module> = doc.modules_on(grid).filter(|m| keep(&m.kind)).collect();
     let idx = |id: ModuleId| mods.iter().position(|m| m.id == id);
     // edges: (from module, from port) -> (to module, to port)
     let edges: Vec<(usize, &str, usize, &str)> = doc
@@ -262,36 +270,123 @@ pub fn build_patch(doc: &Document, grid: GridId) -> Option<(Patch, Vec<ModuleId>
             }
         }
     }
-    order.truncate(MAX_MODS);
-    // a register per connected output
+    order.truncate(max_mods);
     let mut regs: HashMap<(usize, &str), u8> = HashMap::new();
     for (a, pa, b, _) in &edges {
-        if order.contains(a) && order.contains(b) && !regs.contains_key(&(*a, *pa)) && regs.len() < MAX_REGS {
+        if order.contains(a) && order.contains(b) && !regs.contains_key(&(*a, *pa)) && regs.len() < max_regs {
             let r = regs.len() as u8;
             regs.insert((*a, *pa), r);
         }
     }
+    order
+        .iter()
+        .map(|&i| {
+            let m = mods[i];
+            let ports = sat_modules::ports(&m.kind);
+            let ins = ports
+                .iter()
+                .filter(|p| p.input)
+                .map(|p| {
+                    edges
+                        .iter()
+                        .find(|(a, _, b, pb)| *b == i && *pb == p.key && order.contains(a))
+                        .and_then(|(a, pa, _, _)| regs.get(&(*a, *pa)).copied())
+                        .unwrap_or(NONE)
+                })
+                .collect();
+            let outs =
+                ports.iter().filter(|p| !p.input).map(|p| regs.get(&(i, p.key)).copied().unwrap_or(NONE)).collect();
+            (m, ins, outs)
+        })
+        .collect()
+}
+
+/// Builds a voice patch from the patch modules on `grid`, in dependency
+/// order (modules caught in a cycle are left out), with each module's slot.
+pub fn build_patch(doc: &Document, grid: GridId) -> Option<(Patch, Vec<ModuleId>)> {
+    if !doc.modules_on(grid).any(|m| m.kind == ins::VOICE_OUT) {
+        return None;
+    }
     let mut out = Vec::new();
     let mut slots = Vec::new();
-    for &i in &order {
-        let m = mods[i];
+    for (m, i, o) in graph(doc, grid, |k| vkind(k).is_some(), MAX_MODS, MAX_REGS) {
         let mut vm = VModule::new(vkind(&m.kind)?);
-        let ports = sat_modules::ports(&m.kind);
-        for (j, p) in ports.iter().filter(|p| p.input).take(4).enumerate() {
-            vm.ins[j] = edges
-                .iter()
-                .find(|(a, _, b, pb)| *b == i && *pb == p.key && order.contains(a))
-                .and_then(|(a, pa, _, _)| regs.get(&(*a, *pa)).copied())
-                .unwrap_or(NONE);
+        for (j, r) in i.iter().take(4).enumerate() {
+            vm.ins[j] = *r;
         }
-        for (j, p) in ports.iter().filter(|p| !p.input).take(3).enumerate() {
-            vm.outs[j] = regs.get(&(i, p.key)).copied().unwrap_or(NONE);
+        for (j, r) in o.iter().take(3).enumerate() {
+            vm.outs[j] = *r;
         }
         vm.params = param_values(m);
         out.push(vm);
         slots.push(m.id);
     }
     Some((Patch { mods: out }, slots))
+}
+
+fn fx_kind(kind: &str) -> Option<FxKind> {
+    use sat_modules::fx as f;
+    Some(match kind {
+        f::FX_IN => FxKind::In,
+        f::FX_OUT => FxKind::Out,
+        f::EQ => FxKind::Eq,
+        f::COMP => FxKind::Comp,
+        f::DELAY => FxKind::Delay,
+        f::REVERB => FxKind::Reverb,
+        f::DRIVE => FxKind::Drive,
+        f::LIMITER => FxKind::Limiter,
+        f::FX_FILTER => FxKind::Filter,
+        f::SPLIT => FxKind::Split,
+        f::MERGE => FxKind::Merge,
+        _ => return None,
+    })
+}
+
+/// Builds the fx chain of `grid`, in dependency order, with each module's
+/// slot. `None` (audio passes through) unless the grid has both an `in` and
+/// an `out`.
+pub fn build_fx(doc: &Document, grid: GridId) -> Option<(Vec<FxModule>, Vec<ModuleId>)> {
+    use sat_modules::fx as f;
+    let has = |k: &str| doc.modules_on(grid).any(|m| m.kind == k);
+    if !has(f::FX_IN) || !has(f::FX_OUT) {
+        return None;
+    }
+    let mut out = Vec::new();
+    let mut slots = Vec::new();
+    for (m, i, o) in graph(doc, grid, |k| fx_kind(k).is_some(), MAX_FX, MAX_FX_REGS) {
+        let mut fm = FxModule::new(fx_kind(&m.kind)?, m.id.0.as_u128() as u64);
+        for (j, r) in i.iter().take(2).enumerate() {
+            fm.ins[j] = *r;
+        }
+        for (j, r) in o.iter().take(2).enumerate() {
+            fm.outs[j] = *r;
+        }
+        let v = param_values(m);
+        fm.params[..FX_PARAMS - 1].copy_from_slice(&v[..FX_PARAMS - 1]);
+        fm.params[FX_PARAMS - 1] = if f::bypassed(m) { 1.0 } else { 0.0 };
+        out.push(fm);
+        slots.push(m.id);
+    }
+    Some((out, slots))
+}
+
+/// Live parameter targets of the modules in `slots`: every spec parameter,
+/// plus the bypass switch of fx modules.
+fn module_targets(doc: &Document, slots: &[ModuleId]) -> Vec<(ParamTarget, Param)> {
+    let mut targets = Vec::new();
+    for (slot, id) in slots.iter().enumerate() {
+        let m = &doc.modules[id];
+        let slot = slot as u8;
+        for (index, s) in sat_modules::params_of(&m.kind).iter().take(MAX_PARAMS).enumerate() {
+            let target = ParamTarget::Module { module: *id, param: s.key.into() };
+            targets.push((target, Param::Module { slot, index: index as u8 }));
+        }
+        if sat_modules::fx::bypassable(&m.kind) {
+            let target = ParamTarget::Module { module: *id, param: sat_modules::fx::BYPASS.into() };
+            targets.push((target, Param::Module { slot, index: sat_modules::fx::BYPASS_INDEX }));
+        }
+    }
+    targets
 }
 
 /// The instrument a track plays its notes through, and where each module
@@ -303,16 +398,7 @@ fn build_instrument(
 ) -> Option<(NodeKind, Vec<(ParamTarget, Param)>)> {
     let g = track.instrument_grid?;
     if let Some((patch, slots)) = build_patch(doc, g) {
-        let mut targets = Vec::new();
-        for (slot, id) in slots.iter().enumerate() {
-            let m = &doc.modules[id];
-            for (index, s) in sat_modules::params_of(&m.kind).iter().take(MAX_PARAMS).enumerate() {
-                targets.push((
-                    ParamTarget::Module { module: *id, param: s.key.into() },
-                    Param::Module { slot: slot as u8, index: index as u8 },
-                ));
-            }
-        }
+        let targets = module_targets(doc, &slots);
         return Some((NodeKind::Instrument(Box::new(Instrument::patch(events, patch))), targets));
     }
     if let Some(m) = doc.modules_on(g).find(|m| m.kind == ins::DRUM_SYNTH) {
@@ -382,6 +468,18 @@ pub fn compile(doc: &Document, sample_rate: f64, max_block: usize) -> Result<Com
                 })
             }
             TrackKind::Group | TrackKind::Return | TrackKind::Master => Some(nid(t, SALT_BUS)),
+        };
+        // the fx grid, between the track's sound and its strip
+        let pre = match (pre, tr.fx_grids.front().and_then(|g| build_fx(doc, *g))) {
+            (Some(src), Some((chain, slots))) => {
+                let id = nid(t, SALT_FX);
+                for (target, param) in module_targets(doc, &slots) {
+                    params.insert(target, (id, param, Conv::Same));
+                }
+                b.node(id, NodeKind::Fx(Box::new(Fx::new(chain, sample_rate, max_block))), vec![(src, 1.0)]);
+                Some(id)
+            }
+            (pre, _) => pre,
         };
         let solo_muted = audible.as_ref().is_some_and(|a| !a.contains(&t));
         let meter = meters.entry(t).or_default().clone();

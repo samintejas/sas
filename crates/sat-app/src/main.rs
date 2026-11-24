@@ -787,6 +787,7 @@ impl App {
                 Some(ViewButton::Arrange) => self.view = MainView::Arrange,
                 Some(ViewButton::SourceGrid) => self.open_grid(self.arrange.selected_track, GridKind::Source),
                 Some(ViewButton::Instrument) => self.open_grid(self.arrange.selected_track, GridKind::Instrument),
+                Some(ViewButton::Fx) => self.open_grid(self.arrange.selected_track, GridKind::Fx),
                 _ => {}
             }
             return;
@@ -961,9 +962,15 @@ impl App {
             GridHit::AddModule => self.grid.menu = !self.grid.menu,
             GridHit::MenuItem(kind) => {
                 let doc = self.history.doc();
-                let pos = grid::free_pos(doc, l.grid);
-                let (id, op) = sat_modules::add_module(doc, l.grid, kind, pos);
-                self.edit("add module", vec![op]);
+                let (id, ops) = if l.kind == GridKind::Fx {
+                    // effects go into the chain, just before out
+                    sat_modules::fx::insert(doc, l.grid, kind)
+                } else {
+                    let pos = grid::free_pos(doc, l.grid);
+                    let (id, op) = sat_modules::add_module(doc, l.grid, kind, pos);
+                    (id, vec![op])
+                };
+                self.edit("add module", ops);
                 self.grid.selected = Some(id);
                 self.grid.menu = false;
             }
@@ -1000,6 +1007,14 @@ impl App {
                 self.begin_drag(target, Axis::Horizontal { travel }, double);
             }
             GridHit::Module(id) => self.grid.selected = Some(id),
+            GridHit::Bypass(id) => {
+                let on = self.history.doc().modules.get(&id).is_some_and(sat_modules::fx::bypassed);
+                let target = ParamTarget::Module { module: id, param: sat_modules::fx::BYPASS.into() };
+                self.edit(
+                    if on { "enable" } else { "bypass" },
+                    vec![Op::SetValue { target, value: if on { 0.0 } else { 1.0 } }],
+                );
+            }
             GridHit::Inlet(clip) => {
                 // pick the wire up off the inlet; dropping it elsewhere rewires or unplugs it
                 if let Some(k) = self.history.doc().inlet_cable(clip).cloned() {

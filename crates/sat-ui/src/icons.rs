@@ -46,6 +46,8 @@ pub enum Icon {
     Pointer,
     /// Waveform pulse.
     Pulse,
+    /// Power switch (bypass).
+    Power,
 }
 
 /// Draws `icon` centred in `r`.
@@ -147,6 +149,17 @@ pub fn draw(p: &mut Painter<'_>, icon: Icon, r: Rect, c: Rgba) {
                 None,
                 &b,
             );
+        }
+        Icon::Power => {
+            // an open ring with a bar through the gap
+            let pts: Vec<Point> = (0..=20)
+                .map(|k| {
+                    let a = -std::f64::consts::FRAC_PI_2 + 0.65 + k as f64 / 20.0 * (std::f64::consts::TAU - 1.3);
+                    pt(0.55 * a.cos(), 0.55 * a.sin())
+                })
+                .collect();
+            p.polyline(&pts, w, c);
+            p.line(pt(0.0, -0.7), pt(0.0, -0.1), w, c);
         }
         Icon::Pulse => {
             p.polyline(

@@ -1,6 +1,6 @@
 //! Renders the demo project to a PNG without a window.
 //!
-//! `cargo run -p sat-ui --example screenshot -- out.png [scale] [clip|mixer|<clip name>] [grid|instrument]`
+//! `cargo run -p sat-ui --example screenshot -- out.png [scale] [clip|mixer|<clip name>] [grid|instrument|fx]`
 //!
 //! A clip name selects that clip and shows it in the bottom panel. A fourth
 //! argument `grid` shows the selected clip's source grid instead of the arrangement.
@@ -34,6 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let view = match args.next().as_deref() {
         Some("grid") => MainView::Grid(demo.doc.tracks[&demo.doc.clips[&demo.selected].track].source_grid.unwrap()),
+        Some("fx") => MainView::Grid(demo.doc.tracks[&demo.doc.clips[&demo.selected].track].fx_grids[0]),
         Some("instrument") => {
             MainView::Grid(demo.doc.tracks[&demo.doc.clips[&demo.selected].track].instrument_grid.unwrap())
         }
