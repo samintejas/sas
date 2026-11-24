@@ -1,12 +1,13 @@
 //! The app shell: top bar, arrange view and bottom panel.
 
-use sat_doc::Document;
 use sat_doc::sat_time::{PPQ, Ticks};
+use sat_doc::{Document, TrackId};
 use sat_theme::{Rgba, Theme};
 use vello::Scene;
 use vello::kurbo::Rect;
 
 use crate::arrange::{self, ArrangeLayout, ArrangeState, TransportView};
+use crate::grid::{self, GridLayout, GridView};
 use crate::icons::{self, Icon};
 use crate::mixer::{self, Levels, MixerLayout};
 use crate::paint::{Align, Fonts, Painter, TextStyle};
@@ -18,6 +19,42 @@ use crate::steps::{self, StepGeom, StepView};
 pub const TOPBAR_H: f64 = 40.0;
 /// Default height of the bottom panel.
 pub const PANEL_H: f64 = 306.0;
+
+/// What the main area shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MainView {
+    /// The arrangement.
+    #[default]
+    Arrange,
+    /// A track's source grid.
+    SourceGrid(TrackId),
+}
+
+/// The view buttons in the top bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewButton {
+    /// Session view (later).
+    Session,
+    /// Arrange view.
+    Arrange,
+    /// The selected track's source grid.
+    SourceGrid,
+    /// Instrument grid (later).
+    Instrument,
+    /// Fx grid (later).
+    Fx,
+}
+
+/// Where the top bar's view buttons are.
+pub fn view_buttons(topbar: Rect) -> [(ViewButton, Rect); 5] {
+    use ViewButton::*;
+    let mut x = 160.0;
+    [Session, Arrange, SourceGrid, Instrument, Fx].map(|b| {
+        let r = Rect::new(x, topbar.y0, x + 40.0, topbar.y1);
+        x += if b == Arrange { 52.0 } else { 40.0 };
+        (b, r)
+    })
+}
 
 /// Everything the shell needs to draw a frame.
 pub struct Frame<'a> {
@@ -43,6 +80,10 @@ pub struct Frame<'a> {
     pub roll: &'a RollView,
     /// Step editor page.
     pub steps: &'a StepView,
+    /// What the main area shows.
+    pub view: MainView,
+    /// Source grid pan, selection and menu.
+    pub grid: &'a GridView,
 }
 
 /// Layouts of everything drawn, for hit testing.
@@ -58,6 +99,8 @@ pub struct Drawn {
     pub roll: Option<RollGeom>,
     /// The step editor, when the clip's source is a drum seq or euclid.
     pub steps: Option<StepGeom>,
+    /// The source grid, when shown.
+    pub grid: Option<GridLayout>,
 }
 
 /// Rectangles of the shell's regions.
@@ -130,17 +173,19 @@ fn topbar(p: &mut Painter<'_>, th: &Theme, f: &Frame<'_>, r: Rect) {
     if f.edited {
         p.circle(vello::kurbo::Point::new(76.0 + nw + 8.0, cy), 3.0, c.text_secondary);
     }
-    let mut x = 160.0;
-    for (i, ic) in [Icon::Grid, Icon::Lines, Icon::Panel, Icon::Gear, Icon::Sliders].iter().enumerate() {
-        let br = Rect::new(x, r.y0, x + 40.0, r.y1);
-        icons::draw(p, *ic, br.inset(-12.0), if i == 1 { c.text_max } else { c.text_secondary });
-        if i == 1 {
+    let active = match f.view {
+        MainView::Arrange => ViewButton::Arrange,
+        MainView::SourceGrid(_) => ViewButton::SourceGrid,
+    };
+    let icons = [Icon::Grid, Icon::Lines, Icon::Panel, Icon::Gear, Icon::Sliders];
+    for ((b, br), ic) in view_buttons(r).into_iter().zip(icons) {
+        let on = b == active;
+        icons::draw(p, ic, br.inset(-12.0), if on { c.text_max } else { c.text_secondary });
+        if on {
             p.rect(Rect::new(br.x0 + 4.0, r.y1 - 2.0, br.x1 - 4.0, r.y1), c.accent_primary);
         }
-        x += 40.0;
-        if i == 1 {
-            p.vline(x + 6.0, cy - 9.0, cy + 9.0, c.border_default);
-            x += 12.0;
+        if b == ViewButton::Arrange {
+            p.vline(br.x1 + 6.0, cy - 9.0, cy + 9.0, c.border_default);
         }
     }
     // transport
@@ -206,7 +251,15 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
     p.rect(Rect::new(0.0, 0.0, w, h), th.c.bg_base);
     topbar(&mut p, th, f, sl.topbar);
     let al = ArrangeLayout::new(f.doc, f.arrange, sl.arrange);
-    p.clip(sl.arrange, |p| arrange::draw(p, th, f.doc, f.arrange, &f.transport, f.levels, &al));
+    let mut gl = None;
+    match f.view {
+        MainView::SourceGrid(t) => {
+            p.clip(sl.arrange, |p| gl = grid::draw(p, th, f.doc, t, f.grid, f.arrange.selected_clip, sl.arrange));
+        }
+        MainView::Arrange => {
+            p.clip(sl.arrange, |p| arrange::draw(p, th, f.doc, f.arrange, &f.transport, f.levels, &al));
+        }
+    }
     p.rrect_stroke(sl.arrange.inset(0.5), 0.0, 1.0, th.c.border_default);
     let mut ml = None;
     let mut rl = None;
@@ -228,5 +281,5 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
         });
         p.rrect_stroke(sl.panel.inset(0.5), 0.0, 1.0, th.c.border_default);
     }
-    Drawn { shell: sl, arrange: al, mixer: ml, roll: rl, steps: sg }
+    Drawn { shell: sl, arrange: al, mixer: ml, roll: rl, steps: sg, grid: gl }
 }

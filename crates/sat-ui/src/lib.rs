@@ -11,6 +11,7 @@ pub mod arrange;
 pub mod controls;
 pub mod demo;
 pub mod gfx;
+pub mod grid;
 pub mod icons;
 pub mod mixer;
 pub mod paint;
