@@ -1,0 +1,18 @@
+[package]
+name = "sat-time"
+description = "Musical time for sat: ticks, tempo map, time signatures, quantisation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true, optional = true }
+
+[features]
+default = ["serde"]
+serde = ["dep:serde"]
+
+[lints]
+workspace = true
