@@ -47,10 +47,15 @@ pub struct Gpu {
 impl Gpu {
     /// Creates a device without a window.
     pub fn headless() -> Result<Gpu, GfxError> {
+        Gpu::from_adapter(&Gpu::headless_adapter()?)
+    }
+
+    /// Picks the adapter [`Gpu::headless`] would use, without creating a device,
+    /// so callers can inspect it first (for example to skip software rasterisers).
+    pub fn headless_adapter() -> Result<wgpu::Adapter, GfxError> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-            .map_err(|e| GfxError::NoAdapter(e.to_string()))?;
-        Gpu::from_adapter(&adapter)
+        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+            .map_err(|e| GfxError::NoAdapter(e.to_string()))
     }
 
     /// Creates a device and renderer on `adapter`.

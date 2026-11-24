@@ -1,7 +1,7 @@
 //! Renders the shell offscreen and checks pixels.
 //!
-//! Needs a GPU adapter; a software one (Mesa lavapipe) is enough. Without one
-//! the test is skipped, unless `SAT_REQUIRE_GPU` is set (CI sets it).
+//! Needs a hardware GPU adapter, or any adapter when `SAT_REQUIRE_GPU` is set
+//! (ubuntu CI sets it and uses Mesa lavapipe). Otherwise the test is skipped.
 
 use sat_doc::sat_time::Ticks;
 use sat_ui::arrange::{ArrangeState, TransportView};
@@ -9,15 +9,29 @@ use sat_ui::demo::{bars, demo};
 use sat_ui::gfx::Gpu;
 use sat_ui::paint::{Fonts, color};
 use sat_ui::shell::{self, Frame, PANEL_H};
+use vello::wgpu;
 
 fn gpu() -> Option<Gpu> {
-    match Gpu::headless() {
+    let required = std::env::var_os("SAT_REQUIRE_GPU").is_some_and(|v| !v.is_empty());
+    let skip = |why: String| {
+        assert!(!required, "{why}");
+        eprintln!("skipping: {why}");
+        None
+    };
+    let adapter = match Gpu::headless_adapter() {
+        Ok(a) => a,
+        Err(e) => return skip(e.to_string()),
+    };
+    // Unknown software rasterisers (e.g. on GPU-less Windows CI runners) can
+    // crash the process inside the driver, which a test cannot catch. They
+    // run only where required; ubuntu CI requires Mesa lavapipe.
+    let info = adapter.get_info();
+    if info.device_type == wgpu::DeviceType::Cpu && !required {
+        return skip(format!("software adapter {} ({:?})", info.name, info.backend));
+    }
+    match Gpu::from_adapter(&adapter) {
         Ok(g) => Some(g),
-        Err(e) if std::env::var_os("SAT_REQUIRE_GPU").is_none_or(|v| v.is_empty()) => {
-            eprintln!("skipping: {e}");
-            None
-        }
-        Err(e) => panic!("{e}"),
+        Err(e) => skip(e.to_string()),
     }
 }
 
