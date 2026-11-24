@@ -177,6 +177,20 @@ impl Painter<'_> {
         self.scene.stroke(&Stroke::new(width), Affine::IDENTITY, color(c), None, &p);
     }
 
+    /// A cable from `a` to `b`: a cubic curve that leaves `a` to the right
+    /// and arrives at `b` from the left, dashed when `dashed`.
+    pub fn cable(&mut self, a: Point, b: Point, width: f64, c: Rgba, dashed: bool) {
+        let k = ((b.x - a.x).abs() * 0.5).max(40.0);
+        let mut p = BezPath::new();
+        p.move_to(a);
+        p.curve_to(Point::new(a.x + k, a.y), Point::new(b.x - k, b.y), b);
+        let mut st = Stroke::new(width).with_caps(vello::kurbo::Cap::Round);
+        if dashed {
+            st = st.with_dashes(0.0, [4.0, 4.0]);
+        }
+        self.scene.stroke(&st, Affine::IDENTITY, color(c), None, &p);
+    }
+
     /// A filled path.
     pub fn path(&mut self, p: &BezPath, c: Rgba) {
         self.scene.fill(Fill::NonZero, Affine::IDENTITY, color(c), None, p);

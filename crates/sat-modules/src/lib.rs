@@ -27,6 +27,76 @@ pub const EUCLID: &str = "euclid";
 /// The parameter that marks a generator as baked into a fixed pattern.
 pub const FIXED: &str = "fixed";
 
+/// What flows through a port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortKind {
+    /// Note events.
+    Notes,
+    /// Audio.
+    Audio,
+    /// A control signal.
+    Mod,
+}
+
+/// A port on a module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PortSpec {
+    /// Port key, as cables name it.
+    pub key: &'static str,
+    /// What flows through it.
+    pub kind: PortKind,
+    /// An input (left side) rather than an output (right side).
+    pub input: bool,
+}
+
+/// The notes output every source module has.
+pub const NOTES_OUT: PortSpec = PortSpec { key: "notes", kind: PortKind::Notes, input: false };
+
+/// The ports of a module kind.
+pub fn ports(kind: &str) -> &'static [PortSpec] {
+    match kind {
+        PIANO_ROLL | DRUM_SEQ | EUCLID => &[NOTES_OUT],
+        _ => &[],
+    }
+}
+
+/// Source modules that can be added to a source grid: kind and label.
+pub const SOURCES: [(&str, &str); 3] = [(PIANO_ROLL, "piano roll"), (DRUM_SEQ, "drum seq"), (EUCLID, "euclid")];
+
+/// The label of a module kind.
+pub fn label_of(kind: &str) -> &str {
+    SOURCES.iter().find(|(k, _)| *k == kind).map_or(kind, |(_, l)| l)
+}
+
+/// An op that adds a source module of `kind` to `grid` at `pos`, named after
+/// its kind and numbered when the grid already has one ("euclid 2").
+pub fn add_module(doc: &Document, grid: GridId, kind: &str, pos: (f32, f32)) -> (ModuleId, Op) {
+    let label = label_of(kind);
+    let taken: Vec<&str> = doc.modules_on(grid).map(|m| m.name.as_str()).collect();
+    let name = if !taken.contains(&label) {
+        label.to_string()
+    } else {
+        (2..).map(|i| format!("{label} {i}")).find(|n| !taken.contains(&n.as_str())).unwrap()
+    };
+    let id = ModuleId::new();
+    (id, Op::AddModule { id, grid, kind: kind.into(), name, params: default_params(kind), pos })
+}
+
+/// Ops that wire `module`'s notes output into `clip`'s inlet, replacing
+/// whatever fed it.
+pub fn wire(doc: &Document, module: ModuleId, clip: ClipId) -> Vec<Op> {
+    let from = PortRef::new(module, NOTES_OUT.key);
+    let mut ops = Vec::new();
+    if let Some(old) = doc.inlet_cable(clip) {
+        if old.from == from {
+            return ops;
+        }
+        ops.push(Op::Disconnect { id: old.id });
+    }
+    ops.push(Op::Connect { id: CableId::new(), from, to: Endpoint::Inlet(clip) });
+    ops
+}
+
 /// Which editor the bottom panel opens for a source module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Editor {
@@ -263,6 +333,24 @@ mod tests {
         h.apply("gen", unbake(m)).unwrap();
         assert_eq!(starts(&effective_notes(h.doc(), m, c)), vec![0]);
         assert!(clear_edits(h.doc(), m, c).is_empty());
+    }
+
+    #[test]
+    fn modules_are_numbered_and_wiring_replaces_the_feed() {
+        let (mut h, m, c) = setup(PIANO_ROLL);
+        let grid = h.doc().modules[&m].grid;
+        let (e, op) = add_module(h.doc(), grid, EUCLID, (200.0, 0.0));
+        h.apply("add", [op]).unwrap();
+        let (e2, op) = add_module(h.doc(), grid, EUCLID, (400.0, 0.0));
+        h.apply("add", [op]).unwrap();
+        assert_eq!(h.doc().modules[&e].name, "euclid");
+        assert_eq!(h.doc().modules[&e2].name, "euclid 2");
+        assert_eq!(ports(EUCLID), &[NOTES_OUT]);
+        h.apply("wire", wire(h.doc(), e, c)).unwrap();
+        assert_eq!(h.doc().inlet_cable(c).unwrap().from.module, e);
+        assert_eq!(starts(&effective_notes(h.doc(), e, c)), vec![0, 4, 8, 12]);
+        assert!(wire(h.doc(), e, c).is_empty(), "already wired");
+        assert_eq!(h.doc().cables.len(), 1);
     }
 
     #[test]

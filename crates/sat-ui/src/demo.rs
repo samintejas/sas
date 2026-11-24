@@ -30,6 +30,17 @@ impl B {
         self.track_with(name, color, parent, synth, wave, sat_modules::PIANO_ROLL, "piano roll")
     }
 
+    /// The grid a module was added to.
+    fn grid_of(&self, module: ModuleId) -> GridId {
+        self.ops
+            .iter()
+            .find_map(|op| match op {
+                Op::AddModule { id, grid, .. } if *id == module => Some(*grid),
+                _ => None,
+            })
+            .expect("module added")
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn track_with(
         &mut self,
@@ -166,6 +177,17 @@ pub fn demo() -> Demo {
         n(30, 2, 47, 0.6),
     ];
     let selected = b.clip(bass, bseq, "bass b", 1, 2, bass_b, 4, 8);
+    // a second source on the bass grid, not wired to a clip yet
+    let (_, op) = {
+        let grid = b.grid_of(bseq);
+        let id = ModuleId::new();
+        let mut params = sat_modules::default_params(sat_modules::EUCLID);
+        params.insert("hits".into(), 5.0);
+        params.insert("note".into(), 45.0);
+        let name = "euclid".to_string();
+        (id, Op::AddModule { id, grid, kind: sat_modules::EUCLID.into(), name, params, pos: (220.0, 70.0) })
+    };
+    b.ops.push(op);
     let bass_c = vec![n(0, 2, 45, 0.8), n(2, 2, 52, 0.6), n(6, 2, 48, 0.7), n(10, 4, 43, 0.8)];
     b.clip(bass, bseq, "bass c", 1, 1, bass_c, 12, 4);
 

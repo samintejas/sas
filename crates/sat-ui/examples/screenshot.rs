@@ -2,7 +2,8 @@
 //!
 //! `cargo run -p sat-ui --example screenshot -- out.png [scale] [clip|mixer|<clip name>]`
 //!
-//! A clip name selects that clip and shows it in the bottom panel.
+//! A clip name selects that clip and shows it in the bottom panel. A fourth
+//! argument `grid` shows the selected clip's source grid instead of the arrangement.
 
 use sat_doc::sat_time::Ticks;
 use sat_ui::arrange::{ArrangeState, TransportView};
@@ -10,7 +11,7 @@ use sat_ui::gfx::{Gpu, scaled};
 use sat_ui::paint::{Fonts, color};
 use sat_ui::panel::PanelView;
 use sat_ui::piano_roll::RollView;
-use sat_ui::shell::{self, Frame, PANEL_H};
+use sat_ui::shell::{self, Frame, MainView, PANEL_H};
 use sat_ui::steps::StepView;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -31,6 +32,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         selected_track: Some(demo.doc.clips[&demo.selected].track),
         ..Default::default()
     };
+    let view = match args.next().as_deref() {
+        Some("grid") => MainView::SourceGrid(demo.doc.clips[&demo.selected].track),
+        _ => MainView::Arrange,
+    };
     let (w, h) = (1440.0, 900.0);
     let levels = sat_ui::demo::levels(&demo.doc);
     let frame = Frame {
@@ -45,6 +50,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         edited: false,
         roll: &RollView::default(),
         steps: &StepView::default(),
+        view,
+        grid: &sat_ui::grid::GridView::default(),
     };
     let t = std::time::Instant::now();
     shell::draw(&mut scene, &mut fonts, &theme, &frame, w, h);

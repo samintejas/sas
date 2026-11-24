@@ -15,6 +15,10 @@
 //!   (normal, accent, ghost); page buttons pick the bar shown
 //! - euclid: drag the knobs; click a trig to add or remove a hand edit over the
 //!   generator; clear drops the edits, bake fixes everything into steps
+//! - source grid (top bar button or "open source grid"): drag module headers to
+//!   move them, drag from a notes out to a clip's inlet to wire it, drag a wire
+//!   off an inlet to rewire or unplug it; + module, + clip; delete removes the
+//!   selected module
 //! - m / s: mute / solo the selected track; ctrl+z / ctrl+shift+z: undo / redo
 //! - ctrl+o open (or drop a .sat folder on the window), ctrl+s save, ctrl+shift+s save as,
 //!   ctrl+n new, ctrl+q quit
@@ -32,19 +36,23 @@ use std::time::{Duration, Instant};
 
 use sat_compile::Compiled;
 use sat_doc::sat_time::Ticks;
-use sat_doc::{ClipId, Document, History, Note, Op, ParamTarget, TrackFlag, TrackId, TrackKind};
+use sat_doc::{
+    CableId, ClipId, Document, Endpoint, History, ModuleId, Note, Op, ParamTarget, PortRef, TrackFlag, TrackId,
+    TrackKind,
+};
 use sat_engine::{Command, EngineHandle};
 use sat_modules::{Editor, drum, euclid};
 use sat_ui::arrange::{ArrangeLayout, ArrangeState, Hit, TransportView, header_controls};
 use sat_ui::controls::{self, SILENT_DB};
+use sat_ui::grid::{self, GridHit, GridLayout, GridView};
 use sat_ui::mixer::{Knob, Levels, MixHit, MixerLayout};
 use sat_ui::paint::{Fonts, color};
 use sat_ui::panel::{self, PanelView, Tab};
-use sat_ui::piano_roll::{RollGeom, RollHit, RollView, Tool, clip_notes, next_snap};
+use sat_ui::piano_roll::{self, RollGeom, RollHit, RollView, Tool, clip_notes, next_snap};
 use sat_ui::roll_edit::{self, Edited};
-use sat_ui::shell::{self, Frame, PANEL_H, ShellLayout};
+use sat_ui::shell::{self, Frame, MainView, PANEL_H, ShellLayout, ViewButton};
 use sat_ui::steps::{StepGeom, StepHit, StepView};
-use vello::kurbo::{Point, Rect};
+use vello::kurbo::{Point, Rect, Vec2};
 use vello::util::{RenderContext, RenderSurface};
 use vello::{AaConfig, RenderParams, Renderer, RendererOptions, Scene, wgpu};
 use winit::application::ApplicationHandler;
@@ -203,6 +211,17 @@ enum RollDrag {
     Box { from: Point, keep: Vec<usize> },
 }
 
+/// A drag in the source grid.
+#[derive(Debug, Clone)]
+enum GridDrag {
+    /// Moving a module by its header.
+    Module { id: ModuleId, from: Point, start: (f32, f32) },
+    /// Pulling a cable from an output; `detach` is the cable picked up off an inlet.
+    Wire { from: PortRef, start: Point, detach: Option<CableId> },
+    /// Panning the canvas.
+    Pan { from: Point, start: Vec2 },
+}
+
 /// A parameter's position (0–1) on its control.
 fn position_of(doc: &Document, target: &ParamTarget) -> f64 {
     match target {
@@ -270,6 +289,10 @@ struct App {
     roll_drag: Option<RollDrag>,
     steps: StepView,
     step_geom: Option<StepGeom>,
+    view: MainView,
+    grid: GridView,
+    grid_layout: Option<GridLayout>,
+    grid_drag: Option<GridDrag>,
     /// Length of the last drawn or resized note.
     note_len: sat_doc::sat_time::Ticks,
     last_click: Option<(Instant, Point)>,
@@ -321,6 +344,9 @@ impl App {
         self.roll = RollView { tool: self.roll.tool, snap: self.roll.snap, ..Default::default() };
         self.roll_drag = None;
         self.steps = StepView::default();
+        self.view = MainView::Arrange;
+        self.grid = GridView::default();
+        self.grid_drag = None;
         self.playback.recompile(&doc);
         self.history = History::new(doc, 500);
         self.playback.locate(Ticks::ZERO);
@@ -419,6 +445,8 @@ impl App {
             edited: self.project.edited(self.history.version()),
             roll: &self.roll,
             steps: &self.steps,
+            view: self.view,
+            grid: &self.grid,
         };
         let mut scene = Scene::new();
         let drawn = shell::draw(&mut scene, &mut self.fonts, &self.theme, &frame, w, h);
@@ -436,6 +464,11 @@ impl App {
         }
         self.roll_geom = drawn.roll;
         self.step_geom = drawn.steps;
+        if matches!(self.view, MainView::SourceGrid(_)) && drawn.grid.is_none() {
+            // the track went away (undo): back to the arrangement
+            self.view = MainView::Arrange;
+        }
+        self.grid_layout = drawn.grid;
         self.scene.reset();
         self.scene.append(&scene, Some(vello::kurbo::Affine::scale(scale)));
         let dev = &self.ctx.devices[g.surface.dev_id];
@@ -539,6 +572,9 @@ impl App {
         if self.roll_drag.take().is_some() {
             self.roll.rubber = None;
             self.history.end_gesture();
+        }
+        if let Some(d) = self.grid_drag.take() {
+            self.end_grid_drag(d);
         }
     }
 
@@ -734,6 +770,19 @@ impl App {
         {
             return self.press_panel(sl, pt, double);
         }
+        if let Some(sl) = self.shell
+            && sl.topbar.contains(pt)
+        {
+            match shell::view_buttons(sl.topbar).into_iter().find(|(_, r)| r.contains(pt)).map(|(b, _)| b) {
+                Some(ViewButton::Arrange) => self.view = MainView::Arrange,
+                Some(ViewButton::SourceGrid) => self.open_grid(self.arrange.selected_track),
+                _ => {}
+            }
+            return;
+        }
+        if matches!(self.view, MainView::SourceGrid(_)) {
+            return self.press_grid(pt, double);
+        }
         let Some(layout) = &self.layout else { return };
         match layout.hit(pt) {
             Hit::Clip { clip, .. } => self.select_clip(clip),
@@ -774,6 +823,10 @@ impl App {
             None => {}
         }
         if self.panel == PanelView::Clip {
+            if piano_roll::open_grid_button(sl.panel).contains(pt) {
+                let track = self.arrange.selected_clip.and_then(|c| self.history.doc().clips.get(&c)).map(|c| c.track);
+                return self.open_grid(track);
+            }
             if self.step_geom.is_some() {
                 return self.press_steps(pt, double);
             }
@@ -865,7 +918,179 @@ impl App {
         }
     }
 
+    /// Shows `track`'s source grid.
+    fn open_grid(&mut self, track: Option<TrackId>) {
+        let Some(t) = track.filter(|t| self.history.doc().tracks.get(t).is_some_and(|tr| tr.source_grid.is_some()))
+        else {
+            return;
+        };
+        if self.view != MainView::SourceGrid(t) {
+            self.grid = GridView::default();
+        }
+        self.view = MainView::SourceGrid(t);
+        self.arrange.selected_track = Some(t);
+    }
+
+    fn press_grid(&mut self, pt: Point, double: bool) {
+        let Some(l) = self.grid_layout.clone() else { return };
+        let hit = l.hit(pt);
+        if !matches!(hit, GridHit::MenuItem(_) | GridHit::AddModule) {
+            self.grid.menu = false;
+        }
+        match hit {
+            GridHit::Back => self.view = MainView::Arrange,
+            GridHit::AddModule => self.grid.menu = !self.grid.menu,
+            GridHit::MenuItem(kind) => {
+                let doc = self.history.doc();
+                let pos = grid::free_pos(doc, l.grid);
+                let (id, op) = sat_modules::add_module(doc, l.grid, kind, pos);
+                self.edit("add module", vec![op]);
+                self.grid.selected = Some(id);
+                self.grid.menu = false;
+            }
+            GridHit::Header(id) => {
+                self.grid.selected = Some(id);
+                if let Some(start) = self.history.doc().modules.get(&id).map(|m| m.pos) {
+                    self.history.begin_gesture("move module");
+                    self.grid_drag = Some(GridDrag::Module { id, from: pt, start });
+                }
+            }
+            GridHit::Out(id, key) => {
+                let start = l.card(id).and_then(|c| c.outs.iter().find(|(k, _)| *k == key)).map_or(pt, |(_, p)| *p);
+                self.grid.wire = Some((start, pt));
+                self.grid_drag = Some(GridDrag::Wire { from: PortRef::new(id, key), start, detach: None });
+            }
+            GridHit::Param(id, key) => {
+                self.grid.selected = Some(id);
+                let travel = l.card(id).and_then(|c| c.params.first()).map_or(150.0, |(_, r)| r.width());
+                let target = ParamTarget::Module { module: id, param: key.into() };
+                self.begin_drag(target, Axis::Horizontal { travel }, double);
+            }
+            GridHit::Module(id) => self.grid.selected = Some(id),
+            GridHit::Inlet(clip) => {
+                // pick the wire up off the inlet; dropping it elsewhere rewires or unplugs it
+                if let Some(k) = self.history.doc().inlet_cable(clip).cloned() {
+                    let start = l.wires.iter().find(|w| w.cable == k.id).map_or(pt, |w| w.from);
+                    self.grid.wire = Some((start, pt));
+                    self.grid_drag = Some(GridDrag::Wire { from: k.from, start, detach: Some(k.id) });
+                }
+            }
+            GridHit::Row(clip) => self.select_clip(clip),
+            GridHit::AddClip => self.add_clip(l.track),
+            GridHit::Canvas => {
+                self.grid.selected = None;
+                self.grid_drag = Some(GridDrag::Pan { from: pt, start: self.grid.scroll });
+            }
+            GridHit::Nothing => {}
+        }
+    }
+
+    fn grid_drag_to(&mut self) {
+        let Some(d) = self.grid_drag.clone() else { return };
+        let pt = self.cursor;
+        match d {
+            GridDrag::Module { id, from, start } => {
+                let pos = ((start.0 + (pt.x - from.x) as f32).max(0.0), (start.1 + (pt.y - from.y) as f32).max(0.0));
+                if self.history.doc().modules.get(&id).is_some_and(|m| m.pos != pos) {
+                    self.edit("move module", vec![Op::MoveModule { id, pos }]);
+                }
+            }
+            GridDrag::Wire { start, .. } => self.grid.wire = Some((start, pt)),
+            GridDrag::Pan { from, start } => {
+                let s = start - (pt - from);
+                self.grid.scroll = Vec2::new(s.x.max(0.0), s.y.max(0.0));
+            }
+        }
+    }
+
+    fn end_grid_drag(&mut self, d: GridDrag) {
+        self.grid.wire = None;
+        match d {
+            GridDrag::Module { .. } => self.history.end_gesture(),
+            GridDrag::Wire { from, detach, .. } => {
+                let target = self.grid_layout.as_ref().and_then(|l| l.inlet_near(self.cursor));
+                let doc = self.history.doc();
+                let mut ops = Vec::new();
+                if let Some(id) = detach {
+                    if target.is_some_and(|c| doc.inlet_cable(c).is_some_and(|k| k.id == id)) {
+                        return; // dropped back where it was
+                    }
+                    ops.push(Op::Disconnect { id });
+                }
+                if let Some(clip) = target {
+                    if let Some(old) = doc.inlet_cable(clip).filter(|k| Some(k.id) != detach) {
+                        ops.push(Op::Disconnect { id: old.id });
+                    }
+                    ops.push(Op::Connect { id: CableId::new(), from, to: Endpoint::Inlet(clip) });
+                }
+                if !ops.is_empty() {
+                    self.edit(if target.is_some() { "wire" } else { "unplug" }, ops);
+                }
+            }
+            GridDrag::Pan { .. } => {}
+        }
+    }
+
+    /// Adds a one-bar clip to `track`'s dock, placed after its last placement, and selects it.
+    fn add_clip(&mut self, track: TrackId) {
+        let doc = self.history.doc();
+        let Some(tr) = doc.tracks.get(&track) else { return };
+        let n = doc.clips_on(track).count();
+        let end = doc
+            .placements
+            .values()
+            .filter(|p| doc.clips.get(&p.clip).is_some_and(|c| c.track == track))
+            .map(|p| p.start + p.length)
+            .max()
+            .unwrap_or(Ticks::ZERO);
+        let id = ClipId::new();
+        let bar = Ticks::quarters(4);
+        let ops = vec![
+            Op::AddClip {
+                id,
+                track,
+                name: format!("clip {}", n + 1),
+                color: tr.color,
+                length: bar,
+                looped: true,
+                seed: 1,
+            },
+            Op::AddPlacement {
+                id: sat_doc::PlacementId::new(),
+                clip: id,
+                start: end,
+                offset: Ticks::ZERO,
+                length: bar,
+            },
+        ];
+        self.edit("add clip", ops);
+        self.select_clip(id);
+    }
+
+    /// Source grid keys: delete removes the selected module, escape closes the menu or deselects.
+    fn grid_key(&mut self, key: &Key) -> bool {
+        if !matches!(self.view, MainView::SourceGrid(_)) {
+            return false;
+        }
+        match key {
+            Key::Named(NamedKey::Delete | NamedKey::Backspace) => {
+                let Some(id) = self.grid.selected.take() else { return false };
+                self.edit("remove module", vec![Op::RemoveModule { id }]);
+                true
+            }
+            Key::Named(NamedKey::Escape) if self.grid.menu || self.grid.selected.is_some() => {
+                self.grid.menu = false;
+                self.grid.selected = None;
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn key(&mut self, key: &Key) {
+        if self.grid_key(key) {
+            return self.update_title();
+        }
         if self.roll_key(key) {
             return self.update_title();
         }
@@ -909,6 +1134,12 @@ impl App {
     }
 
     fn scroll(&mut self, dx: f64, dy: f64) {
+        if matches!(self.view, MainView::SourceGrid(_)) && self.shell.is_some_and(|sl| sl.arrange.contains(self.cursor))
+        {
+            let (dx, dy) = if self.mods.shift_key() { (dy, dx) } else { (dx, dy) };
+            self.grid.scroll = Vec2::new((self.grid.scroll.x - dx).max(0.0), (self.grid.scroll.y - dy).max(0.0));
+            return;
+        }
         if let Some(sl) = self.shell
             && sl.panel.contains(self.cursor)
         {
@@ -994,9 +1225,10 @@ impl ApplicationHandler for App {
             WindowEvent::CursorMoved { position, .. } => {
                 let scale = self.gfx.as_ref().map(|g| g.window.scale_factor()).unwrap_or(1.0);
                 self.cursor = Point::new(position.x / scale, position.y / scale);
-                dirty = self.drag.is_some() || self.roll_drag.is_some();
+                dirty = self.drag.is_some() || self.roll_drag.is_some() || self.grid_drag.is_some();
                 self.drag_to();
                 self.roll_drag_to();
+                self.grid_drag_to();
             }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => match state {
                 ElementState::Pressed => self.press(),
@@ -1094,6 +1326,10 @@ fn main() {
         roll_drag: None,
         steps: StepView::default(),
         step_geom: None,
+        view: MainView::Arrange,
+        grid: GridView::default(),
+        grid_layout: None,
+        grid_drag: None,
         note_len: Ticks::sixteenths(1),
         last_click: None,
         last_frame: Instant::now(),

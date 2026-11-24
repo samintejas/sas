@@ -20,6 +20,8 @@ pub enum Icon {
     ChevronDown,
     /// Right chevron.
     ChevronRight,
+    /// Left chevron.
+    ChevronLeft,
     /// Plus.
     Plus,
     /// Sidebar panel.
@@ -72,6 +74,7 @@ pub fn draw(p: &mut Painter<'_>, icon: Icon, r: Rect, c: Rgba) {
         }
         Icon::ChevronDown => p.polyline(&[pt(-0.4, -0.2), pt(0.0, 0.2), pt(0.4, -0.2)], w, c),
         Icon::ChevronRight => p.polyline(&[pt(-0.2, -0.4), pt(0.2, 0.0), pt(-0.2, 0.4)], w, c),
+        Icon::ChevronLeft => p.polyline(&[pt(0.2, -0.4), pt(-0.2, 0.0), pt(0.2, 0.4)], w, c),
         Icon::Plus => {
             p.line(pt(-0.5, 0.0), pt(0.5, 0.0), w, c);
             p.line(pt(0.0, -0.5), pt(0.0, 0.5), w, c);

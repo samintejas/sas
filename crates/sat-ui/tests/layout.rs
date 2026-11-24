@@ -305,3 +305,65 @@ mod steps {
         assert_eq!(on, vec![0, 2, 3, 5, 7, 12, 14]);
     }
 }
+
+mod grid {
+    use sat_ui::demo::demo;
+    use sat_ui::grid::{GridHit, GridView, free_pos, layout, to_pos, to_screen};
+    use vello::kurbo::{Point, Rect, Vec2};
+
+    fn area() -> Rect {
+        Rect::new(4.0, 44.0, 1436.0, 590.0)
+    }
+
+    #[test]
+    fn cards_ports_inlets_and_wires_line_up() {
+        let d = demo();
+        let track = d.doc.clips[&d.selected].track;
+        let l = layout(&d.doc, track, area(), &GridView::default()).unwrap();
+        assert_eq!(l.cards.len(), 2, "piano roll and an unwired euclid");
+        assert_eq!(l.rows.len(), 3);
+        assert_eq!(l.wires.len(), 3, "the piano roll feeds every bass clip");
+        let pr = &l.cards[0];
+        let out = pr.outs[0].1;
+        assert!(l.wires.iter().all(|w| w.from == out));
+        for (w, r) in l.wires.iter().zip(&l.rows) {
+            assert!(l.rows.iter().any(|row| row.inlet == w.to), "{r:?}");
+        }
+        assert_eq!(l.hit(out), GridHit::Out(pr.module, "notes"));
+        assert_eq!(l.hit(Point::new(out.x + 4.0, out.y + 3.0)), GridHit::Out(pr.module, "notes"));
+        assert_eq!(l.hit(pr.header.center()), GridHit::Header(pr.module));
+        let eu = &l.cards[1];
+        assert_eq!(l.hit(eu.params[1].1.center()), GridHit::Param(eu.module, "hits"));
+        assert_eq!(l.hit(eu.preview.center()), GridHit::Module(eu.module));
+        let row = l.rows[1];
+        assert_eq!(l.hit(row.inlet), GridHit::Inlet(row.clip));
+        assert_eq!(l.hit(row.rect.center()), GridHit::Row(row.clip));
+        assert_eq!(l.inlet_near(Point::new(row.inlet.x - 12.0, row.inlet.y + 2.0)), Some(row.clip));
+        assert_eq!(l.inlet_near(l.canvas.center()), None);
+        assert_eq!(l.hit(l.back.center()), GridHit::Back);
+        assert_eq!(l.hit(l.add_module.center()), GridHit::AddModule);
+        assert_eq!(l.hit(l.add_clip.center()), GridHit::AddClip);
+        assert_eq!(l.hit(Point::new(l.canvas.x1 - 40.0, l.canvas.y1 - 60.0)), GridHit::Canvas);
+        // the menu lists the source modules
+        let open = layout(&d.doc, track, area(), &GridView { menu: true, ..Default::default() }).unwrap();
+        assert_eq!(open.hit(open.menu[2].1.center()), GridHit::MenuItem(sat_modules::EUCLID));
+    }
+
+    #[test]
+    fn panning_moves_cards_and_positions_round_trip() {
+        let d = demo();
+        let track = d.doc.clips[&d.selected].track;
+        let v = GridView { scroll: Vec2::new(30.0, 10.0), ..Default::default() };
+        let a = layout(&d.doc, track, area(), &GridView::default()).unwrap();
+        let b = layout(&d.doc, track, area(), &v).unwrap();
+        assert_eq!(a.cards[0].rect.origin() - b.cards[0].rect.origin(), Vec2::new(30.0, 10.0));
+        let pt = to_screen(b.canvas, v.scroll, (120.0, 64.0));
+        assert_eq!(to_pos(b.canvas, v.scroll, pt), (120.0, 64.0));
+        let grid = d.doc.tracks[&track].source_grid.unwrap();
+        let (x, y) = free_pos(&d.doc, grid);
+        let low = d.doc.modules_on(grid).map(|m| m.pos.1 + sat_ui::grid::card_h(m) as f32).fold(0.0, f32::max);
+        assert!(x == 0.0 && y > low, "below the lowest card");
+        // tracks without a source grid have no grid view
+        assert!(layout(&d.doc, d.doc.master, area(), &GridView::default()).is_none());
+    }
+}

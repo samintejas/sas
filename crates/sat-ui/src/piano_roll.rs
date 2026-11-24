@@ -344,10 +344,15 @@ pub fn clip_bar<'d>(
         x += tab(p, th, x, tabs, Some(Icon::Pencil), &m.name, true);
     }
     tab(p, th, x, tabs, Some(Icon::ChevronRight), "output", false);
-    let open = Rect::new(r.x1 - 168.0, cy - 13.0, r.x1 - 40.0, cy + 13.0);
-    button(p, th, open, "open source grid");
+    button(p, th, open_grid_button(r), "open source grid");
 
     Some(clip)
+}
+
+/// The clip bar's "open source grid" button, for the bottom panel at `r`.
+pub fn open_grid_button(r: Rect) -> Rect {
+    let cy = r.y0 + TABS_H / 2.0;
+    Rect::new(r.x1 - 168.0, cy - 13.0, r.x1 - 40.0, cy + 13.0)
 }
 
 /// Where the playhead is inside `clip`, if it is inside a placement of it.
