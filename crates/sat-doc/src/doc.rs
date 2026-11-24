@@ -76,7 +76,7 @@ impl Document {
             armed: false,
             monitor: Monitor::Off,
         };
-        let fx = Grid { id: master_fx, track: master, kind: GridKind::Fx, macros: [0.0; MACROS] };
+        let fx = Grid::new(master_fx, master, GridKind::Fx);
         let tempo = Lane {
             id: tempo_lane,
             target: ParamTarget::Tempo,

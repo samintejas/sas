@@ -1,6 +1,6 @@
 //! Renders the demo project to a PNG without a window.
 //!
-//! `cargo run -p sat-ui --example screenshot -- out.png [scale] [clip|mixer|<clip name>] [grid|instrument|fx]`
+//! `cargo run -p sat-ui --example screenshot -- out.png [scale] [clip|mixer|macros|<clip name>] [grid|instrument|fx]`
 //!
 //! A clip name selects that clip and shows it in the bottom panel. A fourth
 //! argument `grid` shows the selected clip's source grid instead of the arrangement.
@@ -19,7 +19,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out = args.next().unwrap_or_else(|| "arrange.png".into());
     let scale: f64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1.0);
     let view = args.next().unwrap_or_default();
-    let panel = if view == "mixer" { PanelView::Mixer } else { PanelView::Clip };
+    let panel = match view.as_str() {
+        "mixer" => PanelView::Mixer,
+        "macros" => PanelView::Macros,
+        _ => PanelView::Clip,
+    };
     let mut demo = sat_ui::demo::demo();
     if let Some(c) = demo.doc.clips.values().find(|c| c.name == view) {
         demo.selected = c.id;
@@ -56,6 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         steps: &StepView::default(),
         view,
         grid: &sat_ui::grid::GridView::default(),
+        learn: false,
     };
     let t = std::time::Instant::now();
     shell::draw(&mut scene, &mut fonts, &theme, &frame, w, h);

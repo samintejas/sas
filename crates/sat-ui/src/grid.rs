@@ -542,7 +542,7 @@ pub fn draw(
                         }
                     }
                     None if m.kind == sat_modules::EUCLID => {
-                        let cyc = Params::of(m).cycle();
+                        let cyc = Params::of(&sat_modules::macros::resolved(doc, m)).cycle();
                         let w = (pv.width() - 8.0) / cyc.len().max(1) as f64;
                         for (i, (hit, acc)) in cyc.iter().enumerate() {
                             let at = Point::new(pv.x0 + 4.0 + (i as f64 + 0.5) * w, pv.center().y);
@@ -570,16 +570,33 @@ pub fn draw(
                 match k {
                     Some(key) => {
                         let Some(spec) = sat_modules::spec(&m.kind, key) else { continue };
-                        let v = spec.clamp(m.params.get(*key).copied().unwrap_or(spec.default));
+                        let v = sat_modules::macros::value(doc, m.id, key).unwrap_or(spec.default);
+                        let bound = sat_modules::macros::bound(doc, m.id, key).map(|(i, _)| i);
+                        let mcol = crate::macros::kind_color(l.kind);
                         let fill = Rect::new(pr.x0, pr.y0, pr.x0 + pr.width() * spec.pos(v), pr.y1);
-                        p.rrect(fill, 3.0, Rgba::new(255, 255, 255, 14));
-                        p.text(
+                        let tint = if bound.is_some() { mcol.alpha(0.16) } else { Rgba::new(255, 255, 255, 14) };
+                        p.rrect(fill, 3.0, tint);
+                        let lw = p.text(
                             pr.x0 + 6.0,
                             pr.center().y,
                             spec.label,
                             &TextStyle::mono(11.0, c.text_secondary),
                             Align::Left,
                         );
+                        if let Some(i) = bound {
+                            // which macro drives it
+                            let bx = pr.x0 + 10.0 + lw;
+                            let badge = Rect::new(bx, pr.y0 + 3.0, bx + 24.0, pr.y1 - 3.0);
+                            p.rrect(badge, 3.0, mcol.alpha(0.25));
+                            let tag = format!("m{}", i + 1);
+                            p.text(
+                                badge.center().x,
+                                badge.center().y,
+                                &tag,
+                                &TextStyle::mono(9.5, mcol),
+                                Align::Center,
+                            );
+                        }
                         p.text(
                             pr.x1 - 6.0,
                             pr.center().y,

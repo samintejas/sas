@@ -84,6 +84,8 @@ pub struct Frame<'a> {
     pub view: MainView,
     /// Source grid pan, selection and menu.
     pub grid: &'a GridView,
+    /// Macro learn mode is on.
+    pub learn: bool,
 }
 
 /// Layouts of everything drawn, for hit testing.
@@ -101,6 +103,8 @@ pub struct Drawn {
     pub steps: Option<StepGeom>,
     /// The source grid, when shown.
     pub grid: Option<GridLayout>,
+    /// The macros page, when the panel shows it.
+    pub macros: Option<crate::macros::MacroLayout>,
 }
 
 /// Rectangles of the shell's regions.
@@ -268,6 +272,11 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
     let mut ml = None;
     let mut rl = None;
     let mut sg = None;
+    let mut mc = None;
+    let on_screen = match f.view {
+        MainView::Grid(g) => Some(g),
+        MainView::Arrange => None,
+    };
     if sl.panel.height() > 0.0 {
         p.clip(sl.panel, |p| match f.panel {
             PanelView::Clip => {
@@ -282,8 +291,12 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
             PanelView::Mixer => {
                 ml = Some(mixer::draw(p, th, f.doc, f.arrange.selected_track, f.levels, f.mixer_scroll, sl.panel))
             }
+            PanelView::Macros => {
+                let track = f.arrange.selected_track;
+                mc = Some(crate::macros::draw(p, th, f.doc, track, on_screen, f.learn, sl.panel))
+            }
         });
         p.rrect_stroke(sl.panel.inset(0.5), 0.0, 1.0, th.c.border_default);
     }
-    Drawn { shell: sl, arrange: al, mixer: ml, roll: rl, steps: sg, grid: gl }
+    Drawn { shell: sl, arrange: al, mixer: ml, roll: rl, steps: sg, grid: gl, macros: mc }
 }

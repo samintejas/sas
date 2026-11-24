@@ -14,6 +14,7 @@ pub mod drum;
 pub mod euclid;
 pub mod fx;
 pub mod instrument;
+pub mod macros;
 pub mod spec;
 
 pub use spec::{ParamSpec, Unit};
@@ -208,6 +209,7 @@ pub fn generating(m: &Module) -> bool {
 pub fn shapes_notes(doc: &Document, target: &ParamTarget) -> bool {
     match target {
         ParamTarget::Module { module, .. } => doc.modules.get(module).is_some_and(|m| is_generator(&m.kind)),
+        ParamTarget::Macro { grid, index } => macros::drives_notes(doc, *grid, *index),
         _ => false,
     }
 }
@@ -227,7 +229,7 @@ pub fn base_notes(doc: &Document, module: ModuleId, clip: ClipId) -> Vec<Note> {
     let (Some(m), Some(c)) = (doc.modules.get(&module), doc.clips.get(&clip)) else { return Vec::new() };
     if generating(m) {
         return match m.kind.as_str() {
-            EUCLID => euclid::Params::of(m).generate(c.length),
+            EUCLID => euclid::Params::of(&macros::resolved(doc, m)).generate(c.length),
             _ => Vec::new(),
         };
     }

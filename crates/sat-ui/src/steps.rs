@@ -154,7 +154,7 @@ pub fn geometry(doc: &Document, clip: Option<ClipId>, r: Rect, view: &StepView) 
     let clip = doc.clips.get(&clip?)?;
     let (m, editor) = source(doc, clip.id)?;
     let rate = match editor {
-        Editor::Euclid => Params::of(m).rate,
+        Editor::Euclid => Params::of(&sat_modules::macros::resolved(doc, m)).rate,
         Editor::Drums => DRUM_RATE,
         Editor::PianoRoll => return None,
     };
@@ -218,7 +218,7 @@ pub fn geometry(doc: &Document, clip: Option<ClipId>, r: Rect, view: &StepView) 
             g.clear = Some(Rect::new(card.x1 - 104.0, ey - 11.0, card.x1 - 60.0, ey + 11.0));
             g.bake = Some(Rect::new(card.x1 - 54.0, ey - 11.0, card.x1 - 8.0, ey + 11.0));
             g.mode = Some(Rect::new(r.x0 + 12.0, ty - 12.0, r.x0 + 180.0, ty + 12.0));
-            let note = Params::of(m).note;
+            let note = Params::of(&sat_modules::macros::resolved(doc, m)).note;
             let xs = cell_xs(card.x1 + 64.0, body.x1 - 16.0, PAGE);
             let y0 = body.y0 + 12.0;
             let h = (body.height() * 0.42).clamp(32.0, 64.0);
@@ -334,7 +334,7 @@ pub fn draw(
             let col = th.track(clip_ref.color.0);
             for (key, kr) in &g.knobs {
                 let spec = euclid::spec(key).unwrap();
-                let v = spec.clamp(m.params.get(*key).copied().unwrap_or(spec.default));
+                let v = sat_modules::macros::value(doc, m.id, key).unwrap_or(spec.default);
                 let kc = if generating { col } else { c.text_secondary };
                 p.text(kr.center().x, kr.y0 + 6.0, spec.label, &TextStyle::mono(10.5, c.text_secondary), Align::Center);
                 let size = (kr.height() - 30.0).clamp(18.0, 30.0);

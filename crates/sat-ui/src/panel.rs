@@ -17,6 +17,8 @@ pub enum PanelView {
     Clip,
     /// The mixer.
     Mixer,
+    /// The selected track's macros.
+    Macros,
 }
 
 /// The tabs on the left of the bar.
@@ -24,7 +26,7 @@ pub enum PanelView {
 pub enum Tab {
     /// Clip editor.
     Clip,
-    /// Macros (not built yet).
+    /// Macros.
     Macros,
     /// Mixer.
     Mixer,
@@ -82,7 +84,10 @@ pub fn draw_bar(p: &mut Painter<'_>, th: &Theme, r: Rect, view: PanelView) -> (R
     p.hline(r.x0, r.x1, bar.y1 - 1.0, c.border_subtle);
     let mut x = r.x0 + 4.0;
     for (t, icon, label) in TABS {
-        let on = matches!((t, view), (Tab::Clip, PanelView::Clip) | (Tab::Mixer, PanelView::Mixer));
+        let on = matches!(
+            (t, view),
+            (Tab::Clip, PanelView::Clip) | (Tab::Mixer, PanelView::Mixer) | (Tab::Macros, PanelView::Macros)
+        );
         x += tab(p, th, x, bar, Some(icon), label, on);
     }
     p.vline(x + 4.0, bar.y0 + 8.0, bar.y1 - 8.0, c.border_default);

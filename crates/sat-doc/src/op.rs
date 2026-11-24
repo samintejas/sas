@@ -127,6 +127,8 @@ pub enum Op {
     // --- values ---
     /// Sets the base value of a parameter, macro, fader, pan or send level.
     SetValue { target: ParamTarget, value: f32 },
+    /// Assigns (names and binds) or clears one of a grid's macros.
+    SetMacroSlot { grid: GridId, index: u8, slot: Option<MacroSlot> },
 
     // --- clips and patterns ---
     /// Adds a clip (a dock slot) to a track.
@@ -289,6 +291,12 @@ fn drop_module(d: &mut Document, m: ModuleId) {
     d.lanes.retain(|_, l| !matches!(&l.target, ParamTarget::Module { module, .. } if *module == m));
     let hit = |t: &ParamTarget| matches!(t, ParamTarget::Module { module, .. } if *module == m);
     d.clips.update_where(|c| c.snapshot.keys().any(hit), |c| c.snapshot.retain(|t, _| !hit(t)));
+    // macros stop driving it
+    let drives = |s: &MacroSlot| s.binds.iter().any(|b| b.module == m);
+    d.grids.update_where(
+        |g| g.slots.values().any(drives),
+        |g| g.slots.update_where(drives, |s| s.binds.retain(|b| b.module != m)),
+    );
     d.modules.remove(&m);
 }
 
@@ -379,7 +387,7 @@ pub fn apply(d: &mut Document, op: Op) -> Result<Change, OpError> {
                 }
             }
             for (g, k) in new_grids {
-                d.grids.insert(g, Grid { id: g, track: id, kind: k, macros: [0.0; MACROS] });
+                d.grids.insert(g, Grid::new(g, id, k));
             }
             d.tracks.insert(
                 id,
@@ -492,7 +500,7 @@ pub fn apply(d: &mut Document, op: Op) -> Result<Change, OpError> {
         Op::AddFxGrid { id, track: t, index } => {
             track(d, t)?;
             check_grid_free(d, id)?;
-            d.grids.insert(id, Grid { id, track: t, kind: GridKind::Fx, macros: [0.0; MACROS] });
+            d.grids.insert(id, Grid::new(id, t, GridKind::Fx));
             insert_at(&mut d.tracks.get_mut(&t).unwrap().fx_grids, index, id);
             Structure
         }
@@ -590,6 +598,34 @@ pub fn apply(d: &mut Document, op: Op) -> Result<Change, OpError> {
                 ParamTarget::Tempo => unreachable!("validated"),
             }
             Value { target, value }
+        }
+        Op::SetMacroSlot { grid, index, slot } => {
+            if index as usize >= MACROS {
+                return Err(OpError::BadValue("macro index"));
+            }
+            if let Some(s) = &slot {
+                for b in s.binds.iter() {
+                    let m = d.modules.get(&b.module).ok_or_else(|| nf("module", b.module))?;
+                    if m.grid != grid {
+                        return Err(OpError::NotAllowed("macros drive modules on their own grid"));
+                    }
+                    finite(b.lo, "macro range must be finite")?;
+                    finite(b.hi, "macro range must be finite")?;
+                    if !(0.0..=1.0).contains(&b.lo) || !(0.0..=1.0).contains(&b.hi) {
+                        return Err(OpError::BadValue("macro ranges are knob positions, 0–1"));
+                    }
+                }
+            }
+            let g = d.grids.get_mut(&grid).ok_or_else(|| nf("grid", grid))?;
+            match slot {
+                Some(s) => {
+                    g.slots.insert(index, s);
+                }
+                None => {
+                    g.slots.remove(&index);
+                }
+            }
+            Structure
         }
         Op::AddClip { id, track: t, name, color, length, looped, seed } => {
             if d.clips.contains_key(&id) {

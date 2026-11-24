@@ -239,6 +239,7 @@ fn position_of(doc: &Document, target: &ParamTarget) -> f64 {
             .find(|s| s.target == *target)
             .map(|s| controls::fader_pos(s.level_db))
             .unwrap_or(0.0),
+        ParamTarget::Macro { .. } => doc.base_value(target).unwrap_or(0.0).clamp(0.0, 1.0) as f64,
         ParamTarget::Module { .. } => match (module_spec(doc, target), doc.base_value(target)) {
             (Some(s), v) => s.pos(s.clamp(v.unwrap_or(s.default))),
             _ => 0.0,
@@ -252,6 +253,7 @@ fn value_at(doc: &Document, target: &ParamTarget, pos: f64) -> f32 {
     match target {
         ParamTarget::Pan(_) => controls::pan_at(pos),
         ParamTarget::Module { .. } => module_spec(doc, target).map_or(0.0, |s| s.at(pos)),
+        ParamTarget::Macro { .. } => ((pos.clamp(0.0, 1.0) * 1000.0).round() / 1000.0) as f32,
         _ => controls::fader_db(pos),
     }
 }
@@ -298,6 +300,9 @@ struct App {
     view: MainView,
     grid: GridView,
     grid_layout: Option<GridLayout>,
+    /// Macro learn mode: the next touched parameter maps to a free macro.
+    learn: bool,
+    macro_layout: Option<sat_ui::macros::MacroLayout>,
     grid_drag: Option<GridDrag>,
     /// Length of the last drawn or resized note.
     note_len: sat_doc::sat_time::Ticks,
@@ -327,10 +332,10 @@ impl App {
             self.playback.recompile(self.history.doc());
         } else {
             for ch in changes {
-                if let sat_doc::Change::Value { target, value } = ch
-                    && let Some(cmd) = self.playback.compiled.param_command(target, *value)
-                {
-                    self.playback.send(cmd);
+                if let sat_doc::Change::Value { target, value } = ch {
+                    for cmd in self.playback.compiled.param_commands(target, *value) {
+                        self.playback.send(cmd);
+                    }
                 }
             }
         }
@@ -453,6 +458,7 @@ impl App {
             steps: &self.steps,
             view: self.view,
             grid: &self.grid,
+            learn: self.learn,
         };
         let mut scene = Scene::new();
         let drawn = shell::draw(&mut scene, &mut self.fonts, &self.theme, &frame, w, h);
@@ -475,6 +481,7 @@ impl App {
             self.view = MainView::Arrange;
         }
         self.grid_layout = drawn.grid;
+        self.macro_layout = drawn.macros;
         self.scene.reset();
         self.scene.append(&scene, Some(vello::kurbo::Affine::scale(scale)));
         let dev = &self.ctx.devices[g.surface.dev_id];
@@ -530,6 +537,20 @@ impl App {
     /// Starts dragging `target`; double-click resets it instead.
     fn begin_drag(&mut self, target: ParamTarget, axis: Axis, double: bool) {
         let doc = self.history.doc();
+        if let ParamTarget::Module { module, param } = &target {
+            // learn mode maps the parameter to a free macro instead
+            if self.learn
+                && let Some((_, ops)) = sat_modules::macros::learn(doc, *module, param)
+            {
+                self.edit("map to macro", ops);
+                return;
+            }
+            // a macro-driven parameter is played through its macro
+            if let Some((index, _)) = sat_modules::macros::bound(doc, *module, param) {
+                let grid = doc.modules[module].grid;
+                return self.begin_drag(ParamTarget::Macro { grid, index }, axis, double);
+            }
+        }
         // a send knob with no send yet creates one, silent, then drags it
         let mut ops = Vec::new();
         if let ParamTarget::SendLevel { track, target: ret } = target
@@ -551,6 +572,7 @@ impl App {
             ParamTarget::Gain(_) => "fader",
             ParamTarget::Pan(_) => "pan",
             ParamTarget::Module { .. } => "knob",
+            ParamTarget::Macro { .. } => "macro",
             _ => "send",
         });
         if !ops.is_empty() {
@@ -831,7 +853,7 @@ impl App {
         match panel::hit_tab(sl.panel, pt) {
             Some(Tab::Clip) => return self.panel = PanelView::Clip,
             Some(Tab::Mixer) => return self.panel = PanelView::Mixer,
-            Some(Tab::Macros) => return,
+            Some(Tab::Macros) => return self.panel = PanelView::Macros,
             None => {}
         }
         if self.panel == PanelView::Clip {
@@ -843,6 +865,9 @@ impl App {
                 return self.press_steps(pt, double);
             }
             return self.press_roll(pt, double);
+        }
+        if self.panel == PanelView::Macros {
+            return self.press_macros(pt, double);
         }
         let Some(m) = &self.mixer else { return };
         match m.hit(pt) {
@@ -864,6 +889,36 @@ impl App {
         }
     }
 
+    fn press_macros(&mut self, pt: Point, double: bool) {
+        use sat_ui::macros::MacroHit;
+        let Some(l) = self.macro_layout.clone() else { return };
+        match l.hit(pt) {
+            MacroHit::Learn => self.learn = !self.learn,
+            MacroHit::Knob(grid, index) => {
+                let assigned = self.history.doc().grids.get(&grid).is_some_and(|g| g.slots.contains_key(&index));
+                if !assigned {
+                    // an empty macro: learn maps the next touched parameter to one
+                    self.learn = true;
+                } else if self.learn {
+                    self.edit("clear macro", vec![Op::SetMacroSlot { grid, index, slot: None }]);
+                } else {
+                    self.begin_drag(ParamTarget::Macro { grid, index }, Axis::Vertical { travel: KNOB_TRAVEL }, double);
+                }
+            }
+            MacroHit::Open(grid) => {
+                if self.view != MainView::Grid(grid) {
+                    self.grid = GridView::default();
+                }
+                self.view = MainView::Grid(grid);
+            }
+            MacroHit::Fader(t) => {
+                self.begin_drag(ParamTarget::Gain(t), Axis::Vertical { travel: l.fader.height() }, double)
+            }
+            MacroHit::Pan(t) => self.begin_drag(ParamTarget::Pan(t), Axis::Vertical { travel: KNOB_TRAVEL }, double),
+            MacroHit::Nothing => {}
+        }
+    }
+
     fn press_steps(&mut self, pt: Point, double: bool) {
         let Some(g) = self.step_geom.clone() else { return };
         let doc = self.history.doc();
@@ -874,7 +929,7 @@ impl App {
                 let start = g.tick_of(step);
                 let ops = match g.editor {
                     Editor::Euclid => {
-                        let p = euclid::Params::of(m);
+                        let p = euclid::Params::of(&sat_modules::macros::resolved(doc, m));
                         let note = sat_modules::step_note(start, p.note_len(), pitch, p.vel);
                         sat_modules::toggle_step(doc, module, clip, note)
                     }
@@ -1153,6 +1208,10 @@ impl App {
     }
 
     fn key(&mut self, key: &Key) {
+        if self.learn && matches!(key, Key::Named(NamedKey::Escape)) {
+            self.learn = false;
+            return self.update_title();
+        }
         if self.grid_key(key) {
             return self.update_title();
         }
@@ -1393,6 +1452,8 @@ fn main() {
         view: MainView::Arrange,
         grid: GridView::default(),
         grid_layout: None,
+        learn: false,
+        macro_layout: None,
         grid_drag: None,
         note_len: Ticks::sixteenths(1),
         last_click: None,
