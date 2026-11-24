@@ -51,3 +51,19 @@ fn engine_process_does_not_allocate() {
     });
     assert_eq!(h.collect_garbage(), 1);
 }
+
+#[test]
+fn sixty_four_tracks_do_not_allocate() {
+    let doc = sixty_four();
+    let c = sat_compile::compile(&doc, SR, BLOCK).unwrap();
+    let (mut e, mut h) = engine(c.schedule, 16);
+    h.send(Command::Play).unwrap();
+    let mut l = vec![0.0f32; BLOCK];
+    let mut r = vec![0.0f32; BLOCK];
+    assert_no_alloc(|| {
+        for _ in 0..300 {
+            e.process(&mut l, &mut r);
+        }
+    });
+    assert!(l.iter().any(|v| *v != 0.0));
+}

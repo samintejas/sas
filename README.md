@@ -10,7 +10,7 @@ repository follows the architecture doc's crate layout and build phases.
 
 ## Status
 
-Phase 1 (headless core) is in progress.
+Phase 1 (headless core) is done; its gate passes single-threaded (see below).
 
 | Crate | What it does | State |
 |---|---|---|
@@ -18,7 +18,17 @@ Phase 1 (headless core) is in progress.
 | `sat-doc` | entities, `Op` reducer, transactions, undo with gestures, project bundle with migrations | done |
 | `sat-engine` | flat schedule, mixer strips, test synth, automation, loop, lock-free commands, schedule swap with state carry-over, offline render | done (single-threaded) |
 | `sat-compile` | document → schedule: track tree, solo, sends, placements and looping clips, live parameter mapping | done |
-| worker pool + 64-track benchmark | parallel schedule, budget check | next |
+
+## Phase 1 gate
+
+`cargo run --release -p sat-compile --example budget` renders a 64-track set
+(8 groups, two returns, every track playing 4-note chords through the test
+synth with gain automation and two sends) at 48 kHz / 128 samples. On a
+4-core cloud VM it averages about 14% of the 2.7 ms block (target ≤ 70%) and
+compiles in under 2 ms (target ≤ 10 ms); CI runs it on every push. The same
+set runs under the no-allocation check. The engine is still single-threaded:
+the worker pool from the architecture doc comes in when real modules make
+tracks heavy enough to need it.
 
 ## Build phases
 

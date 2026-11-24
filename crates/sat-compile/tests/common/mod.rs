@@ -155,3 +155,86 @@ pub fn render(doc: &Document, frames: usize) -> (Vec<f32>, Vec<f32>) {
     let c = sat_compile::compile(doc, SR, BLOCK).unwrap();
     sat_engine::render(c.schedule, 0, frames, BLOCK)
 }
+
+/// 64 tracks in 8 groups, each with a test synth playing a busy looping
+/// pattern (4-note chords on every 8th), two returns fed by every track,
+/// and gain automation on every track.
+pub fn sixty_four() -> Document {
+    let mut h = History::new(Document::new(64), 10);
+    let mut ops = Vec::new();
+    let (r1, a) = Op::add_bus(TrackKind::Return, "r1", None, 99);
+    let (r2, b) = Op::add_bus(TrackKind::Return, "r2", None, 99);
+    ops.extend([a, b]);
+    for g in 0..8 {
+        let (group, op) = Op::add_bus(TrackKind::Group, format!("g{g}"), None, g);
+        ops.push(op);
+        for t in 0..8 {
+            let i = g * 8 + t;
+            let (track, op) = Op::add_track(format!("t{i}"), Some(group), t);
+            let Op::AddTrack { grids, .. } = &op else { unreachable!() };
+            let (src, ins) = (grids.source.unwrap(), grids.instrument.unwrap());
+            ops.push(op);
+            let (synth, seq, clip) = (ModuleId::new(), ModuleId::new(), ClipId::new());
+            let notes: Vector<Note> = (0..8)
+                .flat_map(|s| {
+                    (0..4).map(move |k| Note {
+                        start: Ticks::sixteenths(s * 2),
+                        len: Ticks::sixteenths(2),
+                        pitch: (36 + (i % 24) + k * 4) as u8,
+                        velocity: 0.5,
+                        chance: 1.0,
+                    })
+                })
+                .collect();
+            ops.extend([
+                Op::AddModule {
+                    id: synth,
+                    grid: ins,
+                    kind: sat_compile::TEST_SYNTH.into(),
+                    name: "s".into(),
+                    params: OrdMap::from(vec![("wave".to_string(), (i % 2) as f32), ("level".to_string(), 0.05)]),
+                    pos: (0.0, 0.0),
+                },
+                Op::AddModule {
+                    id: seq,
+                    grid: src,
+                    kind: "piano_roll".into(),
+                    name: "p".into(),
+                    params: OrdMap::new(),
+                    pos: (0.0, 0.0),
+                },
+                Op::AddClip {
+                    id: clip,
+                    track,
+                    name: "c".into(),
+                    color: Color(0),
+                    length: Ticks::quarters(4),
+                    looped: true,
+                    seed: i as u64,
+                },
+                Op::Connect { id: CableId::new(), from: PortRef::new(seq, "notes"), to: Endpoint::Inlet(clip) },
+                Op::WritePattern { module: seq, clip, notes },
+                Op::AddPlacement {
+                    id: PlacementId::new(),
+                    clip,
+                    start: Ticks::ZERO,
+                    offset: Ticks::ZERO,
+                    length: Ticks::quarters(64),
+                },
+                Op::AddSend { track, target: r1, level_db: -12.0, pre_fader: false },
+                Op::AddSend { track, target: r2, level_db: -18.0, pre_fader: true },
+            ]);
+            let lane = LaneId::new();
+            ops.push(Op::AddLane { id: lane, target: ParamTarget::Gain(track) });
+            ops.push(Op::SetLanePoints {
+                id: lane,
+                points: Vector::from(vec![
+                    Breakpoint { tick: Ticks::ZERO, value: -6.0, curve: Curve::Linear },
+                    Breakpoint { tick: Ticks::quarters(64), value: 0.0, curve: Curve::Hold },
+                ]),
+            });
+        }
+    }
+    h.apply("build", ops).unwrap();
+    h.doc().clone()
+}
