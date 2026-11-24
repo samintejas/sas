@@ -11,6 +11,9 @@ repository follows the architecture doc's crate layout and build phases.
 ## Status
 
 Phase 1 (headless core) is done; its gate passes single-threaded (see below).
+Phase 2 has started: the app opens a window with the arrange view and piano
+roll from the prototype, drawn with vello, and plays the set through the
+default audio device.
 
 | Crate | What it does | State |
 |---|---|---|
@@ -18,6 +21,9 @@ Phase 1 (headless core) is done; its gate passes single-threaded (see below).
 | `sat-doc` | entities, `Op` reducer, transactions, undo with gestures, project bundle with migrations | done |
 | `sat-engine` | flat schedule, mixer strips, test synth, automation, loop, lock-free commands, schedule swap with state carry-over, offline render | done (single-threaded) |
 | `sat-compile` | document → schedule: track tree, solo, sends, placements and looping clips, live parameter mapping | done |
+| `sat-theme` | Dots design tokens (`assets/dots/tokens.json`) generated into a Rust `Palette`, plus spacing, radius and type scales | done |
+| `sat-ui` | vello + parley painter, icons, top bar, arrange view, piano roll, hit-testing, headless GPU rendering | in progress |
+| `sat-app` | the `sat` binary: winit window, vello surface, cpal output running the engine | in progress |
 
 ## Phase 1 gate
 
@@ -52,6 +58,27 @@ runs a list of ops as one all-or-nothing transaction and reports a `Change`
 per op: value changes go to the engine as parameter events, structural ones
 trigger a recompile. Projects save as a `name.sat/` bundle whose
 `project.sat` is versioned, zstd-compressed JSON.
+
+## Running the app
+
+```sh
+cargo run --release -p sat-app            # opens the demo set
+cargo run --release -p sat-app -- my.sat  # opens a project bundle
+```
+
+Space plays and stops, Home returns to the start, `l` toggles the loop, `m`
+and `s` mute and solo the selected track, and Ctrl+Z / Ctrl+Shift+Z undo and
+redo. Click a clip to show it in the piano roll, click the ruler to move the
+playhead, and click a group's chevron to fold it. Ctrl+scroll zooms and
+Shift+scroll moves through time. On Linux you need `libasound2-dev` and
+`libxkbcommon-dev` to build.
+
+To render a frame without a window (any Vulkan, Metal or DX12 adapter,
+including Mesa's lavapipe):
+
+```sh
+cargo run --release -p sat-ui --example screenshot -- arrange.png 2
+```
 
 ## Listening
 

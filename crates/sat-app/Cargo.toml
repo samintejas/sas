@@ -1,0 +1,26 @@
+[package]
+name = "sat-app"
+description = "The sat desktop app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "sat"
+path = "src/main.rs"
+
+[dependencies]
+sat-doc.workspace = true
+sat-engine.workspace = true
+sat-compile.workspace = true
+sat-theme.workspace = true
+sat-ui.workspace = true
+vello.workspace = true
+winit.workspace = true
+cpal.workspace = true
+pollster.workspace = true
+
+[lints]
+workspace = true
