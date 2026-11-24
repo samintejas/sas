@@ -208,3 +208,43 @@ fn euclid_sources_play_their_steps_and_hand_edits() {
     assert!(rms(&after.0) > 0.001);
     assert_ne!(before, after, "the bass now plays the euclid");
 }
+
+#[test]
+fn instrument_grids_play_patches_and_drums() {
+    use sat_modules::instrument as ins;
+    let mut s = song();
+    let d = s.h.doc();
+    let before = render(d, 24_000);
+    let grid = d.tracks[&s.bass].instrument_grid.unwrap();
+    let dgrid = d.tracks[&s.drums].instrument_grid.unwrap();
+    let (mut ops, ids) = ins::default_patch_ops(grid, &[(ins::FILTER, "cutoff", 900.0)]);
+    let drum = ModuleId::new();
+    ops.push(Op::AddModule {
+        id: drum,
+        grid: dgrid,
+        kind: ins::DRUM_SYNTH.into(),
+        name: "drum synth".into(),
+        params: sat_modules::default_params(ins::DRUM_SYNTH),
+        pos: (0.0, 0.0),
+    });
+    s.h.apply("patch", ops).unwrap();
+    let c = sat_compile::compile(s.h.doc(), 48_000.0, 512).unwrap();
+    let (patch, slots) = sat_compile::build_patch(s.h.doc(), grid).unwrap();
+    // note in comes first and voice out after the vca it reads
+    let pos = |id: ModuleId| slots.iter().position(|x| *x == id).unwrap();
+    assert_eq!(pos(ids[0]), 0);
+    assert!(pos(ids[3]) < pos(ids[4]) && pos(ids[5]) < pos(ids[3]));
+    assert_eq!(patch.mods.len(), 6);
+    // a live knob reaches the patch without a recompile
+    let target = ParamTarget::Module { module: ids[2], param: "cutoff".into() };
+    assert!(matches!(c.param_command(&target, 400.0), Some(Command::SetParam { .. })));
+    let drum_target = ParamTarget::Module { module: drum, param: "decay".into() };
+    assert!(c.param_command(&drum_target, 2.0).is_some());
+    let after = render(s.h.doc(), 24_000);
+    assert!(rms(&after.0) > 0.01, "rms {}", rms(&after.0));
+    assert_ne!(before, after, "bass and drums now play through the grid");
+    assert_eq!(after, render(s.h.doc(), 24_000), "deterministic");
+    // breaking the patch (no voice out) falls back to the test synth
+    s.h.apply("rm", [Op::RemoveModule { id: ids[4] }]).unwrap();
+    assert!(sat_compile::build_patch(s.h.doc(), grid).is_none());
+}

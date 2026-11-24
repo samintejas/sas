@@ -353,7 +353,7 @@ pub fn header_controls(row: &Row, headers: Rect) -> HeaderControls {
 fn track_label(doc: &Document, t: &Track) -> String {
     match t.kind {
         TrackKind::Track => {
-            let ins = t.instrument_grid.and_then(|g| doc.modules_on(g).next()).map(|m| m.name.clone());
+            let ins = t.instrument_grid.and_then(|g| sat_modules::instrument::label(doc, g));
             ins.unwrap_or_else(|| "empty".into())
         }
         _ => String::new(),

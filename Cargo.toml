@@ -15,6 +15,7 @@ sat-doc = { path = "crates/sat-doc" }
 sat-engine = { path = "crates/sat-engine" }
 sat-compile = { path = "crates/sat-compile" }
 sat-modules = { path = "crates/sat-modules" }
+sat-dsp = { path = "crates/sat-dsp" }
 sat-theme = { path = "crates/sat-theme" }
 sat-ui = { path = "crates/sat-ui" }
 im = { version = "15", features = ["serde"] }
