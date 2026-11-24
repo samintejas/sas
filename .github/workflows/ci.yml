@@ -21,9 +21,15 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      - name: linux deps (audio, keyboard, software vulkan for render tests)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libxkbcommon-dev mesa-vulkan-drivers libvulkan1
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+        env:
+          # ubuntu has lavapipe, so GPU render tests must run there; elsewhere they skip without an adapter
+          SAT_REQUIRE_GPU: ${{ matrix.os == 'ubuntu-latest' && '1' || '' }}
       - name: phase 1 budget (64 tracks)
         if: matrix.os == 'ubuntu-latest'
         run: cargo run --release -p sat-compile --example budget
