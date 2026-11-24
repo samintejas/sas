@@ -2556,11 +2556,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sat-dsp"
+version = "0.1.0"
+
+[[package]]
 name = "sat-engine"
 version = "0.1.0"
 dependencies = [
  "assert_no_alloc",
  "rtrb",
+ "sat-dsp",
 ]
 
 [[package]]

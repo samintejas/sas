@@ -12,10 +12,14 @@ repository follows the architecture doc's crate layout and build phases.
 
 Phase 1 (headless core) is done; its gate passes single-threaded (see below).
 Phase 2 (shell + arrange) is done: the app opens, plays, mixes and saves a
-project file end to end. Phase 3 (source grid) has started: notes are edited
+project file end to end. Phase 3 (source grid) is done: notes are edited
 in the piano roll, the drum sequencer or the euclid generator (with hand edits
 over it) and heard while the set plays, and each track's source grid shows its
-modules and the clip dock, where cables decide which module feeds each clip. The arrange view, piano roll and mixer from
+modules and the clip dock, where cables decide which module feeds each clip.
+Phase 4 (instrument + fx grids) has started: each track's instrument grid is a
+patchable voice (note in, vco, noise, mixer, filter, adsr, vca, lfo, voice out)
+that every voice runs, or a drum synth that plays drums by pitch; knobs change
+the sound live while it plays. The arrange view, piano roll and mixer from
 the prototype are drawn with vello; the engine plays through the default
 audio device and feeds live per-track meters.
 
@@ -23,9 +27,10 @@ audio device and feeds live per-track meters.
 |---|---|---|
 | `sat-time` | ticks (960 PPQ), tempo map with step and linear ramps, meter map, quantisation | done |
 | `sat-doc` | entities, `Op` reducer, transactions, undo with gestures, project bundle with migrations | done |
-| `sat-engine` | flat schedule, mixer strips, test synth, automation, loop, lock-free commands, schedule swap with state carry-over, offline render | done (single-threaded) |
-| `sat-compile` | document → schedule: track tree, solo, sends, placements and looping clips, live parameter mapping | done |
-| `sat-modules` | built-in source modules: which editor each opens, the euclid generator, the drum kit, the hand-edit layer (toggle, clear, bake) | in progress |
+| `sat-dsp` | oscillators (polyBLEP), state-variable filter, ADSR, noise, drum voices, gain and pan laws | in progress |
+| `sat-engine` | flat schedule, mixer strips, test synth, patchable voice instrument, drum synth, automation, loop, lock-free commands, schedule swap with state carry-over, offline render | done (single-threaded) |
+| `sat-compile` | document → schedule: track tree, solo, sends, placements and looping clips, instrument patches from the instrument grid, live parameter mapping | done |
+| `sat-modules` | built-in modules and their parameter specs: source modules (which editor each opens, the euclid generator, the drum kit, the hand-edit layer), instrument modules, the default voice patch, patching rules | in progress |
 | `sat-theme` | Dots design tokens (`assets/dots/tokens.json`) generated into a Rust `Palette`, plus spacing, radius and type scales | done |
 | `sat-ui` | vello + parley painter, top bar, arrange view, source grid, piano roll, step editors, mixer, shared controls (faders, knobs, meters), hit-testing, headless GPU rendering | in progress |
 | `sat-app` | the `sat` binary: winit window, vello surface, cpal output running the engine, mixing gestures with undo, open / save / autosave | in progress |
@@ -85,10 +90,12 @@ cargo run --release -p sat-app -- my.sat  # opens a project bundle
 | piano roll: drag a note, its right edge, the velocity lane | move it (time and pitch), resize it, set velocity; the selection moves together |
 | piano roll: double-click a note, Delete, arrows, Ctrl+A, Esc | delete, delete the selection, nudge by the grid or transpose (Shift: octave), select all, clear |
 | piano roll: select tool, shift-click, the grid and quantise buttons | box-select, add to the selection, change the grid (Alt drags off it), snap starts to the grid |
-| top bar view buttons, "open source grid", "‹ arrange" | switch between the arrangement and the selected track's source grid |
+| top bar view buttons, "open source grid", "‹ arrange" | switch between the arrangement and the selected track's source or instrument grid |
 | source grid: drag a module's header, drag a parameter row, drag the canvas or wheel | move the module, change the value, pan |
 | source grid: drag from a notes out to a clip's inlet, drag a wire off an inlet | wire that clip to the module (replacing its feed), rewire or unplug it |
 | source grid: + module, the dock's +, Delete, Esc | add a piano roll, drum seq or euclid; add a one-bar clip after the track's last one; remove the selected module; deselect |
+| instrument grid: drag from an out to an in of the same colour, drag a cable off an in | patch them (replacing what fed that input; loops are refused), repatch or unplug it |
+| instrument grid: drag a parameter row, + module, Delete | change the sound while it plays, add a module, remove the selected module |
 | drum seq: click a step, Shift-click it, the page buttons | toggle it, cycle its velocity (normal, accent, ghost), show another bar |
 | euclid: drag a knob, click a trig | change steps, hits, rotation, accents, note, rate, gate or velocity; add or remove a hand edit over the generator |
 | euclid: clear, bake, generative / fixed | drop the hand edits, fix generator and edits into plain steps, switch between them |
@@ -108,6 +115,7 @@ cargo run --release -p sat-ui --example screenshot -- arrange.png 2         # cl
 cargo run --release -p sat-ui --example screenshot -- mixer.png 2 mixer     # mixer panel
 cargo run --release -p sat-ui --example screenshot -- euclid.png 2 euclid   # a clip by name
 cargo run --release -p sat-ui --example screenshot -- grid.png 2 clip grid  # its source grid
+cargo run --release -p sat-ui --example screenshot -- ins.png 2 clip instrument  # its instrument grid
 ```
 
 ## Listening

@@ -319,7 +319,8 @@ mod grid {
     fn cards_ports_inlets_and_wires_line_up() {
         let d = demo();
         let track = d.doc.clips[&d.selected].track;
-        let l = layout(&d.doc, track, area(), &GridView::default()).unwrap();
+        let grid = d.doc.tracks[&track].source_grid.unwrap();
+        let l = layout(&d.doc, grid, area(), &GridView::default()).unwrap();
         assert_eq!(l.cards.len(), 2, "piano roll and an unwired euclid");
         assert_eq!(l.rows.len(), 3);
         assert_eq!(l.wires.len(), 3, "the piano roll feeds every bass clip");
@@ -334,7 +335,7 @@ mod grid {
         assert_eq!(l.hit(pr.header.center()), GridHit::Header(pr.module));
         let eu = &l.cards[1];
         assert_eq!(l.hit(eu.params[1].1.center()), GridHit::Param(eu.module, "hits"));
-        assert_eq!(l.hit(eu.preview.center()), GridHit::Module(eu.module));
+        assert_eq!(l.hit(eu.preview.unwrap().center()), GridHit::Module(eu.module));
         let row = l.rows[1];
         assert_eq!(l.hit(row.inlet), GridHit::Inlet(row.clip));
         assert_eq!(l.hit(row.rect.center()), GridHit::Row(row.clip));
@@ -345,7 +346,7 @@ mod grid {
         assert_eq!(l.hit(l.add_clip.center()), GridHit::AddClip);
         assert_eq!(l.hit(Point::new(l.canvas.x1 - 40.0, l.canvas.y1 - 60.0)), GridHit::Canvas);
         // the menu lists the source modules
-        let open = layout(&d.doc, track, area(), &GridView { menu: true, ..Default::default() }).unwrap();
+        let open = layout(&d.doc, grid, area(), &GridView { menu: true, ..Default::default() }).unwrap();
         assert_eq!(open.hit(open.menu[2].1.center()), GridHit::MenuItem(sat_modules::EUCLID));
     }
 
@@ -353,17 +354,61 @@ mod grid {
     fn panning_moves_cards_and_positions_round_trip() {
         let d = demo();
         let track = d.doc.clips[&d.selected].track;
+        let grid = d.doc.tracks[&track].source_grid.unwrap();
         let v = GridView { scroll: Vec2::new(30.0, 10.0), ..Default::default() };
-        let a = layout(&d.doc, track, area(), &GridView::default()).unwrap();
-        let b = layout(&d.doc, track, area(), &v).unwrap();
+        let a = layout(&d.doc, grid, area(), &GridView::default()).unwrap();
+        let b = layout(&d.doc, grid, area(), &v).unwrap();
         assert_eq!(a.cards[0].rect.origin() - b.cards[0].rect.origin(), Vec2::new(30.0, 10.0));
         let pt = to_screen(b.canvas, v.scroll, (120.0, 64.0));
         assert_eq!(to_pos(b.canvas, v.scroll, pt), (120.0, 64.0));
-        let grid = d.doc.tracks[&track].source_grid.unwrap();
         let (x, y) = free_pos(&d.doc, grid);
         let low = d.doc.modules_on(grid).map(|m| m.pos.1 + sat_ui::grid::card_h(m) as f32).fold(0.0, f32::max);
         assert!(x == 0.0 && y > low, "below the lowest card");
-        // tracks without a source grid have no grid view
-        assert!(layout(&d.doc, d.doc.master, area(), &GridView::default()).is_none());
+        // an unknown grid has no grid view
+        assert!(layout(&d.doc, sat_doc::GridId::new(), area(), &GridView::default()).is_none());
+    }
+
+    #[test]
+    fn instrument_grids_wire_ports_to_ports() {
+        use sat_modules::instrument as ins;
+        let d = demo();
+        let track = d.doc.clips[&d.selected].track;
+        let grid = d.doc.tracks[&track].instrument_grid.unwrap();
+        let l = layout(&d.doc, grid, area(), &GridView::default()).unwrap();
+        assert_eq!(l.kind, sat_doc::GridKind::Instrument);
+        assert!(l.rows.is_empty() && l.dock.is_zero_area(), "no clip dock");
+        assert_eq!(l.canvas.x1, area().x1, "the canvas takes the full width");
+        assert_eq!(l.cards.len(), 6, "the default voice patch");
+        assert_eq!(l.wires.len(), 7);
+        // every cable ends on an input dot and starts on an output dot
+        for w in &l.wires {
+            assert!(l.cards.iter().any(|c| c.outs.iter().any(|(_, p)| *p == w.from)));
+            assert!(l.cards.iter().any(|c| c.ins.iter().any(|(_, p)| *p == w.to)));
+        }
+        let kind = |k: &str| l.cards.iter().find(|c| d.doc.modules[&c.module].kind == k).unwrap();
+        let filter = kind(ins::FILTER);
+        assert!(filter.preview.is_none());
+        assert_eq!(filter.params.len(), 5);
+        let (key, at) = filter.ins[1];
+        assert_eq!(key, "cutoff");
+        assert_eq!(at.x, filter.rect.x0, "inputs on the left");
+        assert_eq!(l.hit(at), GridHit::In(filter.module, "cutoff"));
+        assert_eq!(l.input_near(Point::new(at.x - 10.0, at.y + 4.0)), Some((filter.module, "cutoff")));
+        assert_eq!(l.input_near(l.canvas.center() + Vec2::new(0.0, 200.0)), None);
+        assert_eq!(l.hit(filter.params[1].1.center()), GridHit::Param(filter.module, "cutoff"));
+        assert_eq!(l.hit(filter.outs[0].1), GridHit::Out(filter.module, "out"));
+        // the menu lists instrument modules
+        let open = layout(&d.doc, grid, area(), &GridView { menu: true, ..Default::default() }).unwrap();
+        assert_eq!(open.menu.len(), ins::MODULES.len());
+        assert_eq!(open.hit(open.menu[1].1.center()), GridHit::MenuItem(ins::VCO));
+        // a new module goes right of the patch, along the top
+        let (x, y) = free_pos(&d.doc, grid);
+        assert!(y == 0.0 && l.cards.iter().all(|c| to_screen(l.canvas, Vec2::ZERO, (x, y)).x > c.rect.x1));
+        // cards in the default patch do not overlap
+        for (i, a) in l.cards.iter().enumerate() {
+            for b in &l.cards[i + 1..] {
+                assert!(a.rect.intersect(b.rect).is_zero_area(), "{:?} {:?}", a.rect, b.rect);
+            }
+        }
     }
 }

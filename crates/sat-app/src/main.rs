@@ -37,11 +37,11 @@ use std::time::{Duration, Instant};
 use sat_compile::Compiled;
 use sat_doc::sat_time::Ticks;
 use sat_doc::{
-    CableId, ClipId, Document, Endpoint, History, ModuleId, Note, Op, ParamTarget, PortRef, TrackFlag, TrackId,
-    TrackKind,
+    CableId, ClipId, Document, Endpoint, GridKind, History, ModuleId, Note, Op, ParamTarget, PortRef, TrackFlag,
+    TrackId, TrackKind,
 };
 use sat_engine::{Command, EngineHandle};
-use sat_modules::{Editor, drum, euclid};
+use sat_modules::{Editor, PortKind, drum, euclid};
 use sat_ui::arrange::{ArrangeLayout, ArrangeState, Hit, TransportView, header_controls};
 use sat_ui::controls::{self, SILENT_DB};
 use sat_ui::grid::{self, GridHit, GridLayout, GridView};
@@ -211,13 +211,19 @@ enum RollDrag {
     Box { from: Point, keep: Vec<usize> },
 }
 
-/// A drag in the source grid.
+/// The spec of a module parameter.
+fn module_spec(doc: &Document, target: &ParamTarget) -> Option<&'static sat_modules::ParamSpec> {
+    let ParamTarget::Module { module, param } = target else { return None };
+    sat_modules::spec(&doc.modules.get(module)?.kind, param)
+}
+
+/// A drag in a grid.
 #[derive(Debug, Clone)]
 enum GridDrag {
     /// Moving a module by its header.
     Module { id: ModuleId, from: Point, start: (f32, f32) },
-    /// Pulling a cable from an output; `detach` is the cable picked up off an inlet.
-    Wire { from: PortRef, start: Point, detach: Option<CableId> },
+    /// Pulling a cable from an output; `detach` is the cable picked up off an inlet or input.
+    Wire { from: PortRef, kind: PortKind, start: Point, detach: Option<CableId> },
     /// Panning the canvas.
     Pan { from: Point, start: Vec2 },
 }
@@ -233,7 +239,7 @@ fn position_of(doc: &Document, target: &ParamTarget) -> f64 {
             .find(|s| s.target == *target)
             .map(|s| controls::fader_pos(s.level_db))
             .unwrap_or(0.0),
-        ParamTarget::Module { param, .. } => match (euclid::spec(param), doc.base_value(target)) {
+        ParamTarget::Module { .. } => match (module_spec(doc, target), doc.base_value(target)) {
             (Some(s), v) => s.pos(s.clamp(v.unwrap_or(s.default))),
             _ => 0.0,
         },
@@ -242,19 +248,19 @@ fn position_of(doc: &Document, target: &ParamTarget) -> f64 {
 }
 
 /// The value a control position sets.
-fn value_at(target: &ParamTarget, pos: f64) -> f32 {
+fn value_at(doc: &Document, target: &ParamTarget, pos: f64) -> f32 {
     match target {
         ParamTarget::Pan(_) => controls::pan_at(pos),
-        ParamTarget::Module { param, .. } => euclid::spec(param).map_or(0.0, |s| s.at(pos)),
+        ParamTarget::Module { .. } => module_spec(doc, target).map_or(0.0, |s| s.at(pos)),
         _ => controls::fader_db(pos),
     }
 }
 
 /// The value double-click resets a control to.
-fn default_value(target: &ParamTarget) -> f32 {
+fn default_value(doc: &Document, target: &ParamTarget) -> f32 {
     match target {
         ParamTarget::SendLevel { .. } => SILENT_DB,
-        ParamTarget::Module { param, .. } => euclid::spec(param).map_or(0.0, |s| s.default),
+        ParamTarget::Module { .. } => module_spec(doc, target).map_or(0.0, |s| s.default),
         _ => 0.0,
     }
 }
@@ -464,7 +470,7 @@ impl App {
         }
         self.roll_geom = drawn.roll;
         self.step_geom = drawn.steps;
-        if matches!(self.view, MainView::SourceGrid(_)) && drawn.grid.is_none() {
+        if matches!(self.view, MainView::Grid(_)) && drawn.grid.is_none() {
             // the track went away (undo): back to the arrangement
             self.view = MainView::Arrange;
         }
@@ -535,7 +541,10 @@ impl App {
             ops.push(Op::AddSend { track, target: ret, level_db: SILENT_DB, pre_fader: false });
         }
         if double {
-            self.edit("reset", vec![Op::SetValue { target: target.clone(), value: default_value(&target) }]);
+            self.edit(
+                "reset",
+                vec![Op::SetValue { target: target.clone(), value: default_value(self.history.doc(), &target) }],
+            );
             return;
         }
         self.history.begin_gesture(match target {
@@ -559,8 +568,9 @@ impl App {
             Axis::Horizontal { travel } => (self.cursor.x - d.from.x) / travel,
         };
         let pos = (d.start + delta * fine).clamp(0.0, 1.0);
-        let value = value_at(&d.target, pos);
-        if (value - value_at(&d.target, position_of(self.history.doc(), &d.target))).abs() > f32::EPSILON {
+        let doc = self.history.doc();
+        let value = value_at(doc, &d.target, pos);
+        if (value - value_at(doc, &d.target, position_of(doc, &d.target))).abs() > f32::EPSILON {
             self.edit("drag", vec![Op::SetValue { target: d.target, value }]);
         }
     }
@@ -775,12 +785,13 @@ impl App {
         {
             match shell::view_buttons(sl.topbar).into_iter().find(|(_, r)| r.contains(pt)).map(|(b, _)| b) {
                 Some(ViewButton::Arrange) => self.view = MainView::Arrange,
-                Some(ViewButton::SourceGrid) => self.open_grid(self.arrange.selected_track),
+                Some(ViewButton::SourceGrid) => self.open_grid(self.arrange.selected_track, GridKind::Source),
+                Some(ViewButton::Instrument) => self.open_grid(self.arrange.selected_track, GridKind::Instrument),
                 _ => {}
             }
             return;
         }
-        if matches!(self.view, MainView::SourceGrid(_)) {
+        if matches!(self.view, MainView::Grid(_)) {
             return self.press_grid(pt, double);
         }
         let Some(layout) = &self.layout else { return };
@@ -825,7 +836,7 @@ impl App {
         if self.panel == PanelView::Clip {
             if piano_roll::open_grid_button(sl.panel).contains(pt) {
                 let track = self.arrange.selected_clip.and_then(|c| self.history.doc().clips.get(&c)).map(|c| c.track);
-                return self.open_grid(track);
+                return self.open_grid(track, GridKind::Source);
             }
             if self.step_geom.is_some() {
                 return self.press_steps(pt, double);
@@ -918,16 +929,24 @@ impl App {
         }
     }
 
-    /// Shows `track`'s source grid.
-    fn open_grid(&mut self, track: Option<TrackId>) {
-        let Some(t) = track.filter(|t| self.history.doc().tracks.get(t).is_some_and(|tr| tr.source_grid.is_some()))
-        else {
+    /// Shows `track`'s source or instrument grid.
+    fn open_grid(&mut self, track: Option<TrackId>, kind: GridKind) {
+        let doc = self.history.doc();
+        let Some((t, g)) = track.and_then(|t| {
+            let tr = doc.tracks.get(&t)?;
+            let g = match kind {
+                GridKind::Source => tr.source_grid,
+                GridKind::Instrument => tr.instrument_grid,
+                GridKind::Fx => tr.fx_grids.front().copied(),
+            };
+            Some((t, g?))
+        }) else {
             return;
         };
-        if self.view != MainView::SourceGrid(t) {
+        if self.view != MainView::Grid(g) {
             self.grid = GridView::default();
         }
-        self.view = MainView::SourceGrid(t);
+        self.view = MainView::Grid(g);
         self.arrange.selected_track = Some(t);
     }
 
@@ -957,8 +976,22 @@ impl App {
             }
             GridHit::Out(id, key) => {
                 let start = l.card(id).and_then(|c| c.outs.iter().find(|(k, _)| *k == key)).map_or(pt, |(_, p)| *p);
-                self.grid.wire = Some((start, pt));
-                self.grid_drag = Some(GridDrag::Wire { from: PortRef::new(id, key), start, detach: None });
+                let kind = grid::port_kind(self.history.doc(), id, key);
+                self.grid.wire = Some((start, pt, kind));
+                self.grid_drag = Some(GridDrag::Wire { from: PortRef::new(id, key), kind, start, detach: None });
+            }
+            GridHit::In(id, key) => {
+                // pick the cable up off the input; dropping it elsewhere repatches or unplugs it
+                let doc = self.history.doc();
+                let to = Endpoint::Port(PortRef::new(id, key));
+                if let Some(k) = doc.cables.values().find(|k| k.to == to).cloned() {
+                    let start = l.wires.iter().find(|w| w.cable == k.id).map_or(pt, |w| w.from);
+                    let kind = grid::port_kind(doc, id, key);
+                    self.grid.wire = Some((start, pt, kind));
+                    self.grid_drag = Some(GridDrag::Wire { from: k.from, kind, start, detach: Some(k.id) });
+                } else {
+                    self.grid.selected = Some(id);
+                }
             }
             GridHit::Param(id, key) => {
                 self.grid.selected = Some(id);
@@ -971,8 +1004,9 @@ impl App {
                 // pick the wire up off the inlet; dropping it elsewhere rewires or unplugs it
                 if let Some(k) = self.history.doc().inlet_cable(clip).cloned() {
                     let start = l.wires.iter().find(|w| w.cable == k.id).map_or(pt, |w| w.from);
-                    self.grid.wire = Some((start, pt));
-                    self.grid_drag = Some(GridDrag::Wire { from: k.from, start, detach: Some(k.id) });
+                    self.grid.wire = Some((start, pt, PortKind::Notes));
+                    let kind = PortKind::Notes;
+                    self.grid_drag = Some(GridDrag::Wire { from: k.from, kind, start, detach: Some(k.id) });
                 }
             }
             GridHit::Row(clip) => self.select_clip(clip),
@@ -995,7 +1029,7 @@ impl App {
                     self.edit("move module", vec![Op::MoveModule { id, pos }]);
                 }
             }
-            GridDrag::Wire { start, .. } => self.grid.wire = Some((start, pt)),
+            GridDrag::Wire { start, kind, .. } => self.grid.wire = Some((start, pt, kind)),
             GridDrag::Pan { from, start } => {
                 let s = start - (pt - from);
                 self.grid.scroll = Vec2::new(s.x.max(0.0), s.y.max(0.0));
@@ -1007,6 +1041,22 @@ impl App {
         self.grid.wire = None;
         match d {
             GridDrag::Module { .. } => self.history.end_gesture(),
+            GridDrag::Wire { from, detach, .. }
+                if self.grid_layout.as_ref().is_some_and(|l| l.kind != GridKind::Source) =>
+            {
+                let target = self.grid_layout.as_ref().and_then(|l| l.input_near(self.cursor));
+                let doc = self.history.doc();
+                let ops = match target {
+                    Some((m, key)) => match sat_modules::patch(doc, &from, &PortRef::new(m, key), detach) {
+                        Some(ops) => ops,
+                        None => return, // the ports do not fit: leave everything as it was
+                    },
+                    None => detach.map(|id| Op::Disconnect { id }).into_iter().collect(),
+                };
+                if !ops.is_empty() {
+                    self.edit(if target.is_some() { "patch" } else { "unplug" }, ops);
+                }
+            }
             GridDrag::Wire { from, detach, .. } => {
                 let target = self.grid_layout.as_ref().and_then(|l| l.inlet_near(self.cursor));
                 let doc = self.history.doc();
@@ -1069,7 +1119,7 @@ impl App {
 
     /// Source grid keys: delete removes the selected module, escape closes the menu or deselects.
     fn grid_key(&mut self, key: &Key) -> bool {
-        if !matches!(self.view, MainView::SourceGrid(_)) {
+        if !matches!(self.view, MainView::Grid(_)) {
             return false;
         }
         match key {
@@ -1134,8 +1184,7 @@ impl App {
     }
 
     fn scroll(&mut self, dx: f64, dy: f64) {
-        if matches!(self.view, MainView::SourceGrid(_)) && self.shell.is_some_and(|sl| sl.arrange.contains(self.cursor))
-        {
+        if matches!(self.view, MainView::Grid(_)) && self.shell.is_some_and(|sl| sl.arrange.contains(self.cursor)) {
             let (dx, dy) = if self.mods.shift_key() { (dy, dx) } else { (dx, dy) };
             self.grid.scroll = Vec2::new((self.grid.scroll.x - dx).max(0.0), (self.grid.scroll.y - dy).max(0.0));
             return;

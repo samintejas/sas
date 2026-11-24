@@ -1,7 +1,7 @@
 //! The app shell: top bar, arrange view and bottom panel.
 
 use sat_doc::sat_time::{PPQ, Ticks};
-use sat_doc::{Document, TrackId};
+use sat_doc::{Document, GridId, GridKind};
 use sat_theme::{Rgba, Theme};
 use vello::Scene;
 use vello::kurbo::Rect;
@@ -26,8 +26,8 @@ pub enum MainView {
     /// The arrangement.
     #[default]
     Arrange,
-    /// A track's source grid.
-    SourceGrid(TrackId),
+    /// One of a track's grids.
+    Grid(GridId),
 }
 
 /// The view buttons in the top bar.
@@ -39,7 +39,7 @@ pub enum ViewButton {
     Arrange,
     /// The selected track's source grid.
     SourceGrid,
-    /// Instrument grid (later).
+    /// The selected track's instrument grid.
     Instrument,
     /// Fx grid (later).
     Fx,
@@ -175,7 +175,11 @@ fn topbar(p: &mut Painter<'_>, th: &Theme, f: &Frame<'_>, r: Rect) {
     }
     let active = match f.view {
         MainView::Arrange => ViewButton::Arrange,
-        MainView::SourceGrid(_) => ViewButton::SourceGrid,
+        MainView::Grid(g) => match f.doc.grids.get(&g).map(|g| g.kind) {
+            Some(GridKind::Instrument) => ViewButton::Instrument,
+            Some(GridKind::Fx) => ViewButton::Fx,
+            _ => ViewButton::SourceGrid,
+        },
     };
     let icons = [Icon::Grid, Icon::Lines, Icon::Panel, Icon::Gear, Icon::Sliders];
     for ((b, br), ic) in view_buttons(r).into_iter().zip(icons) {
@@ -253,8 +257,8 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
     let al = ArrangeLayout::new(f.doc, f.arrange, sl.arrange);
     let mut gl = None;
     match f.view {
-        MainView::SourceGrid(t) => {
-            p.clip(sl.arrange, |p| gl = grid::draw(p, th, f.doc, t, f.grid, f.arrange.selected_clip, sl.arrange));
+        MainView::Grid(g) => {
+            p.clip(sl.arrange, |p| gl = grid::draw(p, th, f.doc, g, f.grid, f.arrange.selected_clip, sl.arrange));
         }
         MainView::Arrange => {
             p.clip(sl.arrange, |p| arrange::draw(p, th, f.doc, f.arrange, &f.transport, f.levels, &al));

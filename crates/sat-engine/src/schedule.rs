@@ -52,6 +52,13 @@ pub enum Param {
     InputGain(u16),
     /// A synth parameter.
     Synth(SynthParam),
+    /// Parameter `index` of module `slot` of an instrument.
+    Module {
+        /// Module slot in the patch (0 for the drum synth).
+        slot: u8,
+        /// Parameter index.
+        index: u8,
+    },
 }
 
 /// A stereo buffer.
@@ -186,6 +193,8 @@ pub enum NodeKind {
     Strip(Box<Strip>),
     /// A built-in test synth playing note events.
     Synth(Box<Synth>),
+    /// A patch or drum synth playing note events.
+    Instrument(Box<crate::Instrument>),
 }
 
 /// A node in the schedule.
@@ -370,6 +379,7 @@ impl Schedule {
             (NodeKind::Strip(s), Param::Pan) => s.pan = v,
             (NodeKind::Strip(s), Param::Mute) => s.mute = v > 0.5,
             (NodeKind::Synth(s), Param::Synth(sp)) => s.set_param(sp, v),
+            (NodeKind::Instrument(s), Param::Module { slot, index }) => return s.set_param(slot, index, v),
             _ => return false,
         }
         true
@@ -388,6 +398,7 @@ impl Schedule {
                     let (n, o) = (&mut self.nodes[ia.1 as usize], &mut old.nodes[ib.1 as usize]);
                     match (&mut n.kind, &mut o.kind) {
                         (NodeKind::Synth(n), NodeKind::Synth(o)) => n.adopt(o),
+                        (NodeKind::Instrument(n), NodeKind::Instrument(o)) => n.adopt(o),
                         (NodeKind::Strip(n), NodeKind::Strip(o)) => n.gains = o.gains,
                         _ => {}
                     }
@@ -401,8 +412,10 @@ impl Schedule {
     /// Releases every sounding note.
     pub(crate) fn all_notes_off(&mut self) {
         for n in &mut self.nodes {
-            if let NodeKind::Synth(s) = &mut n.kind {
-                s.release_all();
+            match &mut n.kind {
+                NodeKind::Synth(s) => s.release_all(),
+                NodeKind::Instrument(s) => s.release_all(),
+                _ => {}
             }
         }
     }
@@ -430,6 +443,7 @@ impl Schedule {
                 NodeKind::Sum => {}
                 NodeKind::Strip(s) => s.process(out, off, len, pos),
                 NodeKind::Synth(s) => s.process(out, off, len, pos, self.sample_rate),
+                NodeKind::Instrument(s) => s.process(out, off, len, pos, self.sample_rate),
             }
         }
     }

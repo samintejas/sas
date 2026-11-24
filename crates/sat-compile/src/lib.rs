@@ -6,8 +6,9 @@
 //! master's strip is the output. Node ids are derived from document ids, so
 //! state carries over when a recompiled schedule replaces the running one.
 //!
-//! Phase 1 scope: the instrument is the built-in test synth (a module of
-//! kind [`TEST_SYNTH`] on the instrument grid) and a clip plays the pattern
+//! A track's instrument is the voice patch on its instrument grid (see
+//! [`build_patch`]), else its drum synth, else the old built-in test synth
+//! (a module of kind [`TEST_SYNTH`]). A clip plays the pattern
 //! of the source module wired straight into its dock inlet (a generator's
 //! output plus the clip's hand edits; see `sat_modules`). Processors, fx
 //! modules and session launching arrive with later phases.
@@ -20,9 +21,11 @@ use std::sync::Arc;
 use sat_doc::sat_time::{TempoMap, Ticks};
 use sat_doc::*;
 use sat_engine::{
-    AutoCurve, AutoPoint, Automation, Command, Meter, NodeId, NodeKind, NoteEvent, Param, Schedule, ScheduleBuilder,
-    Strip, Synth, SynthParam, Wave, db_to_gain,
+    AutoCurve, AutoPoint, Automation, Command, Instrument, MAX_MODS, MAX_PARAMS, MAX_REGS, Meter, NONE, NodeId,
+    NodeKind, NoteEvent, Param, Patch, Schedule, ScheduleBuilder, Strip, Synth, SynthParam, VKind, VModule, Wave,
+    db_to_gain,
 };
+use sat_modules::instrument as ins;
 
 /// Module kind of the built-in test synth.
 pub const TEST_SYNTH: &str = "test_synth";
@@ -199,9 +202,148 @@ fn solo_audible(doc: &Document) -> Option<BTreeSet<TrackId>> {
     Some(audible)
 }
 
-fn find_synth<'a>(doc: &'a Document, track: &Track) -> Option<&'a Module> {
+fn vkind(kind: &str) -> Option<VKind> {
+    Some(match kind {
+        ins::NOTE_IN => VKind::NoteIn,
+        ins::VCO => VKind::Vco,
+        ins::NOISE => VKind::Noise,
+        ins::MIXER => VKind::Mixer,
+        ins::FILTER => VKind::Filter,
+        ins::ADSR => VKind::Adsr,
+        ins::VCA => VKind::Vca,
+        ins::LFO => VKind::Lfo,
+        ins::VOICE_OUT => VKind::VoiceOut,
+        _ => return None,
+    })
+}
+
+/// A module's parameter values in engine order, clamped to their ranges.
+fn param_values(m: &Module) -> [f32; MAX_PARAMS] {
+    let mut v = [0.0; MAX_PARAMS];
+    for (i, s) in sat_modules::params_of(&m.kind).iter().take(MAX_PARAMS).enumerate() {
+        v[i] = s.clamp(m.params.get(s.key).copied().unwrap_or(s.default));
+    }
+    v
+}
+
+/// Builds a voice patch from the patch modules on `grid`, in dependency
+/// order (modules caught in a cycle are left out), with each module's slot.
+pub fn build_patch(doc: &Document, grid: GridId) -> Option<(Patch, Vec<ModuleId>)> {
+    let mods: Vec<&Module> = doc.modules_on(grid).filter(|m| vkind(&m.kind).is_some()).collect();
+    if !mods.iter().any(|m| m.kind == ins::VOICE_OUT) {
+        return None;
+    }
+    let idx = |id: ModuleId| mods.iter().position(|m| m.id == id);
+    // edges: (from module, from port) -> (to module, to port)
+    let edges: Vec<(usize, &str, usize, &str)> = doc
+        .cables_on(grid)
+        .filter_map(|k| match &k.to {
+            Endpoint::Port(p) => Some((idx(k.from.module)?, k.from.port.as_str(), idx(p.module)?, p.port.as_str())),
+            Endpoint::Inlet(_) => None,
+        })
+        .collect();
+    // Kahn's algorithm, lowest index first, for a stable order
+    let mut indeg = vec![0usize; mods.len()];
+    for (a, _, b, _) in &edges {
+        if a != b {
+            indeg[*b] += 1;
+        }
+    }
+    let mut ready: BTreeSet<usize> = (0..mods.len()).filter(|&i| indeg[i] == 0).collect();
+    let mut order = Vec::new();
+    while let Some(i) = ready.pop_first() {
+        order.push(i);
+        for (a, _, b, _) in &edges {
+            if *a == i && *b != i {
+                indeg[*b] -= 1;
+                if indeg[*b] == 0 {
+                    ready.insert(*b);
+                }
+            }
+        }
+    }
+    order.truncate(MAX_MODS);
+    // a register per connected output
+    let mut regs: HashMap<(usize, &str), u8> = HashMap::new();
+    for (a, pa, b, _) in &edges {
+        if order.contains(a) && order.contains(b) && !regs.contains_key(&(*a, *pa)) && regs.len() < MAX_REGS {
+            let r = regs.len() as u8;
+            regs.insert((*a, *pa), r);
+        }
+    }
+    let mut out = Vec::new();
+    let mut slots = Vec::new();
+    for &i in &order {
+        let m = mods[i];
+        let mut vm = VModule::new(vkind(&m.kind)?);
+        let ports = sat_modules::ports(&m.kind);
+        for (j, p) in ports.iter().filter(|p| p.input).take(4).enumerate() {
+            vm.ins[j] = edges
+                .iter()
+                .find(|(a, _, b, pb)| *b == i && *pb == p.key && order.contains(a))
+                .and_then(|(a, pa, _, _)| regs.get(&(*a, *pa)).copied())
+                .unwrap_or(NONE);
+        }
+        for (j, p) in ports.iter().filter(|p| !p.input).take(3).enumerate() {
+            vm.outs[j] = regs.get(&(i, p.key)).copied().unwrap_or(NONE);
+        }
+        vm.params = param_values(m);
+        out.push(vm);
+        slots.push(m.id);
+    }
+    Some((Patch { mods: out }, slots))
+}
+
+/// The instrument a track plays its notes through, and where each module
+/// parameter lands in it.
+fn build_instrument(
+    doc: &Document,
+    track: &Track,
+    events: Vec<NoteEvent>,
+) -> Option<(NodeKind, Vec<(ParamTarget, Param)>)> {
     let g = track.instrument_grid?;
-    doc.modules_on(g).find(|m| m.kind == TEST_SYNTH)
+    if let Some((patch, slots)) = build_patch(doc, g) {
+        let mut targets = Vec::new();
+        for (slot, id) in slots.iter().enumerate() {
+            let m = &doc.modules[id];
+            for (index, s) in sat_modules::params_of(&m.kind).iter().take(MAX_PARAMS).enumerate() {
+                targets.push((
+                    ParamTarget::Module { module: *id, param: s.key.into() },
+                    Param::Module { slot: slot as u8, index: index as u8 },
+                ));
+            }
+        }
+        return Some((NodeKind::Instrument(Box::new(Instrument::patch(events, patch))), targets));
+    }
+    if let Some(m) = doc.modules_on(g).find(|m| m.kind == ins::DRUM_SYNTH) {
+        let v = param_values(m);
+        let targets = sat_modules::params_of(&m.kind)
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                (ParamTarget::Module { module: m.id, param: s.key.into() }, Param::Module { slot: 0, index: i as u8 })
+            })
+            .collect();
+        return Some((NodeKind::Instrument(Box::new(Instrument::drums(events, v[0], v[1], v[2]))), targets));
+    }
+    let m = doc.modules_on(g).find(|m| m.kind == TEST_SYNTH)?;
+    let wave = if m.params.get("wave").copied().unwrap_or(0.0) >= 0.5 { Wave::Saw } else { Wave::Sine };
+    let mut s = Synth::new(events, wave, m.params.get("level").copied().unwrap_or(0.25));
+    for (key, sp) in [("attack", SynthParam::Attack), ("release", SynthParam::Release)] {
+        if let Some(v) = m.params.get(key) {
+            s.set_param(sp, *v);
+        }
+    }
+    let targets = [
+        ("level", SynthParam::Level),
+        ("attack", SynthParam::Attack),
+        ("release", SynthParam::Release),
+        ("wave", SynthParam::Wave),
+    ]
+    .into_iter()
+    .map(|(key, sp)| (ParamTarget::Module { module: m.id, param: key.into() }, Param::Synth(sp)))
+    .collect();
+    Some((NodeKind::Synth(Box::new(s)), targets))
 }
 
 /// Compiles `doc` for `sample_rate`, processing at most `max_block` frames per run.
@@ -221,7 +363,7 @@ pub fn compile(doc: &Document, sample_rate: f64, max_block: usize) -> Result<Com
         let strip_id = nid(t, SALT_STRIP);
         // the node feeding the strip (and pre-fader sends)
         let pre: Option<NodeId> = match tr.kind {
-            TrackKind::Track => find_synth(doc, tr).map(|m| {
+            TrackKind::Track => {
                 let mut events = Vec::new();
                 for p in doc.placements.values().filter(|p| doc.clips.get(&p.clip).is_some_and(|c| c.track == t)) {
                     for n in placement_notes(doc, p) {
@@ -230,28 +372,15 @@ pub fn compile(doc: &Document, sample_rate: f64, max_block: usize) -> Result<Com
                         events.push(NoteEvent { at, len, pitch: n.pitch, velocity: n.velocity });
                     }
                 }
-                let wave = if m.params.get("wave").copied().unwrap_or(0.0) >= 0.5 { Wave::Saw } else { Wave::Sine };
-                let mut s = Synth::new(events, wave, m.params.get("level").copied().unwrap_or(0.25));
-                let id = nid(t, SALT_SYNTH);
-                for (key, sp) in [("attack", SynthParam::Attack), ("release", SynthParam::Release)] {
-                    if let Some(v) = m.params.get(key) {
-                        s.set_param(sp, *v);
+                build_instrument(doc, tr, events).map(|(kind, targets)| {
+                    let id = nid(t, SALT_SYNTH);
+                    for (target, param) in targets {
+                        params.insert(target, (id, param, Conv::Same));
                     }
-                }
-                for (key, sp) in [
-                    ("level", SynthParam::Level),
-                    ("attack", SynthParam::Attack),
-                    ("release", SynthParam::Release),
-                    ("wave", SynthParam::Wave),
-                ] {
-                    params.insert(
-                        ParamTarget::Module { module: m.id, param: key.into() },
-                        (id, Param::Synth(sp), Conv::Same),
-                    );
-                }
-                b.node(id, NodeKind::Synth(Box::new(s)), vec![]);
-                id
-            }),
+                    b.node(id, kind, vec![]);
+                    id
+                })
+            }
             TrackKind::Group | TrackKind::Return | TrackKind::Master => Some(nid(t, SALT_BUS)),
         };
         let solo_muted = audible.as_ref().is_some_and(|a| !a.contains(&t));

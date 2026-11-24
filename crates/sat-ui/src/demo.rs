@@ -18,6 +18,16 @@ struct B {
     ops: Vec<Op>,
 }
 
+/// What plays a demo track.
+enum Ins {
+    /// The default voice patch with (module kind, parameter, value) tweaks.
+    Patch(&'static [(&'static str, &'static str, f32)]),
+    /// The drum synth.
+    Drums,
+    /// The built-in test synth with a name and a wave.
+    Test(&'static str, f32),
+}
+
 impl B {
     fn group(&mut self, name: &str, color: u8, index: usize) -> TrackId {
         let (id, op) = Op::add_bus(TrackKind::Group, name, None, index);
@@ -26,8 +36,8 @@ impl B {
         id
     }
 
-    fn track(&mut self, name: &str, color: u8, parent: Option<TrackId>, synth: &str, wave: f32) -> (TrackId, ModuleId) {
-        self.track_with(name, color, parent, synth, wave, sat_modules::PIANO_ROLL, "piano roll")
+    fn track(&mut self, name: &str, color: u8, parent: Option<TrackId>, ins: Ins) -> (TrackId, ModuleId) {
+        self.track_with(name, color, parent, ins, sat_modules::PIANO_ROLL, "piano roll")
     }
 
     /// The grid a module was added to.
@@ -41,14 +51,12 @@ impl B {
             .expect("module added")
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn track_with(
         &mut self,
         name: &str,
         color: u8,
         parent: Option<TrackId>,
-        synth: &str,
-        wave: f32,
+        ins_kind: Ins,
         kind: &str,
         module: &str,
     ) -> (TrackId, ModuleId) {
@@ -58,14 +66,28 @@ impl B {
         self.ops.push(op);
         self.ops.push(Op::SetTrackColor { id, color: Color(color) });
         let seq = ModuleId::new();
-        self.ops.push(Op::AddModule {
-            id: ModuleId::new(),
-            grid: ins,
-            kind: "test_synth".into(),
-            name: synth.into(),
-            params: OrdMap::from(vec![("wave".to_string(), wave), ("level".to_string(), 0.2)]),
-            pos: (0.0, 0.0),
-        });
+        match ins_kind {
+            Ins::Patch(tweaks) => self.ops.extend(sat_modules::instrument::default_patch_ops(ins, tweaks).0),
+            Ins::Drums => {
+                let kind = sat_modules::instrument::DRUM_SYNTH;
+                self.ops.push(Op::AddModule {
+                    id: ModuleId::new(),
+                    grid: ins,
+                    kind: kind.into(),
+                    name: sat_modules::label_of(kind).into(),
+                    params: sat_modules::default_params(kind),
+                    pos: (0.0, 0.0),
+                })
+            }
+            Ins::Test(synth, wave) => self.ops.push(Op::AddModule {
+                id: ModuleId::new(),
+                grid: ins,
+                kind: "test_synth".into(),
+                name: synth.into(),
+                params: OrdMap::from(vec![("wave".to_string(), wave), ("level".to_string(), 0.2)]),
+                pos: (0.0, 0.0),
+            }),
+        }
         self.ops.push(Op::AddModule {
             id: seq,
             grid: src,
@@ -135,12 +157,37 @@ pub fn levels(doc: &Document) -> crate::mixer::Levels {
         .collect()
 }
 
+use sat_modules::instrument::{ADSR, FILTER, NOTE_IN, VCO, VOICE_OUT};
+
+/// A plucky saw bass.
+const BASS: &[(&str, &str, f32)] = &[
+    (NOTE_IN, "voices", 4.0),
+    (FILTER, "cutoff", 420.0),
+    (FILTER, "res", 0.35),
+    (FILTER, "amount", 0.55),
+    (ADSR, "d", 0.25),
+    (ADSR, "s", 0.35),
+    (VOICE_OUT, "level", -4.0),
+];
+/// A short sine blip.
+const BLIP: &[(&str, &str, f32)] =
+    &[(VCO, "wave", 0.0), (FILTER, "cutoff", 3000.0), (ADSR, "d", 0.09), (ADSR, "s", 0.0), (ADSR, "r", 0.06)];
+/// Soft saw pads.
+const PADS: &[(&str, &str, f32)] = &[
+    (FILTER, "cutoff", 1400.0),
+    (FILTER, "amount", 0.15),
+    (ADSR, "a", 0.35),
+    (ADSR, "s", 0.8),
+    (ADSR, "r", 0.9),
+    (VOICE_OUT, "level", -12.0),
+];
+
 /// Builds the demo project.
 pub fn demo() -> Demo {
     let mut doc = Document::new(42);
     let mut b = B { ops: Vec::new() };
     let rhythm = b.group("rhythm", 0, 0);
-    let (drums, dseq) = b.track_with("drums", 0, Some(rhythm), "drum rack", 0.0, sat_modules::DRUM_SEQ, "drum seq");
+    let (drums, dseq) = b.track_with("drums", 0, Some(rhythm), Ins::Drums, sat_modules::DRUM_SEQ, "drum seq");
     let kick = |bars: i64| -> Vec<Note> {
         (0..bars * 4)
             .flat_map(|q| {
@@ -158,7 +205,7 @@ pub fn demo() -> Demo {
     let fill: Vec<Note> = (0..16).map(|s| n(s, 1, 38 + (s % 3) as u8, 0.4 + 0.03 * s as f32)).collect();
     b.clip(drums, dseq, "fill", 0, 1, fill, 12, 4);
 
-    let (bass, bseq) = b.track("bass", 1, Some(rhythm), "mixed · instrument", 1.0);
+    let (bass, bseq) = b.track("bass", 1, Some(rhythm), Ins::Patch(BASS));
     let bass_a = vec![n(0, 3, 45, 0.9), n(4, 2, 48, 0.7), n(8, 2, 45, 0.8), n(11, 3, 43, 0.7), n(14, 2, 40, 0.6)];
     b.clip(bass, bseq, "bass a", 1, 1, bass_a, 0, 4);
     let bass_b = vec![
@@ -191,7 +238,7 @@ pub fn demo() -> Demo {
     let bass_c = vec![n(0, 2, 45, 0.8), n(2, 2, 52, 0.6), n(6, 2, 48, 0.7), n(10, 4, 43, 0.8)];
     b.clip(bass, bseq, "bass c", 1, 1, bass_c, 12, 4);
 
-    let (perc, eseq) = b.track_with("perc", 2, Some(rhythm), "blip", 0.5, sat_modules::EUCLID, "euclid 1");
+    let (perc, eseq) = b.track_with("perc", 2, Some(rhythm), Ins::Patch(BLIP), sat_modules::EUCLID, "euclid 1");
     for (k, v) in [("hits", 7.0), ("rot", 2.0), ("acc", 2.0), ("note", 72.0), ("gate", 0.3), ("vel", 0.55)] {
         b.ops.push(Op::SetValue { target: ParamTarget::Module { module: eseq, param: k.into() }, value: v });
     }
@@ -207,7 +254,7 @@ pub fn demo() -> Demo {
     });
 
     let tops = b.group("tops", 6, 1);
-    let (keys, kseq) = b.track("keys", 6, Some(tops), "piano roll · instrument", 0.0);
+    let (keys, kseq) = b.track("keys", 6, Some(tops), Ins::Patch(PADS));
     let pads = |root: u8| -> Vec<Note> {
         (0..4).flat_map(|c| [0u8, 3, 7, 10].map(|i| n(c * 16, 15, root + i + [0, 5, 3, 7][c as usize], 0.5))).collect()
     };
@@ -215,7 +262,7 @@ pub fn demo() -> Demo {
     b.clip(keys, kseq, "pads 2", 6, 4, pads(60), 8, 8);
 
     let vocals = b.group("vocals", 4, 2);
-    let (vox, vseq) = b.track("vox", 4, Some(vocals), "audio in", 0.0);
+    let (vox, vseq) = b.track("vox", 4, Some(vocals), Ins::Test("audio in", 0.0));
     let line = vec![n(0, 6, 69, 0.7), n(8, 4, 72, 0.7), n(12, 4, 71, 0.6), n(16, 12, 67, 0.7)];
     b.clip(vox, vseq, "take 2", 4, 2, line.clone(), 4, 4);
     b.clip(vox, vseq, "take 3", 4, 2, line, 12, 4);

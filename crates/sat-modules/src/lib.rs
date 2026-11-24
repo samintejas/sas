@@ -12,6 +12,10 @@
 
 pub mod drum;
 pub mod euclid;
+pub mod instrument;
+pub mod spec;
+
+pub use spec::{ParamSpec, Unit};
 
 use im::Vector;
 use sat_doc::sat_time::Ticks;
@@ -56,7 +60,29 @@ pub const NOTES_OUT: PortSpec = PortSpec { key: "notes", kind: PortKind::Notes, 
 pub fn ports(kind: &str) -> &'static [PortSpec] {
     match kind {
         PIANO_ROLL | DRUM_SEQ | EUCLID => &[NOTES_OUT],
-        _ => &[],
+        _ => instrument::ports(kind),
+    }
+}
+
+/// The parameters of a module kind, in knob (and engine) order.
+pub fn params_of(kind: &str) -> &'static [ParamSpec] {
+    match kind {
+        EUCLID => &euclid::PARAMS,
+        _ => instrument::params(kind),
+    }
+}
+
+/// The spec of one parameter of a module kind.
+pub fn spec(kind: &str, key: &str) -> Option<&'static ParamSpec> {
+    params_of(kind).iter().find(|p| p.key == key)
+}
+
+/// The modules that can be added to a grid of `kind`: kind and label.
+pub fn catalogue(kind: GridKind) -> &'static [(&'static str, &'static str)] {
+    match kind {
+        GridKind::Source => &SOURCES,
+        GridKind::Instrument => &instrument::MODULES,
+        GridKind::Fx => &[],
     }
 }
 
@@ -65,7 +91,7 @@ pub const SOURCES: [(&str, &str); 3] = [(PIANO_ROLL, "piano roll"), (DRUM_SEQ, "
 
 /// The label of a module kind.
 pub fn label_of(kind: &str) -> &str {
-    SOURCES.iter().find(|(k, _)| *k == kind).map_or(kind, |(_, l)| l)
+    SOURCES.iter().chain(instrument::MODULES.iter()).find(|(k, _)| *k == kind).map_or(kind, |(_, l)| l)
 }
 
 /// An op that adds a source module of `kind` to `grid` at `pos`, named after
@@ -95,6 +121,48 @@ pub fn wire(doc: &Document, module: ModuleId, clip: ClipId) -> Vec<Op> {
     }
     ops.push(Op::Connect { id: CableId::new(), from, to: Endpoint::Inlet(clip) });
     ops
+}
+
+/// Ops that patch output `from` into input `to` on the same grid, moving the
+/// cable `moving` if one is being dragged and replacing whatever fed `to`.
+/// `None` when the ports do not fit: an output must feed an input of the
+/// same kind on another module, without making a loop.
+pub fn patch(doc: &Document, from: &PortRef, to: &PortRef, moving: Option<CableId>) -> Option<Vec<Op>> {
+    let (a, b) = (doc.modules.get(&from.module)?, doc.modules.get(&to.module)?);
+    let out = ports(&a.kind).iter().find(|p| p.key == from.port && !p.input)?;
+    let inp = ports(&b.kind).iter().find(|p| p.key == to.port && p.input)?;
+    if a.grid != b.grid || a.id == b.id || out.kind != inp.kind {
+        return None;
+    }
+    let cables: Vec<&Cable> = doc.cables_on(a.grid).filter(|k| Some(k.id) != moving).collect();
+    // a loop if `from` is downstream of `to`
+    let mut seen = vec![to.module];
+    let mut i = 0;
+    while i < seen.len() {
+        let m = seen[i];
+        if m == from.module {
+            return None;
+        }
+        for k in &cables {
+            if let Endpoint::Port(p) = &k.to
+                && k.from.module == m
+                && !seen.contains(&p.module)
+            {
+                seen.push(p.module);
+            }
+        }
+        i += 1;
+    }
+    let dest = Endpoint::Port(to.clone());
+    let mut ops: Vec<Op> = moving.map(|id| Op::Disconnect { id }).into_iter().collect();
+    if cables.iter().any(|k| k.from == *from && k.to == dest) && moving.is_none() {
+        return Some(Vec::new());
+    }
+    for k in cables.iter().filter(|k| k.to == dest) {
+        ops.push(Op::Disconnect { id: k.id });
+    }
+    ops.push(Op::Connect { id: CableId::new(), from: from.clone(), to: dest });
+    Some(ops)
 }
 
 /// Which editor the bottom panel opens for a source module.
@@ -138,10 +206,7 @@ pub fn shapes_notes(doc: &Document, target: &ParamTarget) -> bool {
 
 /// Default parameters for a new module of `kind`.
 pub fn default_params(kind: &str) -> im::OrdMap<String, f32> {
-    match kind {
-        EUCLID => euclid::PARAMS.iter().map(|p| (p.key.to_string(), p.default)).collect(),
-        _ => im::OrdMap::new(),
-    }
+    params_of(kind).iter().map(|p| (p.key.to_string(), p.default)).collect()
 }
 
 fn sort(v: &mut [Note]) {
@@ -253,6 +318,40 @@ pub fn step_note(start: Ticks, len: Ticks, pitch: u8, velocity: f32) -> Note {
 mod tests {
     use super::*;
     use im::OrdMap;
+
+    #[test]
+    fn patching_checks_kinds_loops_and_replaces() {
+        use instrument as ins;
+        let mut doc = Document::new(1);
+        let (t, op) = Op::add_track("t", None, 0);
+        apply(&mut doc, op).unwrap();
+        let grid = doc.tracks[&t].instrument_grid.unwrap();
+        let (ops, ids) = ins::default_patch_ops(grid, &[]);
+        for op in ops {
+            apply(&mut doc, op).unwrap();
+        }
+        let [note, vco, filter, vca, _out, adsr] = ids[..] else { panic!() };
+        let pr = |m, k: &str| PortRef::new(m, k);
+        // audio into a mod input, input to input, and a module into itself do not fit
+        assert!(patch(&doc, &pr(vco, "out"), &pr(filter, "cutoff"), None).is_none());
+        assert!(patch(&doc, &pr(vco, "pitch"), &pr(filter, "in"), None).is_none());
+        assert!(patch(&doc, &pr(filter, "out"), &pr(filter, "in"), None).is_none());
+        // vca out back into the filter would loop
+        assert!(patch(&doc, &pr(vca, "out"), &pr(filter, "in"), None).is_none());
+        // the same cable again changes nothing
+        assert_eq!(patch(&doc, &pr(vco, "out"), &pr(filter, "in"), None), Some(Vec::new()));
+        // the envelope into the vco's fm replaces nothing; into the vca cv it replaces
+        let ops = patch(&doc, &pr(adsr, "env"), &pr(vco, "fm"), None).unwrap();
+        assert_eq!(ops.len(), 1);
+        let ops = patch(&doc, &pr(note, "vel"), &pr(vca, "cv"), None).unwrap();
+        assert!(matches!(ops[..], [Op::Disconnect { .. }, Op::Connect { .. }]));
+        for op in ops {
+            apply(&mut doc, op).unwrap();
+        }
+        let into_cv: Vec<_> =
+            doc.cables.values().filter(|k| k.to == Endpoint::Port(pr(vca, "cv"))).map(|k| k.from.clone()).collect();
+        assert_eq!(into_cv, vec![pr(note, "vel")]);
+    }
 
     /// A document with one track, a source module of `kind` and a one-bar clip
     /// wired to it.

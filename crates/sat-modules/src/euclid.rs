@@ -4,84 +4,27 @@
 use sat_doc::sat_time::{PPQ, Ticks};
 use sat_doc::{Module, Note};
 
-/// One parameter of a module: its key, label, range and default.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ParamSpec {
-    /// Parameter key.
-    pub key: &'static str,
-    /// Short label.
-    pub label: &'static str,
-    /// Lowest value.
-    pub min: f32,
-    /// Highest value.
-    pub max: f32,
-    /// Default.
-    pub default: f32,
-    /// Whole numbers only.
-    pub integer: bool,
-}
-
-const fn int(key: &'static str, label: &'static str, min: f32, max: f32, default: f32) -> ParamSpec {
-    ParamSpec { key, label, min, max, default, integer: true }
-}
-
-const fn real(key: &'static str, label: &'static str, min: f32, max: f32, default: f32) -> ParamSpec {
-    ParamSpec { key, label, min, max, default, integer: false }
-}
+pub use crate::spec::{ParamSpec, note_name};
+use crate::spec::{RATE_LABELS, Unit, p, rate_ticks};
 
 /// Step lengths the rate parameter picks from: 1/32, 1/16, 1/8, 1/4.
 pub const RATES: [Ticks; 4] = [Ticks(PPQ / 8), Ticks(PPQ / 4), Ticks(PPQ / 2), Ticks(PPQ)];
 
 /// The euclid's parameters, in knob order.
 pub const PARAMS: [ParamSpec; 8] = [
-    int("steps", "steps", 1.0, 64.0, 16.0),
-    int("hits", "hits", 0.0, 64.0, 4.0),
-    int("rot", "rot", 0.0, 63.0, 0.0),
-    int("acc", "acc", 0.0, 64.0, 0.0),
-    int("note", "note", 0.0, 127.0, 48.0),
-    int("rate", "rate", 0.0, 3.0, 1.0),
-    real("gate", "gate", 0.05, 1.0, 0.5),
-    real("vel", "vel", 0.0, 1.0, 0.7),
+    p("steps", "steps", 1.0, 64.0, 16.0, Unit::Int),
+    p("hits", "hits", 0.0, 64.0, 4.0, Unit::Int),
+    p("rot", "rot", 0.0, 63.0, 0.0, Unit::Int),
+    p("acc", "acc", 0.0, 64.0, 0.0, Unit::Int),
+    p("note", "note", 0.0, 127.0, 48.0, Unit::Note),
+    p("rate", "rate", 0.0, 3.0, 1.0, Unit::Choice(&RATE_LABELS)),
+    p("gate", "gate", 0.05, 1.0, 0.5, Unit::Percent),
+    p("vel", "vel", 0.0, 1.0, 0.7, Unit::Percent),
 ];
 
 /// The spec for a parameter key.
 pub fn spec(key: &str) -> Option<&'static ParamSpec> {
     PARAMS.iter().find(|p| p.key == key)
-}
-
-impl ParamSpec {
-    /// `v` clamped to the range (and rounded, for whole-number parameters).
-    pub fn clamp(&self, v: f32) -> f32 {
-        let v = v.clamp(self.min, self.max);
-        if self.integer { v.round() } else { v }
-    }
-
-    /// Knob position (0–1) for a value.
-    pub fn pos(&self, v: f32) -> f64 {
-        ((v - self.min) / (self.max - self.min)).clamp(0.0, 1.0) as f64
-    }
-
-    /// The value at a knob position.
-    pub fn at(&self, pos: f64) -> f32 {
-        let v = self.min + pos.clamp(0.0, 1.0) as f32 * (self.max - self.min);
-        if self.integer { v.round() } else { (v * 100.0).round() / 100.0 }
-    }
-
-    /// The value as the editor shows it.
-    pub fn show(&self, v: f32) -> String {
-        match self.key {
-            "rate" => format!("1/{}", PPQ * 4 / RATES[(v.round() as usize).min(RATES.len() - 1)].0),
-            "note" => note_name(v.round() as u8),
-            "gate" | "vel" => format!("{}%", (v * 100.0).round()),
-            _ => format!("{}", v.round() as i64),
-        }
-    }
-}
-
-/// A pitch as a lower-case name and octave, such as `c3`.
-pub fn note_name(p: u8) -> String {
-    const N: [&str; 12] = ["c", "c#", "d", "d#", "e", "f", "f#", "g", "g#", "a", "a#", "b"];
-    format!("{}{}", N[(p % 12) as usize], p as i32 / 12 - 1)
 }
 
 /// `hits` onsets over `steps`, as evenly as possible, starting on a hit.
@@ -133,7 +76,7 @@ impl Params {
             rot: get("rot") as usize,
             acc: get("acc") as usize,
             note: get("note") as u8,
-            rate: RATES[get("rate") as usize],
+            rate: Ticks(rate_ticks(get("rate"))),
             gate: get("gate"),
             vel: get("vel"),
         }
