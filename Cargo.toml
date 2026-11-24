@@ -12,6 +12,8 @@ rust-version = "1.85"
 [workspace.dependencies]
 sat-time = { path = "crates/sat-time" }
 sat-doc = { path = "crates/sat-doc" }
+sat-engine = { path = "crates/sat-engine" }
+sat-compile = { path = "crates/sat-compile" }
 im = { version = "15", features = ["serde"] }
 uuid = { version = "1", features = ["v7", "serde"] }
 serde = { version = "1", features = ["derive"] }
@@ -20,6 +22,9 @@ zstd = "0.13"
 thiserror = "2"
 proptest = "1"
 tempfile = "3"
+rtrb = "0.4"
+assert_no_alloc = "1.1"
+criterion = "0.8"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
