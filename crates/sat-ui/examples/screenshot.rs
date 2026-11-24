@@ -7,6 +7,7 @@ use sat_ui::arrange::{ArrangeState, TransportView};
 use sat_ui::gfx::{Gpu, scaled};
 use sat_ui::paint::{Fonts, color};
 use sat_ui::panel::PanelView;
+use sat_ui::piano_roll::RollView;
 use sat_ui::shell::{self, Frame, PANEL_H};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -35,6 +36,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         mixer_scroll: 0.0,
         levels: &levels,
         edited: false,
+        roll: &RollView::default(),
     };
     let t = std::time::Instant::now();
     shell::draw(&mut scene, &mut fonts, &theme, &frame, w, h);

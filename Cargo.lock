@@ -2515,6 +2515,7 @@ version = "0.1.0"
 dependencies = [
  "cpal",
  "dirs",
+ "im",
  "pollster 0.4.0",
  "rfd",
  "sat-compile",

@@ -11,8 +11,9 @@ repository follows the architecture doc's crate layout and build phases.
 ## Status
 
 Phase 1 (headless core) is done; its gate passes single-threaded (see below).
-Phase 2 (shell + arrange) is in progress: the app opens, plays, mixes and
-saves a project file end to end. The arrange view, piano roll and mixer from
+Phase 2 (shell + arrange) is done: the app opens, plays, mixes and saves a
+project file end to end. Phase 3 (source grid) has started: notes are edited
+in the piano roll and heard while the set plays. The arrange view, piano roll and mixer from
 the prototype are drawn with vello; the engine plays through the default
 audio device and feeds live per-track meters.
 
@@ -77,6 +78,10 @@ cargo run --release -p sat-app -- my.sat  # opens a project bundle
 | Ctrl+O, Ctrl+S, Ctrl+Shift+S, Ctrl+N, Ctrl+Q | open, save, save as, new, quit (Cmd on macOS) |
 | drop a `.sat` folder on the window | open it |
 | click a clip, the ruler, a group's chevron | edit it in the piano roll, move the playhead, fold the group |
+| piano roll: click empty space (draw tool) | draw a note; keep dragging to set its length |
+| piano roll: drag a note, its right edge, the velocity lane | move it (time and pitch), resize it, set velocity; the selection moves together |
+| piano roll: double-click a note, Delete, arrows, Ctrl+A, Esc | delete, delete the selection, nudge by the grid or transpose (Shift: octave), select all, clear |
+| piano roll: select tool, shift-click, the grid and quantise buttons | box-select, add to the selection, change the grid (Alt drags off it), snap starts to the grid |
 | wheel, Shift+wheel, Ctrl+wheel | scroll tracks (or the mixer), scroll time, zoom |
 
 Edits are autosaved every two minutes, and on quit or before opening another
