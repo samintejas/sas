@@ -369,6 +369,32 @@ mod grid {
     }
 
     #[test]
+    fn fx_grids_show_the_chain_with_bypass_switches() {
+        use sat_modules::fx;
+        let mut d = demo();
+        let grid = d.doc.tracks[&d.doc.master].fx_grids[0];
+        let l = layout(&d.doc, grid, area(), &GridView::default()).unwrap();
+        assert_eq!(l.kind, sat_doc::GridKind::Fx);
+        assert_eq!(l.cards.len(), 4, "in, comp, limiter, out");
+        assert_eq!(l.wires.len(), 3);
+        let card = |k: &str| l.cards.iter().find(|c| d.doc.modules[&c.module].kind == k).unwrap().clone();
+        assert!(card(fx::FX_IN).power.is_none() && card(fx::FX_OUT).power.is_none());
+        let comp = card(fx::COMP);
+        let power = comp.power.unwrap();
+        assert!(comp.header.contains(power.center()));
+        assert_eq!(l.hit(power.center()), GridHit::Bypass(comp.module));
+        assert_eq!(l.hit(comp.header.center()), GridHit::Header(comp.module));
+        assert_eq!(comp.ins.iter().map(|(k, _)| *k).collect::<Vec<_>>(), vec!["in", "side"]);
+        // the menu lists fx modules
+        let open = layout(&d.doc, grid, area(), &GridView { menu: true, ..Default::default() }).unwrap();
+        assert_eq!(open.menu.len(), fx::MODULES.len());
+        // a bypassed module reads as bypassed
+        let target = sat_doc::ParamTarget::Module { module: comp.module, param: fx::BYPASS.into() };
+        sat_doc::apply(&mut d.doc, sat_doc::Op::SetValue { target, value: 1.0 }).unwrap();
+        assert!(fx::bypassed(&d.doc.modules[&comp.module]));
+    }
+
+    #[test]
     fn instrument_grids_wire_ports_to_ports() {
         use sat_modules::instrument as ins;
         let d = demo();

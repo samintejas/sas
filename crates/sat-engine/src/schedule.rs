@@ -195,6 +195,8 @@ pub enum NodeKind {
     Synth(Box<Synth>),
     /// A patch or drum synth playing note events.
     Instrument(Box<crate::Instrument>),
+    /// A track's fx grid, processing its input in place.
+    Fx(Box<crate::Fx>),
 }
 
 /// A node in the schedule.
@@ -380,6 +382,7 @@ impl Schedule {
             (NodeKind::Strip(s), Param::Mute) => s.mute = v > 0.5,
             (NodeKind::Synth(s), Param::Synth(sp)) => s.set_param(sp, v),
             (NodeKind::Instrument(s), Param::Module { slot, index }) => return s.set_param(slot, index, v),
+            (NodeKind::Fx(s), Param::Module { slot, index }) => return s.set_param(slot, index, v),
             _ => return false,
         }
         true
@@ -399,6 +402,7 @@ impl Schedule {
                     match (&mut n.kind, &mut o.kind) {
                         (NodeKind::Synth(n), NodeKind::Synth(o)) => n.adopt(o),
                         (NodeKind::Instrument(n), NodeKind::Instrument(o)) => n.adopt(o),
+                        (NodeKind::Fx(n), NodeKind::Fx(o)) => n.adopt(o),
                         (NodeKind::Strip(n), NodeKind::Strip(o)) => n.gains = o.gains,
                         _ => {}
                     }
@@ -444,6 +448,7 @@ impl Schedule {
                 NodeKind::Strip(s) => s.process(out, off, len, pos),
                 NodeKind::Synth(s) => s.process(out, off, len, pos, self.sample_rate),
                 NodeKind::Instrument(s) => s.process(out, off, len, pos, self.sample_rate),
+                NodeKind::Fx(s) => s.process(out, off, len),
             }
         }
     }

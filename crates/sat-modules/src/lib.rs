@@ -12,6 +12,7 @@
 
 pub mod drum;
 pub mod euclid;
+pub mod fx;
 pub mod instrument;
 pub mod spec;
 
@@ -60,6 +61,7 @@ pub const NOTES_OUT: PortSpec = PortSpec { key: "notes", kind: PortKind::Notes, 
 pub fn ports(kind: &str) -> &'static [PortSpec] {
     match kind {
         PIANO_ROLL | DRUM_SEQ | EUCLID => &[NOTES_OUT],
+        k if fx::is_fx(k) => fx::ports(k),
         _ => instrument::ports(kind),
     }
 }
@@ -68,6 +70,7 @@ pub fn ports(kind: &str) -> &'static [PortSpec] {
 pub fn params_of(kind: &str) -> &'static [ParamSpec] {
     match kind {
         EUCLID => &euclid::PARAMS,
+        k if fx::is_fx(k) => fx::params(k),
         _ => instrument::params(kind),
     }
 }
@@ -82,7 +85,7 @@ pub fn catalogue(kind: GridKind) -> &'static [(&'static str, &'static str)] {
     match kind {
         GridKind::Source => &SOURCES,
         GridKind::Instrument => &instrument::MODULES,
-        GridKind::Fx => &[],
+        GridKind::Fx => &fx::MODULES,
     }
 }
 
@@ -91,7 +94,12 @@ pub const SOURCES: [(&str, &str); 3] = [(PIANO_ROLL, "piano roll"), (DRUM_SEQ, "
 
 /// The label of a module kind.
 pub fn label_of(kind: &str) -> &str {
-    SOURCES.iter().chain(instrument::MODULES.iter()).find(|(k, _)| *k == kind).map_or(kind, |(_, l)| l)
+    SOURCES
+        .iter()
+        .chain(instrument::MODULES.iter())
+        .chain(fx::MODULES.iter())
+        .find(|(k, _)| *k == kind)
+        .map_or(kind, |(_, l)| l)
 }
 
 /// An op that adds a source module of `kind` to `grid` at `pos`, named after

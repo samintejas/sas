@@ -58,6 +58,8 @@ pub struct Card {
     pub rect: Rect,
     /// The header (drag to move).
     pub header: Rect,
+    /// The bypass switch, on effects.
+    pub power: Option<Rect>,
     /// Output ports: key and where the dot is.
     pub outs: Vec<(&'static str, Point)>,
     /// Input ports: key and where the dot is.
@@ -103,6 +105,8 @@ pub enum GridHit {
     MenuItem(&'static str),
     /// A module's header.
     Header(ModuleId),
+    /// An effect's bypass switch.
+    Bypass(ModuleId),
     /// A module's output port.
     Out(ModuleId, &'static str),
     /// A module's input port.
@@ -205,6 +209,9 @@ fn card(m: &Module, canvas: Rect, scroll: Vec2) -> Card {
     let o = to_screen(canvas, scroll, m.pos);
     let rect = Rect::new(o.x, o.y, o.x + CARD_W, o.y + card_h(m));
     let header = Rect::new(rect.x0, rect.y0, rect.x1, rect.y0 + HEADER_H);
+    let hy = header.center().y;
+    let power =
+        sat_modules::fx::bypassable(&m.kind).then(|| Rect::new(rect.x1 - 26.0, hy - 9.0, rect.x1 - 8.0, hy + 9.0));
     let ports = sat_modules::ports(&m.kind);
     let row_y = |i: usize| header.y1 + PORT_H * (i as f64 + 0.5);
     let ins: Vec<_> =
@@ -228,7 +235,7 @@ fn card(m: &Module, canvas: Rect, scroll: Vec2) -> Card {
             (k, r)
         })
         .collect();
-    Card { module: m.id, rect, header, outs, ins, preview, params }
+    Card { module: m.id, rect, header, power, outs, ins, preview, params }
 }
 
 /// Lays out `grid` inside `r`.
@@ -331,6 +338,9 @@ impl GridLayout {
             }
             if !c.rect.contains(pt) {
                 continue;
+            }
+            if c.power.is_some_and(|r| r.contains(pt)) {
+                return GridHit::Bypass(c.module);
             }
             if c.header.contains(pt) {
                 return GridHit::Header(c.module);
@@ -451,6 +461,8 @@ pub fn draw(
         l.canvas.y1 - 16.0,
         if source {
             "drag from an out port to a clip's inlet to wire it · drag a wire off an inlet to unplug it"
+        } else if l.kind == GridKind::Fx {
+            "+ module adds an effect before out · drag between ports to reroute · the power icon bypasses"
         } else {
             "drag from an out port to an in port of the same colour · drag a wire off an in port to unplug it"
         },
@@ -493,8 +505,13 @@ pub fn draw(
             p.rrect(Rect::new(r.x0 + 10.0, hy - 5.0, r.x0 + 20.0, hy + 5.0), 2.0, port_color(th, mark));
             p.text(r.x0 + 28.0, hy, &m.name, &TextStyle::mono(12.0, c.text_max).medium(), Align::Left);
             let kind = sat_modules::label_of(&m.kind);
+            let right = card.power.map_or(r.x1 - 10.0, |pw| pw.x0 - 4.0);
             if kind != m.name {
-                p.text(r.x1 - 10.0, hy, kind, &TextStyle::mono(10.5, c.text_secondary), Align::Right);
+                p.text(right, hy, kind, &TextStyle::mono(10.5, c.text_secondary), Align::Right);
+            }
+            let off = sat_modules::fx::bypassed(m);
+            if let Some(pw) = card.power {
+                icons::draw(p, Icon::Power, pw.inset(-3.0), if off { c.text_secondary } else { c.accent_primary });
             }
             for (k, at) in &card.outs {
                 p.text(at.x - 12.0, at.y, k, &TextStyle::mono(11.0, c.text_secondary), Align::Right);
@@ -590,13 +607,21 @@ pub fn draw(
                     }
                 }
             }
+            if sat_modules::fx::bypassed(m) {
+                let body = Rect::new(r.x0 + 1.0, card.header.y1 + 1.0, r.x1 - 1.0, r.y1 - 1.0);
+                p.rect(body, c.bg_surface.alpha(0.6));
+            }
         }
         if l.cards.is_empty() {
             let at = l.canvas.center();
             p.text(
                 at.x,
                 at.y,
-                "no modules · + module adds one",
+                if l.kind == GridKind::Fx {
+                    "no effects: audio passes straight through · + module adds one"
+                } else {
+                    "no modules · + module adds one"
+                },
                 &TextStyle::mono(12.0, c.text_secondary),
                 Align::Center,
             );

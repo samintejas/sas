@@ -40,6 +40,24 @@ impl B {
         self.track_with(name, color, parent, ins, sat_modules::PIANO_ROLL, "piano roll")
     }
 
+    /// The fx grid of a track added by these ops (or the master's).
+    fn fx_grid(&self, doc: &Document, track: TrackId) -> GridId {
+        self.ops
+            .iter()
+            .find_map(|op| match op {
+                Op::AddTrack { id, grids, .. } if *id == track => Some(grids.fx),
+                _ => None,
+            })
+            .unwrap_or_else(|| doc.tracks[&track].fx_grids[0])
+    }
+
+    /// Fills a track's fx grid with `effects` in series.
+    #[allow(clippy::type_complexity)]
+    fn fx(&mut self, doc: &Document, track: TrackId, effects: &[(&str, &[(&str, f32)])]) {
+        let grid = self.fx_grid(doc, track);
+        self.ops.extend(sat_modules::fx::chain(grid, effects));
+    }
+
     /// The grid a module was added to.
     fn grid_of(&self, module: ModuleId) -> GridId {
         self.ops
@@ -315,6 +333,30 @@ pub fn demo() -> Demo {
             Breakpoint { tick: bars(12), value: -18.0, curve: Curve::Linear },
         ]),
     });
+    // fx: glue on the drums, grit on the bass, a hall and an echo on the
+    // returns, glue and a limiter on the master
+    use sat_modules::fx::{COMP, DELAY, DRIVE, EQ, LIMITER, REVERB};
+    b.fx(
+        &doc,
+        drums,
+        &[(COMP, &[("thresh", -20.0), ("ratio", 3.0), ("attack", 0.005), ("release", 0.1), ("makeup", 3.0)])],
+    );
+    b.fx(
+        &doc,
+        bass,
+        &[
+            (DRIVE, &[("drive", 9.0), ("tone", 6000.0), ("level", -3.0), ("mix", 0.6)]),
+            (EQ, &[("low", 2.0), ("high", -2.0)]),
+        ],
+    );
+    b.fx(&doc, keys, &[(EQ, &[("low", -4.0), ("high", 2.0)])]);
+    b.fx(&doc, hall, &[(REVERB, &[("decay", 2.8), ("lowcut", 250.0), ("mix", 1.0)])]);
+    b.fx(&doc, echo, &[(DELAY, &[("time", 0.363), ("feedback", 0.4), ("tone", 4000.0), ("mix", 1.0)])]);
+    b.fx(
+        &doc,
+        doc.master,
+        &[(COMP, &[("thresh", -14.0), ("ratio", 2.0), ("release", 0.2), ("makeup", 2.0)]), (LIMITER, &[])],
+    );
     let tempo = doc.tempo_lane;
     b.ops.push(Op::SetLanePoints {
         id: tempo,

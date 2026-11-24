@@ -248,3 +248,45 @@ fn instrument_grids_play_patches_and_drums() {
     s.h.apply("rm", [Op::RemoveModule { id: ids[4] }]).unwrap();
     assert!(sat_compile::build_patch(s.h.doc(), grid).is_none());
 }
+
+#[test]
+fn fx_grids_process_tracks_and_returns() {
+    use sat_modules::fx;
+    let mut s = song();
+    let before = render(s.h.doc(), 48_000);
+    // a grid with only a module and no in/out passes audio through
+    let lead_fx = s.h.doc().tracks[&s.lead].fx_grids[0];
+    let (_, op) = sat_modules::add_module(s.h.doc(), lead_fx, fx::DRIVE, (0.0, 0.0));
+    s.h.apply("lonely drive", [op]).unwrap();
+    assert!(sat_compile::build_fx(s.h.doc(), lead_fx).is_none());
+    assert_eq!(render(s.h.doc(), 48_000), before, "no in and out: passes through");
+    // a reverb on the return, a limiter on the master
+    let ret_fx = s.h.doc().tracks[&s.ret].fx_grids[0];
+    let (verb, mut ops) = fx::insert(s.h.doc(), ret_fx, fx::REVERB);
+    ops.push(Op::SetValue { target: ParamTarget::Module { module: verb, param: "mix".into() }, value: 1.0 });
+    s.h.apply("reverb", ops).unwrap();
+    let master_fx = s.h.doc().tracks[&s.h.doc().master].fx_grids[0];
+    let (lim, ops) = fx::insert(s.h.doc(), master_fx, fx::LIMITER);
+    s.h.apply("limiter", ops).unwrap();
+    let ceiling = ParamTarget::Module { module: lim, param: "ceiling".into() };
+    s.h.apply("ceiling", [Op::SetValue { target: ceiling.clone(), value: -12.0 }]).unwrap();
+    let after = render(s.h.doc(), 48_000);
+    assert_ne!(before, after);
+    let ceil = 10f32.powf(-12.0 / 20.0);
+    assert!(after.0.iter().chain(&after.1).all(|x| x.abs() <= ceil + 1e-5), "the master limiter holds -12 db");
+    assert!(rms(&after.0) > 0.01);
+    assert_eq!(after, render(s.h.doc(), 48_000), "deterministic");
+    // knobs and the bypass switch change live
+    let c = sat_compile::compile(s.h.doc(), SR, BLOCK).unwrap();
+    assert!(c.param_command(&ceiling, -3.0).is_some());
+    let bypass = ParamTarget::Module { module: verb, param: fx::BYPASS.into() };
+    assert!(c.param_command(&bypass, 1.0).is_some());
+    // bypassing the limiter lifts the ceiling
+    s.h.apply(
+        "bypass",
+        [Op::SetValue { target: ParamTarget::Module { module: lim, param: fx::BYPASS.into() }, value: 1.0 }],
+    )
+    .unwrap();
+    let open = render(s.h.doc(), 48_000);
+    assert!(open.0.iter().chain(&open.1).any(|x| x.abs() > ceil + 0.01));
+}

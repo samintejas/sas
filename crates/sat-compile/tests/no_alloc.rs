@@ -84,6 +84,14 @@ fn instrument_patches_and_drums_do_not_allocate() {
         pos: (0.0, 0.0),
     });
     s.h.apply("patch", ops).unwrap();
+    // and a full fx chain on the bass
+    let fx_grid = s.h.doc().tracks[&s.bass].fx_grids[0];
+    use sat_modules::fx;
+    for k in [fx::EQ, fx::COMP, fx::DRIVE, fx::FX_FILTER, fx::DELAY, fx::REVERB, fx::LIMITER] {
+        let (_, ops) = fx::insert(s.h.doc(), fx_grid, k);
+        s.h.apply("fx", ops).unwrap();
+    }
+    assert_eq!(sat_compile::build_fx(s.h.doc(), fx_grid).unwrap().0.len(), 9);
     let c = sat_compile::compile(s.h.doc(), SR, BLOCK).unwrap();
     let cutoff = c.param_command(&ParamTarget::Module { module: ids[2], param: "cutoff".into() }, 300.0).unwrap();
     let (mut e, mut h) = engine(c.schedule, 64);

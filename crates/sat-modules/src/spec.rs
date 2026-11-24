@@ -28,6 +28,8 @@ pub enum Unit {
     Pan,
     /// A signed amount, -1–1, shown as a percentage.
     Bipolar,
+    /// A compression ratio, shown as `4:1`.
+    Ratio,
 }
 
 /// One parameter of a module.
@@ -116,11 +118,13 @@ impl ParamSpec {
             Unit::Hz => format!("{}", v.round()),
             Unit::Db if v <= -60.0 => "-inf".into(),
             Unit::Db => format!("{v:.1} db"),
+            Unit::Seconds if v < 0.01 => format!("{:.1}ms", v * 1000.0),
             Unit::Seconds if v < 1.0 => format!("{}ms", (v * 1000.0).round()),
             Unit::Seconds => format!("{v:.2}s"),
             Unit::Semis => format!("{:+} st", v as i64),
             Unit::Cents => format!("{:+} c", v.round() as i64),
             Unit::Note => note_name(v as u8),
+            Unit::Ratio => format!("{}:1", (v * 10.0).round() / 10.0),
             Unit::Pan if v.abs() < 0.005 => "c".into(),
             Unit::Pan if v < 0.0 => format!("{}l", (-v * 100.0).round()),
             Unit::Pan => format!("{}r", (v * 100.0).round()),
@@ -149,6 +153,8 @@ mod tests {
         assert_eq!(db.show(-60.0), "-inf");
         let s = p("a", "a", 0.001, 10.0, 0.01, Unit::Seconds);
         assert_eq!(s.show(0.01), "10ms");
+        assert_eq!(s.show(0.0015), "1.5ms");
+        assert_eq!(p("r", "r", 1.0, 20.0, 4.0, Unit::Ratio).show(4.0), "4:1");
         assert_eq!(s.show(1.5), "1.50s");
         let w = p("wave", "wave", 0.0, 3.0, 0.0, Unit::Choice(&["sine", "tri", "saw", "sqr"]));
         assert_eq!(w.show(2.2), "saw");

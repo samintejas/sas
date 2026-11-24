@@ -15,6 +15,7 @@
 #![warn(missing_docs)]
 
 mod automation;
+mod fx;
 mod instrument;
 mod schedule;
 mod synth;
@@ -23,6 +24,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 
 pub use automation::{AutoCurve, AutoPoint, Automation};
+pub use fx::{FX_PARAMS, Fx, FxKind, FxModule, MAX_FX, MAX_FX_REGS};
 pub use instrument::{Instrument, MAX_MODS, MAX_PARAMS, MAX_REGS, MAX_VOICES, NONE, Patch, VKind, VModule};
 pub use schedule::{Buf, Meter, NodeId, NodeKind, Param, Schedule, ScheduleBuilder, ScheduleError, Strip, db_to_gain};
 pub use synth::{NoteEvent, Synth, SynthParam, Wave};
