@@ -16,8 +16,9 @@ Phase 1 (headless core) is in progress.
 |---|---|---|
 | `sat-time` | ticks (960 PPQ), tempo map with step and linear ramps, meter map, quantisation | done |
 | `sat-doc` | entities, `Op` reducer, transactions, undo with gestures, project bundle with migrations | done |
-| `sat-compile` | document → flat engine schedule | next |
-| `sat-engine` | real-time schedule, mixer, clip players, offline render | next |
+| `sat-engine` | flat schedule, mixer strips, test synth, automation, loop, lock-free commands, schedule swap with state carry-over, offline render | done (single-threaded) |
+| `sat-compile` | document → schedule: track tree, solo, sends, placements and looping clips, live parameter mapping | done |
+| worker pool + 64-track benchmark | parallel schedule, budget check | next |
 
 ## Build phases
 
@@ -42,6 +43,14 @@ per op: value changes go to the engine as parameter events, structural ones
 trigger a recompile. Projects save as a `name.sat/` bundle whose
 `project.sat` is versioned, zstd-compressed JSON.
 
+## Listening
+
+```sh
+cargo run -p sat-compile --example render_reference -- reference_song.wav
+```
+
+renders the reference song that the golden tests null-test against.
+
 ## Developing
 
 ```sh
@@ -49,3 +58,9 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 ```
+
+Real-time rule: `sat-engine` never allocates, locks or does I/O while
+processing. `crates/sat-compile/tests/no_alloc.rs` enforces it by aborting on
+any allocation inside the audio path. Golden renders live in
+`crates/sat-compile/tests/golden/`; after an intentional sound change,
+regenerate them with `SAT_BLESS=1 cargo test -p sat-compile --test golden`.
