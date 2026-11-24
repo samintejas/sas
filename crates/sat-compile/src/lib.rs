@@ -14,12 +14,13 @@
 #![warn(missing_docs)]
 
 use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
 use sat_doc::sat_time::{TempoMap, Ticks};
 use sat_doc::*;
 use sat_engine::{
-    AutoCurve, AutoPoint, Automation, Command, NodeId, NodeKind, NoteEvent, Param, Schedule, ScheduleBuilder, Strip,
-    Synth, SynthParam, Wave, db_to_gain,
+    AutoCurve, AutoPoint, Automation, Command, Meter, NodeId, NodeKind, NoteEvent, Param, Schedule, ScheduleBuilder,
+    Strip, Synth, SynthParam, Wave, db_to_gain,
 };
 
 /// Module kind of the built-in test synth.
@@ -61,9 +62,15 @@ pub struct Compiled {
     /// The tempo map the schedule was built with.
     pub tempo: TempoMap,
     params: HashMap<ParamTarget, (NodeId, Param, Conv)>,
+    meters: HashMap<TrackId, Arc<Meter>>,
 }
 
 impl Compiled {
+    /// The post-fader peak meter of a track's strip.
+    pub fn meter(&self, track: TrackId) -> Option<&Arc<Meter>> {
+        self.meters.get(&track)
+    }
+
     /// Turns a value change from the document into an engine command, or
     /// `None` if the target has no live node (a recompile covers it).
     pub fn param_command(&self, target: &ParamTarget, value: f32) -> Option<Command> {
@@ -213,6 +220,7 @@ pub fn compile(doc: &Document, sample_rate: f64, max_block: usize) -> Result<Com
     let audible = solo_audible(doc);
     let mut b = ScheduleBuilder::new(sample_rate, max_block);
     let mut params: HashMap<ParamTarget, (NodeId, Param, Conv)> = HashMap::new();
+    let mut meters: HashMap<TrackId, Arc<Meter>> = HashMap::new();
     // inputs of every bus: track strips, group strips and sends
     #[allow(clippy::type_complexity)]
     let mut bus_inputs: HashMap<TrackId, Vec<(NodeId, f32, Option<TrackId>)>> = HashMap::new();
@@ -257,12 +265,14 @@ pub fn compile(doc: &Document, sample_rate: f64, max_block: usize) -> Result<Com
             TrackKind::Group | TrackKind::Return | TrackKind::Master => Some(nid(t, SALT_BUS)),
         };
         let solo_muted = audible.as_ref().is_some_and(|a| !a.contains(&t));
+        let meter = meters.entry(t).or_default().clone();
         let strip = Strip::new(
             tr.mixer.gain_db,
             tr.mixer.pan,
             tr.mixer.mute || solo_muted,
             lane_automation(doc, &ParamTarget::Gain(t), &tempo, sample_rate),
-        );
+        )
+        .with_meter(meter);
         b.node(strip_id, NodeKind::Strip(Box::new(strip)), pre.map(|p| vec![(p, 1.0)]).unwrap_or_default());
         params.insert(ParamTarget::Gain(t), (strip_id, Param::GainDb, Conv::Same));
         params.insert(ParamTarget::Pan(t), (strip_id, Param::Pan, Conv::Same));
@@ -300,5 +310,5 @@ pub fn compile(doc: &Document, sample_rate: f64, max_block: usize) -> Result<Com
     }
     let output = nid(doc.master, SALT_STRIP);
     let schedule = b.build(output).map_err(CompileError::Schedule)?;
-    Ok(Compiled { schedule, output, tempo, params })
+    Ok(Compiled { schedule, output, tempo, params, meters })
 }

@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use parley::{FontContext, FontFamily, FontWeight, Layout, LayoutContext, PositionedLayoutItem, StyleProperty};
 use sat_theme::Rgba;
-use vello::kurbo::{Affine, BezPath, Circle, Line, Point, Rect, RoundedRect, Stroke};
-use vello::peniko::{Blob, Color, Fill};
+use vello::kurbo::{Affine, Arc as KArc, BezPath, Cap, Circle, Line, Point, Rect, RoundedRect, Stroke};
+use vello::peniko::{Blob, Color, ColorStop, Fill, Gradient};
 use vello::{Glyph, Scene};
 
 const GEIST: &[u8] = include_bytes!("../../../assets/fonts/Geist-Variable.ttf");
@@ -190,6 +190,28 @@ impl Painter<'_> {
     /// A stroked circle.
     pub fn circle_stroke(&mut self, center: Point, r: f64, width: f64, c: Rgba) {
         self.scene.stroke(&Stroke::new(width), Affine::IDENTITY, color(c), None, &Circle::new(center, r));
+    }
+
+    /// An arc of a circle with round caps. Angles are in radians, clockwise
+    /// from 3 o'clock (y points down).
+    pub fn arc(&mut self, center: Point, r: f64, start: f64, sweep: f64, width: f64, c: Rgba) {
+        if sweep.abs() < 1e-6 {
+            return;
+        }
+        let a = KArc::new(center, (r, r), start, sweep, 0.0);
+        self.scene.stroke(&Stroke::new(width).with_caps(Cap::Round), Affine::IDENTITY, color(c), None, &a);
+    }
+
+    /// A rounded rectangle filled with a vertical gradient. `stops` run from
+    /// the bottom (0) to the top (1) of `full`, so a partly filled meter keeps
+    /// its colours in place; `r` is the part to fill.
+    pub fn vgradient(&mut self, r: Rect, full: Rect, radius: f64, stops: &[(f32, Rgba)]) {
+        if r.is_zero_area() {
+            return;
+        }
+        let g = Gradient::new_linear((full.x0, full.y1), (full.x0, full.y0))
+            .with_stops(stops.iter().map(|&(o, c)| ColorStop::from((o, color(c)))).collect::<Vec<_>>().as_slice());
+        self.scene.fill(Fill::NonZero, Affine::IDENTITY, &g, None, &RoundedRect::from_rect(r, radius));
     }
 
     /// Clips everything drawn inside `f` to `r`.

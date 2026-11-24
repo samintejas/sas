@@ -1,7 +1,38 @@
 //! The flat, pre-compiled processing schedule.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use crate::automation::Automation;
 use crate::synth::{Synth, SynthParam};
+
+/// A stereo peak meter a strip writes on the audio thread and the UI reads.
+///
+/// The strip keeps the highest peak since the last [`Meter::take`], so the UI
+/// sees every transient however many blocks run between two frames.
+#[derive(Debug, Default)]
+pub struct Meter {
+    l: AtomicU32,
+    r: AtomicU32,
+}
+
+impl Meter {
+    /// Folds in the peaks (linear, non-negative) of one block.
+    pub fn record(&self, l: f32, r: f32) {
+        // for non-negative floats the bit patterns order like the values
+        if l >= 0.0 && l.is_finite() {
+            self.l.fetch_max(l.to_bits(), Ordering::Relaxed);
+        }
+        if r >= 0.0 && r.is_finite() {
+            self.r.fetch_max(r.to_bits(), Ordering::Relaxed);
+        }
+    }
+
+    /// The highest peaks (left, right) since the last call, then resets them.
+    pub fn take(&self) -> (f32, f32) {
+        (f32::from_bits(self.l.swap(0, Ordering::Relaxed)), f32::from_bits(self.r.swap(0, Ordering::Relaxed)))
+    }
+}
 
 /// A stable node id. The compiler derives it from document ids, so a node
 /// keeps its id (and its state: voices, smoothing) across recompiles.
@@ -86,16 +117,24 @@ pub struct Strip {
     pub mute: bool,
     /// Gain automation in dB; overrides the base value while it has data at the playhead.
     pub gain_lane: Option<Automation>,
+    /// Post-fader peak meter, if anyone is watching.
+    pub meter: Option<Arc<Meter>>,
     gains: (Smooth, Smooth),
 }
 
 impl Strip {
     /// A strip with these settings.
     pub fn new(gain_db: f32, pan: f32, mute: bool, gain_lane: Option<Automation>) -> Strip {
-        let mut s = Strip { gain_db, pan, mute, gain_lane, gains: (Smooth::new(0.0), Smooth::new(0.0)) };
+        let mut s = Strip { gain_db, pan, mute, gain_lane, meter: None, gains: (Smooth::new(0.0), Smooth::new(0.0)) };
         let (l, r) = s.target_gains(None);
         s.gains = (Smooth::new(l), Smooth::new(r));
         s
+    }
+
+    /// Attaches a post-fader meter.
+    pub fn with_meter(mut self, meter: Arc<Meter>) -> Strip {
+        self.meter = Some(meter);
+        self
     }
 
     fn target_gains(&self, pos: Option<i64>) -> (f32, f32) {
@@ -118,11 +157,17 @@ impl Strip {
         self.gains.1.set(tr);
         let (mut gl, dl) = self.gains.0.ramp(len);
         let (mut gr, dr) = self.gains.1.ramp(len);
+        let (mut pl, mut pr) = (0f32, 0f32);
         for i in off..off + len {
             gl += dl;
             gr += dr;
             b.l[i] *= gl;
             b.r[i] *= gr;
+            pl = pl.max(b.l[i].abs());
+            pr = pr.max(b.r[i].abs());
+        }
+        if let Some(m) = &self.meter {
+            m.record(pl, pr);
         }
     }
 }
@@ -392,5 +437,31 @@ impl Schedule {
     /// The output buffer.
     pub(crate) fn output(&self) -> &Buf {
         &self.bufs[self.output]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn meter_keeps_the_highest_peak_until_taken() {
+        let m = Meter::default();
+        m.record(0.25, 0.5);
+        m.record(0.75, 0.125);
+        m.record(f32::NAN, -1.0);
+        assert_eq!(m.take(), (0.75, 0.5));
+        assert_eq!(m.take(), (0.0, 0.0));
+    }
+
+    #[test]
+    fn strip_meters_post_fader() {
+        let m = Arc::new(Meter::default());
+        // -6.02 dB, centre pan: equal-power law gives unity per side at centre
+        let mut s = Strip::new(-6.0206, 0.0, false, None).with_meter(m.clone());
+        let mut b = Buf { l: vec![1.0; 64], r: vec![-1.0; 64] };
+        s.process(&mut b, 0, 64, None);
+        let (l, r) = m.take();
+        assert!((l - 0.5).abs() < 1e-3 && (r - 0.5).abs() < 1e-3, "{l} {r}");
     }
 }

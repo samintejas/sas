@@ -33,6 +33,8 @@ pollster = "0.4"
 png = "0.18"
 winit = "0.30"
 cpal = "0.18"
+rfd = { version = "0.18", default-features = false, features = ["xdg-portal"] }
+dirs = "6"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -7,7 +7,9 @@ use sat_doc::*;
 use sat_theme::{Rgba, Theme};
 use vello::kurbo::{Point, Rect};
 
+use crate::controls;
 use crate::icons::{self, Icon};
+use crate::mixer::Levels;
 use crate::paint::{Align, Painter, TextStyle};
 
 /// Width of the track header column.
@@ -109,8 +111,16 @@ pub enum Hit {
         /// Its clip.
         clip: ClipId,
     },
-    /// A track header.
+    /// A track header (outside its controls).
     Header(TrackId),
+    /// A header's mute button.
+    Mute(TrackId),
+    /// A header's solo button.
+    Solo(TrackId),
+    /// A header's record-arm button.
+    Arm(TrackId),
+    /// A header's fader.
+    Fader(TrackId),
     /// Empty timeline on a row, at a tick.
     Lane(TrackId, Ticks),
     /// The ruler, at a tick.
@@ -245,12 +255,98 @@ impl ArrangeLayout {
         }
         let Some(row) = self.rows.iter().find(|r| pt.y >= r.y && pt.y < r.y + r.h) else { return Hit::Nothing };
         if self.headers.contains(pt) {
-            return Hit::Header(row.track);
+            let hc = header_controls(row, self.headers);
+            let t = row.track;
+            let inside = |r: Option<Rect>| r.is_some_and(|r| r.contains(pt));
+            if inside(hc.mute) {
+                return Hit::Mute(t);
+            }
+            if inside(hc.solo) {
+                return Hit::Solo(t);
+            }
+            if inside(hc.arm) {
+                return Hit::Arm(t);
+            }
+            if hc.fader.is_some_and(|f| pt.x >= f.x0 - 6.0 && pt.x <= f.x1 + 6.0 && (pt.y - f.y).abs() <= 7.0) {
+                return Hit::Fader(t);
+            }
+            return Hit::Header(t);
         }
         if self.timeline.contains(pt) {
             return Hit::Lane(row.track, self.tick_at(pt.x));
         }
         Hit::Nothing
+    }
+}
+
+/// A horizontal header fader: travel from `x0` (silent) to `x1` (+6 dB) at height `y`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HFader {
+    /// Left end.
+    pub x0: f64,
+    /// Right end.
+    pub x1: f64,
+    /// Centre line.
+    pub y: f64,
+}
+
+impl HFader {
+    /// Fader position (0–1) at screen x.
+    pub fn pos_at(&self, x: f64) -> f64 {
+        ((x - self.x0) / (self.x1 - self.x0).max(1.0)).clamp(0.0, 1.0)
+    }
+
+    /// Screen x of a position.
+    pub fn x_of(&self, pos: f64) -> f64 {
+        self.x0 + (self.x1 - self.x0) * pos.clamp(0.0, 1.0)
+    }
+}
+
+/// Where a row's header controls are. Drawing and hit testing both use it.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct HeaderControls {
+    /// Mute button.
+    pub mute: Option<Rect>,
+    /// Solo button.
+    pub solo: Option<Rect>,
+    /// Record-arm button.
+    pub arm: Option<Rect>,
+    /// Fader.
+    pub fader: Option<HFader>,
+    /// Meter.
+    pub meter: Option<Rect>,
+}
+
+/// The header controls of `row` in the header column `headers`.
+pub fn header_controls(row: &Row, headers: Rect) -> HeaderControls {
+    let (x1, y0, y1) = (headers.x1, row.y, row.y + row.h);
+    let indent = 14.0 + 10.0 * row.depth as f64;
+    let button = |x: f64, cy: f64| Some(Rect::new(x, cy - 11.0, x + 22.0, cy + 11.0));
+    match row.kind {
+        RowKind::Group => {
+            let cy = y0 + 17.0;
+            HeaderControls {
+                mute: button(x1 - 98.0, cy),
+                solo: button(x1 - 72.0, cy),
+                arm: None,
+                fader: Some(HFader { x0: headers.x0 + indent, x1: x1 - 50.0, y: y0 + 33.0 }),
+                meter: Some(Rect::new(x1 - 16.0, y0 + 12.0, x1 - 9.0, y1 - 8.0)),
+            }
+        }
+        RowKind::Track => {
+            let cy = y0 + 17.0;
+            HeaderControls {
+                mute: button(x1 - 98.0, cy),
+                solo: button(x1 - 72.0, cy),
+                arm: button(x1 - 46.0, cy),
+                fader: Some(HFader { x0: x1 - 98.0, x1: x1 - 30.0, y: y1 - 13.0 }),
+                meter: Some(Rect::new(x1 - 16.0, y0 + 10.0, x1 - 9.0, y1 - 6.0)),
+            }
+        }
+        RowKind::Return | RowKind::Master => {
+            HeaderControls { mute: button(x1 - 32.0, (y0 + y1) / 2.0), ..Default::default() }
+        }
+        RowKind::Lane(_) => HeaderControls::default(),
     }
 }
 
@@ -264,9 +360,9 @@ fn track_label(doc: &Document, t: &Track) -> String {
     }
 }
 
-/// Draws a small square toggle button ("m", "s") and returns its rect.
-fn small_button(p: &mut Painter<'_>, th: &Theme, x: f64, cy: f64, label: &str, on: Option<Rgba>) -> Rect {
-    let r = Rect::new(x, cy - 11.0, x + 22.0, cy + 11.0);
+/// Draws a small square toggle button ("m", "s") in `r`.
+fn small_button(p: &mut Painter<'_>, th: &Theme, r: Rect, label: &str, on: Option<Rgba>) -> Rect {
+    let cy = r.center().y;
     match on {
         Some(c) => {
             p.rrect(r, 3.0, c.alpha(0.16));
@@ -282,28 +378,35 @@ fn small_button(p: &mut Painter<'_>, th: &Theme, x: f64, cy: f64, label: &str, o
     r
 }
 
-fn fader(p: &mut Painter<'_>, th: &Theme, x0: f64, x1: f64, y: f64, gain_db: f32) {
-    let track = Rect::new(x0, y - 1.5, x1, y + 1.5);
-    p.rrect(track, 1.5, Rgba::hex(0x262626));
-    // 0 dB sits at 75% of the travel, -60 dB at the left
-    let k = ((gain_db as f64 + 60.0) / 60.0 * 0.75).clamp(0.0, 1.0);
-    let tx = x0 + (x1 - x0) * k;
+fn fader(p: &mut Painter<'_>, th: &Theme, f: HFader, gain_db: f32) {
+    let (x0, y) = (f.x0, f.y);
+    p.rrect(Rect::new(x0, y - 1.5, f.x1, y + 1.5), 1.5, Rgba::hex(0x262626));
+    let tx = f.x_of(controls::fader_pos(gain_db));
     p.rrect(Rect::new(x0, y - 1.5, tx, y + 1.5), 1.5, th.c.text_secondary.alpha(0.6));
     p.circle(Point::new(tx, y), 5.0, Rgba::hex(0xd8d8d8));
     p.circle_stroke(Point::new(tx, y), 5.0, 1.0, Rgba::hex(0x050505));
 }
 
-fn meter(p: &mut Painter<'_>, th: &Theme, x: f64, y0: f64, y1: f64, level: f64) {
-    let h = y1 - y0;
-    p.rect(Rect::new(x, y0, x + 3.0, y1), Rgba::hex(0x1a1a1a));
-    p.rect(Rect::new(x + 4.0, y0, x + 7.0, y1), Rgba::hex(0x1a1a1a));
+fn meter(p: &mut Painter<'_>, th: &Theme, r: Rect, (l, rr): (f32, f32)) {
+    let h = r.height();
+    let (a, b) = (r.x0, r.x0 + 4.0);
+    p.rect(Rect::new(a, r.y0, a + 3.0, r.y1), Rgba::hex(0x1a1a1a));
+    p.rect(Rect::new(b, r.y0, b + 3.0, r.y1), Rgba::hex(0x1a1a1a));
     let fill = th.c.accent_success;
-    p.rect(Rect::new(x, y1 - h * level, x + 3.0, y1), fill);
-    p.rect(Rect::new(x + 4.0, y1 - h * level * 0.92, x + 7.0, y1), fill);
+    p.rect(Rect::new(a, r.y1 - h * controls::meter_pos(l), a + 3.0, r.y1), fill);
+    p.rect(Rect::new(b, r.y1 - h * controls::meter_pos(rr), b + 3.0, r.y1), fill);
 }
 
 /// Draws the arrange view.
-pub fn draw(p: &mut Painter<'_>, th: &Theme, doc: &Document, st: &ArrangeState, tr: &TransportView, l: &ArrangeLayout) {
+pub fn draw(
+    p: &mut Painter<'_>,
+    th: &Theme,
+    doc: &Document,
+    st: &ArrangeState,
+    tr: &TransportView,
+    levels: &Levels,
+    l: &ArrangeLayout,
+) {
     let c = &th.c;
     let b = l.bounds;
     p.rect(b, c.bg_surface);
@@ -397,7 +500,7 @@ pub fn draw(p: &mut Painter<'_>, th: &Theme, doc: &Document, st: &ArrangeState, 
             if row.y + row.h < l.timeline.y0 || row.y > b.y1 {
                 continue;
             }
-            draw_row(p, th, doc, st, l, row);
+            draw_row(p, th, doc, st, levels, l, row);
         }
         for cb in &l.clips {
             draw_clip(p, th, doc, st, l, cb);
@@ -421,14 +524,24 @@ pub fn draw(p: &mut Painter<'_>, th: &Theme, doc: &Document, st: &ArrangeState, 
     p.vline(l.headers.x1, l.ruler.y0, b.y1, c.border_default);
 }
 
-fn draw_row(p: &mut Painter<'_>, th: &Theme, doc: &Document, st: &ArrangeState, l: &ArrangeLayout, row: &Row) {
+fn draw_row(
+    p: &mut Painter<'_>,
+    th: &Theme,
+    doc: &Document,
+    st: &ArrangeState,
+    levels: &Levels,
+    l: &ArrangeLayout,
+    row: &Row,
+) {
     let c = &th.c;
     let t = &doc.tracks[&row.track];
     let tc = th.track(t.color.0);
     let hr = Rect::new(l.headers.x0, row.y, l.headers.x1, row.y + row.h);
     let lane = Rect::new(l.timeline.x0, row.y, l.timeline.x1, row.y + row.h);
     let selected = st.selected_track == Some(row.track) && row.kind == RowKind::Track;
-    let indent = 14.0 + 10.0 * row.depth.saturating_sub(0) as f64;
+    let indent = 14.0 + 10.0 * row.depth as f64;
+    let hc = header_controls(row, l.headers);
+    let level = levels.get(&row.track).copied().unwrap_or((0.0, 0.0));
     match row.kind {
         RowKind::Track | RowKind::Group => {
             p.rect(hr, if selected { c.bg_raised } else { c.bg_surface });
@@ -459,10 +572,11 @@ fn draw_row(p: &mut Painter<'_>, th: &Theme, doc: &Document, st: &ArrangeState, 
                     &TextStyle::mono(10.0, c.text_secondary),
                     Align::Center,
                 );
-                small_button(p, th, hr.x1 - 98.0, cy, "m", t.mixer.mute.then_some(c.accent_warning));
-                small_button(p, th, hr.x1 - 72.0, cy, "s", t.mixer.solo.then_some(c.accent_info));
-                fader(p, th, hr.x0 + indent, hr.x1 - 50.0, hr.y0 + 33.0, t.mixer.gain_db);
-                meter(p, th, hr.x1 - 16.0, hr.y0 + 12.0, hr.y1 - 8.0, 0.55);
+                draw_mute_solo(p, th, &hc, t);
+                if let (Some(f), Some(m)) = (hc.fader, hc.meter) {
+                    fader(p, th, f, t.mixer.gain_db);
+                    meter(p, th, m, level);
+                }
                 // children summary: one bar per child track's placements
                 let kids: Vec<&Track> = t.children.iter().map(|k| &doc.tracks[k]).collect();
                 let n = kids.len().max(1) as f64;
@@ -486,17 +600,20 @@ fn draw_row(p: &mut Painter<'_>, th: &Theme, doc: &Document, st: &ArrangeState, 
                     &TextStyle::sans(11.5, c.text_secondary),
                     hr.width() - indent - 112.0,
                 );
-                small_button(p, th, hr.x1 - 98.0, cy, "m", t.mixer.mute.then_some(c.accent_warning));
-                small_button(p, th, hr.x1 - 72.0, cy, "s", t.mixer.solo.then_some(c.accent_info));
-                let arm = small_button(p, th, hr.x1 - 46.0, cy, "", t.armed.then_some(c.accent_danger));
-                if t.armed {
-                    p.rrect(arm, 3.0, c.accent_danger);
-                    p.circle(arm.center(), 3.5, c.on_accent_danger);
-                } else {
-                    p.circle_stroke(arm.center(), 4.0, 1.0, c.text_primary);
+                draw_mute_solo(p, th, &hc, t);
+                if let Some(ar) = hc.arm {
+                    let arm = small_button(p, th, ar, "", t.armed.then_some(c.accent_danger));
+                    if t.armed {
+                        p.rrect(arm, 3.0, c.accent_danger);
+                        p.circle(arm.center(), 3.5, c.on_accent_danger);
+                    } else {
+                        p.circle_stroke(arm.center(), 4.0, 1.0, c.text_primary);
+                    }
                 }
-                fader(p, th, hr.x1 - 98.0, hr.x1 - 30.0, hr.y1 - 13.0, t.mixer.gain_db);
-                meter(p, th, hr.x1 - 16.0, hr.y0 + 10.0, hr.y1 - 6.0, if t.armed { 0.35 } else { 0.6 });
+                if let (Some(f), Some(m)) = (hc.fader, hc.meter) {
+                    fader(p, th, f, t.mixer.gain_db);
+                    meter(p, th, m, level);
+                }
             }
             if selected {
                 p.rrect_stroke(hr.inset(-1.0), 0.0, 1.0, c.accent_primary_border);
@@ -560,7 +677,7 @@ fn draw_row(p: &mut Painter<'_>, th: &Theme, doc: &Document, st: &ArrangeState, 
                     Rect::new(field.x1 - 16.0, cy - 4.0, field.x1 - 6.0, cy + 4.0),
                     c.text_secondary,
                 );
-                small_button(p, th, hr.x1 - 32.0, cy, "m", t.mixer.mute.then_some(c.accent_warning));
+                draw_mute_solo(p, th, &hc, t);
             }
             if let Some(target) = target
                 && let Some(lane_data) = doc.lanes.values().find(|x| x.target == target)
@@ -569,6 +686,15 @@ fn draw_row(p: &mut Painter<'_>, th: &Theme, doc: &Document, st: &ArrangeState, 
             }
             p.hline(hr.x0, lane.x1, hr.y1 - 1.0, c.border_subtle);
         }
+    }
+}
+
+fn draw_mute_solo(p: &mut Painter<'_>, th: &Theme, hc: &HeaderControls, t: &Track) {
+    if let Some(r) = hc.mute {
+        small_button(p, th, r, "m", t.mixer.mute.then_some(th.c.accent_warning));
+    }
+    if let Some(r) = hc.solo {
+        small_button(p, th, r, "s", t.mixer.solo.then_some(th.c.accent_info));
     }
 }
 

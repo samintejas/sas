@@ -8,7 +8,9 @@ use vello::kurbo::Rect;
 
 use crate::arrange::{self, ArrangeLayout, ArrangeState, TransportView};
 use crate::icons::{self, Icon};
+use crate::mixer::{self, Levels, MixerLayout};
 use crate::paint::{Align, Fonts, Painter, TextStyle};
+use crate::panel::PanelView;
 use crate::piano_roll;
 
 /// Height of the top bar.
@@ -28,6 +30,25 @@ pub struct Frame<'a> {
     pub transport: TransportView,
     /// Bottom panel height (0 hides it).
     pub panel_h: f64,
+    /// What the bottom panel shows.
+    pub panel: PanelView,
+    /// Horizontal scroll of the mixer.
+    pub mixer_scroll: f64,
+    /// Meter levels per track.
+    pub levels: &'a Levels,
+    /// Unsaved changes.
+    pub edited: bool,
+}
+
+/// Layouts of everything drawn, for hit testing.
+#[derive(Debug, Clone)]
+pub struct Drawn {
+    /// The shell's regions.
+    pub shell: ShellLayout,
+    /// The arrange view.
+    pub arrange: ArrangeLayout,
+    /// The mixer, when the panel shows it.
+    pub mixer: Option<MixerLayout>,
 }
 
 /// Rectangles of the shell's regions.
@@ -96,7 +117,10 @@ fn topbar(p: &mut Painter<'_>, th: &Theme, f: &Frame<'_>, r: Rect) {
     let cy = r.center().y;
     icons::draw(p, Icon::Panel, Rect::new(10.0, cy - 7.0, 26.0, cy + 7.0), c.text_primary);
     p.text(44.0, cy, "sat", &TextStyle::sans(15.0, c.text_max).medium(), Align::Left);
-    p.text(76.0, cy, f.name, &TextStyle::sans(13.0, c.text_secondary), Align::Left);
+    let nw = p.text(76.0, cy, f.name, &TextStyle::sans(13.0, c.text_secondary), Align::Left);
+    if f.edited {
+        p.circle(vello::kurbo::Point::new(76.0 + nw + 8.0, cy), 3.0, c.text_secondary);
+    }
     let mut x = 160.0;
     for (i, ic) in [Icon::Grid, Icon::Lines, Icon::Panel, Icon::Gear, Icon::Sliders].iter().enumerate() {
         let br = Rect::new(x, r.y0, x + 40.0, r.y1);
@@ -167,24 +191,23 @@ fn topbar(p: &mut Painter<'_>, th: &Theme, f: &Frame<'_>, r: Rect) {
 }
 
 /// Draws a whole frame of `w`×`h` logical pixels into `scene`.
-pub fn draw(
-    scene: &mut Scene,
-    fonts: &mut Fonts,
-    th: &Theme,
-    f: &Frame<'_>,
-    w: f64,
-    h: f64,
-) -> (ShellLayout, ArrangeLayout) {
+pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: f64, h: f64) -> Drawn {
     let mut p = Painter { scene, fonts };
     let sl = ShellLayout::new(w, h, f.panel_h);
     p.rect(Rect::new(0.0, 0.0, w, h), th.c.bg_base);
     topbar(&mut p, th, f, sl.topbar);
     let al = ArrangeLayout::new(f.doc, f.arrange, sl.arrange);
-    p.clip(sl.arrange, |p| arrange::draw(p, th, f.doc, f.arrange, &f.transport, &al));
+    p.clip(sl.arrange, |p| arrange::draw(p, th, f.doc, f.arrange, &f.transport, f.levels, &al));
     p.rrect_stroke(sl.arrange.inset(0.5), 0.0, 1.0, th.c.border_default);
+    let mut ml = None;
     if sl.panel.height() > 0.0 {
-        p.clip(sl.panel, |p| piano_roll::draw(p, th, f.doc, f.arrange.selected_clip, &f.transport, sl.panel));
+        p.clip(sl.panel, |p| match f.panel {
+            PanelView::Clip => piano_roll::draw(p, th, f.doc, f.arrange.selected_clip, &f.transport, sl.panel),
+            PanelView::Mixer => {
+                ml = Some(mixer::draw(p, th, f.doc, f.arrange.selected_track, f.levels, f.mixer_scroll, sl.panel))
+            }
+        });
         p.rrect_stroke(sl.panel.inset(0.5), 0.0, 1.0, th.c.border_default);
     }
-    (sl, al)
+    Drawn { shell: sl, arrange: al, mixer: ml }
 }

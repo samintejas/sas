@@ -97,6 +97,19 @@ pub struct Demo {
     pub selected: ClipId,
 }
 
+/// Plausible meter levels for screenshots: each strip reads a little below
+/// its fader, armed and silent tracks read nothing.
+pub fn levels(doc: &Document) -> crate::mixer::Levels {
+    doc.tracks
+        .values()
+        .filter(|t| !t.armed && !t.mixer.mute)
+        .map(|t| {
+            let peak = 10f32.powf((t.mixer.gain_db - 3.0) / 20.0);
+            (t.id, (peak, peak * 0.84))
+        })
+        .collect()
+}
+
 /// Builds the demo project.
 pub fn demo() -> Demo {
     let mut doc = Document::new(42);
@@ -165,6 +178,23 @@ pub fn demo() -> Demo {
     }
     b.ops.push(Op::AddSend { track: vox, target: echo, level_db: -14.0, pre_fader: false });
     b.ops.push(Op::SetTrackFlag { id: vox, flag: TrackFlag::Arm, on: true });
+    b.ops.push(Op::AddSend { track: rhythm, target: hall, level_db: -24.0, pre_fader: false });
+    b.ops.push(Op::AddSend { track: drums, target: hall, level_db: -18.0, pre_fader: false });
+    // fader levels as in the design's mixer
+    for (t, db) in [
+        (rhythm, -3.0),
+        (drums, -6.0),
+        (bass, -8.2),
+        (tops, -4.0),
+        (keys, -10.5),
+        (vocals, -2.0),
+        (vox, -7.0),
+        (hall, -12.0),
+        (echo, -14.0),
+        (doc.master, -1.5),
+    ] {
+        b.ops.push(Op::SetValue { target: ParamTarget::Gain(t), value: db });
+    }
 
     let lane = LaneId::new();
     b.ops.push(Op::AddLane { id: lane, target: ParamTarget::Gain(hall) });

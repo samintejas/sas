@@ -8,9 +8,9 @@ use vello::kurbo::{Point, Rect};
 use crate::arrange::TransportView;
 use crate::icons::{self, Icon};
 use crate::paint::{Align, Painter, TextStyle};
+use crate::panel::{self, PanelView, tab};
 
-/// Height of the panel's tab bar.
-pub const TABS_H: f64 = 36.0;
+pub use crate::panel::TABS_H;
 /// Height of the editor toolbar.
 pub const TOOLS_H: f64 = 36.0;
 /// Width of the keyboard.
@@ -85,22 +85,6 @@ impl RollLayout {
     }
 }
 
-fn tab(p: &mut Painter<'_>, th: &Theme, x: f64, r: Rect, icon: Option<Icon>, label: &str, on: bool) -> f64 {
-    let c = &th.c;
-    let st = TextStyle::mono(12.0, if on { c.text_max } else { c.text_secondary });
-    let iw = if icon.is_some() { 18.0 } else { 0.0 };
-    let w = p.fonts.measure(label, &st) as f64 + 28.0 + iw;
-    let cy = r.center().y;
-    if let Some(i) = icon {
-        icons::draw(p, i, Rect::new(x + 12.0, cy - 6.0, x + 24.0, cy + 6.0), st.color);
-    }
-    p.text(x + 14.0 + iw, cy, label, &st, Align::Left);
-    if on {
-        p.rect(Rect::new(x, r.y1 - 2.0, x + w, r.y1), c.accent_primary);
-    }
-    w
-}
-
 fn button(p: &mut Painter<'_>, th: &Theme, r: Rect, label: &str) {
     p.rrect(r, 5.0, th.c.bg_control);
     p.rrect_stroke(r.inset(-0.5), 5.0, 1.0, th.c.border_strong.alpha(0.6));
@@ -110,17 +94,7 @@ fn button(p: &mut Painter<'_>, th: &Theme, r: Rect, label: &str) {
 /// Draws the bottom panel for the selected clip.
 pub fn draw(p: &mut Painter<'_>, th: &Theme, doc: &Document, clip: Option<ClipId>, tr: &TransportView, r: Rect) {
     let c = &th.c;
-    p.rect(r, c.bg_surface);
-    p.hline(r.x0, r.x1, r.y0, c.border_default);
-    // tab bar
-    let tabs = Rect::new(r.x0, r.y0, r.x1, r.y0 + TABS_H);
-    p.hline(r.x0, r.x1, tabs.y1 - 1.0, c.border_subtle);
-    let mut x = r.x0 + 4.0;
-    x += tab(p, th, x, tabs, Some(Icon::Panel), "clip", true);
-    x += tab(p, th, x, tabs, Some(Icon::Grid), "macros", false);
-    x += tab(p, th, x, tabs, Some(Icon::Sliders), "mixer", false);
-    p.vline(x + 4.0, tabs.y0 + 8.0, tabs.y1 - 8.0, c.border_default);
-    x += 16.0;
+    let (tabs, mut x) = panel::draw_bar(p, th, r, PanelView::Clip);
     let Some(clip) = clip.and_then(|id| doc.clips.get(&id)) else {
         p.text(x, tabs.center().y, "no clip selected", &TextStyle::mono(12.0, c.text_secondary), Align::Left);
         return;

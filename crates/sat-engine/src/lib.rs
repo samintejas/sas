@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 
 pub use automation::{AutoCurve, AutoPoint, Automation};
-pub use schedule::{Buf, NodeId, NodeKind, Param, Schedule, ScheduleBuilder, ScheduleError, Strip, db_to_gain};
+pub use schedule::{Buf, Meter, NodeId, NodeKind, Param, Schedule, ScheduleBuilder, ScheduleError, Strip, db_to_gain};
 pub use synth::{NoteEvent, Synth, SynthParam, Wave};
 
 /// A message to the audio thread.

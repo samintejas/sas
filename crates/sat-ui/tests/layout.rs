@@ -82,3 +82,98 @@ fn position_display() {
     assert_eq!(sat_ui::shell::format_pos(&d.doc, bars(6) + Ticks::QUARTER + Ticks::sixteenths(1)), "007.02.02");
     let _ = TrackKind::Track;
 }
+
+#[test]
+fn header_controls_are_hit_where_they_are_drawn() {
+    use sat_ui::arrange::header_controls;
+    let (d, l) = layout();
+    let row = *l.rows.iter().find(|r| r.kind == RowKind::Track).unwrap();
+    let hc = header_controls(&row, l.headers);
+    let t = row.track;
+    assert_eq!(l.hit(hc.mute.unwrap().center()), Hit::Mute(t));
+    assert_eq!(l.hit(hc.solo.unwrap().center()), Hit::Solo(t));
+    assert_eq!(l.hit(hc.arm.unwrap().center()), Hit::Arm(t));
+    let f = hc.fader.unwrap();
+    assert_eq!(l.hit(Point::new((f.x0 + f.x1) / 2.0, f.y + 2.0)), Hit::Fader(t));
+    assert!((f.pos_at(f.x_of(0.3)) - 0.3).abs() < 1e-9);
+    // the name area is still the header
+    assert_eq!(l.hit(Point::new(l.headers.x0 + 20.0, row.y + 17.0)), Hit::Header(t));
+    // returns and master have only a mute button
+    let master = *l.rows.last().unwrap();
+    let hm = header_controls(&master, l.headers);
+    assert!(hm.solo.is_none() && hm.fader.is_none());
+    assert_eq!(l.hit(hm.mute.unwrap().center()), Hit::Mute(d.doc.master));
+}
+
+mod mixer {
+    use sat_doc::*;
+    use sat_ui::demo::demo;
+    use sat_ui::mixer::{Knob, MixHit, MixerLayout, StripKind, returns};
+    use vello::kurbo::{Point, Rect};
+
+    fn body() -> Rect {
+        Rect::new(4.0, 500.0, 1436.0, 770.0)
+    }
+
+    #[test]
+    fn strips_follow_the_tree_with_returns_then_master_on_the_right() {
+        let d = demo();
+        let l = MixerLayout::new(&d.doc, body(), 0.0);
+        let kinds: Vec<StripKind> = l.strips.iter().map(|s| s.kind).collect();
+        use StripKind::*;
+        assert_eq!(kinds, vec![Group, Child, Child, Group, Child, Group, Child, Return, Return, Master]);
+        let master = l.strips.last().unwrap();
+        assert_eq!(master.track, d.doc.master);
+        assert!((master.rect.x1 - (body().x1 - 12.0)).abs() < 1e-9, "master is pinned right");
+        // returns sit after a separator
+        let sep = l.separator.unwrap();
+        let first_ret = l.strips.iter().find(|s| s.kind == Return).unwrap();
+        assert!(sep < first_ret.rect.x0);
+        // tracks and groups get send knobs a, b and pan; returns and master only pan
+        let rets = returns(&d.doc);
+        let knobs: Vec<Knob> = l.strips[0].knobs.iter().map(|k| k.1).collect();
+        assert_eq!(knobs, vec![Knob::Send(rets[0]), Knob::Send(rets[1]), Knob::Pan]);
+        assert_eq!(first_ret.knobs.len(), 1);
+        assert!(master.mute.is_none());
+        assert_eq!(l.max_scroll, 0.0, "the demo fits");
+    }
+
+    #[test]
+    fn controls_hit_where_drawn() {
+        let d = demo();
+        let l = MixerLayout::new(&d.doc, body(), 0.0);
+        let s = &l.strips[1];
+        let t = s.track;
+        assert_eq!(l.hit(s.mute.unwrap().center()), MixHit::Mute(t));
+        assert_eq!(l.hit(s.solo.unwrap().center()), MixHit::Solo(t));
+        assert_eq!(l.hit(s.knobs[2].0.center()), MixHit::Knob(t, Knob::Pan));
+        assert_eq!(l.hit(s.cap(0.5).center()), MixHit::Fader(t));
+        assert_eq!(l.hit(Point::new(s.rect.x0 + 6.0, s.rect.y0 + 8.0)), MixHit::Strip(t));
+        assert_eq!(l.hit(Point::new(s.rect.x1 + 1.5, s.rect.center().y)), MixHit::Nothing);
+        for pos in [0.0, 0.25, 0.83, 1.0] {
+            assert!((s.fader_pos_at(s.fader_y(pos)) - pos).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn scrolling_slides_strips_under_a_fixed_master() {
+        let mut d = demo();
+        // enough tracks to overflow
+        for i in 0..12 {
+            let (_, op) = Op::add_track(format!("t{i}"), None, 0);
+            apply(&mut d.doc, op).unwrap();
+        }
+        let l0 = MixerLayout::new(&d.doc, body(), 0.0);
+        assert!(l0.max_scroll > 0.0);
+        let l1 = MixerLayout::new(&d.doc, body(), 1e9);
+        let (a, b) = (&l0.strips[0], &l1.strips[0]);
+        assert!((a.rect.x0 - b.rect.x0 - l0.max_scroll).abs() < 1e-9, "scroll clamps to the max");
+        assert_eq!(l0.strips.last().unwrap().rect, l1.strips.last().unwrap().rect);
+        // the strip scrolled under master's left edge is not hit there; master is
+        let m = l1.strips.last().unwrap();
+        let name_row = Point::new(m.rect.x0 + 20.0, m.rect.y0 + 8.0);
+        assert_eq!(l1.hit(name_row), MixHit::Strip(m.track));
+        let under = Point::new(m.rect.x0 - 2.0, m.rect.y0 + 8.0);
+        assert_eq!(l1.hit(under), MixHit::Nothing);
+    }
+}
