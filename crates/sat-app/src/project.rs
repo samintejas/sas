@@ -38,6 +38,7 @@ fn stamp() -> String {
 struct Job {
     dir: PathBuf,
     doc: Document,
+    sounds: sat_disk::Sounds,
 }
 
 /// Writes autosaves on a background thread.
@@ -54,6 +55,10 @@ impl Autosaver {
             .name("sat-autosave".into())
             .spawn(move || {
                 for job in rx {
+                    // a backup is only whole with the sounds it plays
+                    if let Err(e) = sat_disk::write_sounds(&job.dir, &job.doc, &job.sounds) {
+                        eprintln!("autosave of sounds to {} failed: {e}", job.dir.display());
+                    }
                     match file::write_backup(&job.dir, &job.doc, &stamp(), BACKUPS_KEPT) {
                         Ok(p) => eprintln!("autosaved {}", p.display()),
                         Err(e) => eprintln!("autosave to {} failed: {e}", job.dir.display()),
@@ -64,9 +69,9 @@ impl Autosaver {
         Autosaver { tx: Some(tx), worker: Some(worker) }
     }
 
-    fn send(&self, dir: PathBuf, doc: Document) {
+    fn send(&self, dir: PathBuf, doc: Document, sounds: sat_disk::Sounds) {
         if let Some(tx) = &self.tx {
-            let _ = tx.send(Job { dir, doc });
+            let _ = tx.send(Job { dir, doc, sounds });
         }
     }
 
@@ -86,6 +91,16 @@ impl Drop for Autosaver {
 }
 
 /// The open project's place on disk and its save state.
+/// Saves the document and every sound it uses that the bundle lacks.
+fn save_all(path: &Path, doc: &Document, sounds: &sat_disk::Sounds) -> Result<(), file::FileError> {
+    file::save_bundle(path, doc)?;
+    sat_disk::write_sounds(path, doc, sounds).map_err(|e| match e {
+        sat_disk::DiskError::Io(e) => file::FileError::Io(e),
+        e => file::FileError::Io(std::io::Error::other(e.to_string())),
+    })?;
+    Ok(())
+}
+
 pub struct Project {
     /// The bundle, once saved or opened.
     pub path: Option<PathBuf>,
@@ -130,19 +145,30 @@ impl Project {
     }
 
     /// Saves to the current bundle. Errors if the project has none yet.
-    pub fn save(&mut self, doc: &Document, version: u64) -> Result<PathBuf, file::FileError> {
+    pub fn save(
+        &mut self,
+        doc: &Document,
+        sounds: &sat_disk::Sounds,
+        version: u64,
+    ) -> Result<PathBuf, file::FileError> {
         let path = self.path.clone().ok_or_else(|| {
             file::FileError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "project has no file yet"))
         })?;
-        file::save_bundle(&path, doc)?;
+        save_all(&path, doc, sounds)?;
         self.saved = version;
         Ok(path)
     }
 
     /// Saves to a new bundle at `path` (the extension is added if missing).
-    pub fn save_as(&mut self, path: &Path, doc: &Document, version: u64) -> Result<PathBuf, file::FileError> {
+    pub fn save_as(
+        &mut self,
+        path: &Path,
+        doc: &Document,
+        sounds: &sat_disk::Sounds,
+        version: u64,
+    ) -> Result<PathBuf, file::FileError> {
         let path = bundle_path(path);
-        file::save_bundle(&path, doc)?;
+        save_all(&path, doc, sounds)?;
         self.name = name_of(&path);
         self.path = Some(path.clone());
         self.saved = version;
@@ -159,12 +185,12 @@ impl Project {
 
     /// Queues an autosave if the document changed since the last one and
     /// either `force` is set or the interval has passed. Returns whether it queued.
-    pub fn autosave(&mut self, doc: &Document, version: u64, force: bool) -> bool {
+    pub fn autosave(&mut self, doc: &Document, sounds: &sat_disk::Sounds, version: u64, force: bool) -> bool {
         let changed = version != self.autosaved.0 && version != self.saved;
         if !changed || !(force || self.autosaved.1.elapsed() >= AUTOSAVE_EVERY) {
             return false;
         }
-        self.autosaver.send(self.autosave_dir(), doc.clone());
+        self.autosaver.send(self.autosave_dir(), doc.clone(), sounds.clone());
         self.autosaved = (version, Instant::now());
         true
     }
@@ -199,8 +225,8 @@ mod tests {
         h.apply("fader", [Op::SetValue { target: ParamTarget::Gain(master), value: -4.5 }]).unwrap();
         let mut p = Project::new(None, "untitled".into(), 0);
         assert!(p.edited(h.version()));
-        assert!(p.save(h.doc(), h.version()).is_err(), "nowhere to save yet");
-        let path = p.save_as(&dir.join("song"), h.doc(), h.version()).unwrap();
+        assert!(p.save(h.doc(), &sat_disk::Sounds::new(), h.version()).is_err(), "nowhere to save yet");
+        let path = p.save_as(&dir.join("song"), h.doc(), &sat_disk::Sounds::new(), h.version()).unwrap();
         assert_eq!(path.extension().unwrap(), "sat");
         assert_eq!(p.name, "song");
         assert!(!p.edited(h.version()));
@@ -214,19 +240,20 @@ mod tests {
     #[test]
     fn autosave_writes_backups_only_when_changed() {
         let dir = tmp("autosave");
+        let none = sat_disk::Sounds::new();
         let mut h = History::new(Document::new(7), 10);
         let mut p = Project::new(None, "a".into(), h.version());
-        let bundle = p.save_as(&dir.join("a"), h.doc(), h.version()).unwrap();
+        let bundle = p.save_as(&dir.join("a"), h.doc(), &none, h.version()).unwrap();
         // nothing changed since the save: no autosave even when forced
-        assert!(!p.autosave(h.doc(), h.version(), true));
+        assert!(!p.autosave(h.doc(), &none, h.version(), true));
         let master = h.doc().master;
         h.apply("fader", [Op::SetValue { target: ParamTarget::Gain(master), value: -2.0 }]).unwrap();
         // changed, but the interval has not passed
-        assert!(!p.autosave(h.doc(), h.version(), false));
+        assert!(!p.autosave(h.doc(), &none, h.version(), false));
         assert!(p.next_autosave(h.version()).is_some());
-        assert!(p.autosave(h.doc(), h.version(), true));
+        assert!(p.autosave(h.doc(), &none, h.version(), true));
         // the same version is not written twice
-        assert!(!p.autosave(h.doc(), h.version(), true));
+        assert!(!p.autosave(h.doc(), &none, h.version(), true));
         p.finish();
         let backups: Vec<_> = std::fs::read_dir(bundle.join("backups")).unwrap().collect();
         assert_eq!(backups.len(), 1);

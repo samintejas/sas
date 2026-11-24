@@ -51,6 +51,9 @@ pub struct Document {
     pub lanes: OrdMap<LaneId, Lane>,
     /// Loop range.
     pub loop_range: LoopRange,
+    /// The audio pool: sound files the project uses.
+    #[serde(default)]
+    pub audio: OrdMap<AudioId, AudioFile>,
 }
 
 impl Document {
@@ -99,6 +102,7 @@ impl Document {
             slots: OrdMap::new(),
             lanes: OrdMap::unit(tempo_lane, tempo),
             loop_range: LoopRange { start: Ticks::ZERO, end: Ticks::quarters(16), enabled: false },
+            audio: OrdMap::new(),
         }
     }
 

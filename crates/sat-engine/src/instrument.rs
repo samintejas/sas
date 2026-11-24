@@ -1,4 +1,5 @@
-//! Instrument nodes: a voice patch that every voice runs, or a drum synth.
+//! Instrument nodes: a voice patch that every voice runs, a drum synth, or
+//! a sampler.
 //!
 //! A [`Patch`] is a list of modules in dependency order. Each module reads
 //! its inputs from, and writes its outputs to, a small per-voice register
@@ -10,6 +11,9 @@
 use sat_dsp::drums::{self, Kit};
 use sat_dsp::{Adsr, AdsrParams, Mode, Noise, Osc, Shape, Svf, db_gain, midi_hz, pan_gains};
 
+use std::sync::Arc;
+
+use crate::sampler::{Sample, Sampler};
 use crate::synth::NoteEvent;
 
 /// Most modules in a patch.
@@ -17,7 +21,7 @@ pub const MAX_MODS: usize = 24;
 /// Most registers (connected outputs) in a patch.
 pub const MAX_REGS: usize = 64;
 /// Most parameters per module.
-pub const MAX_PARAMS: usize = 8;
+pub const MAX_PARAMS: usize = 10;
 /// Most voices.
 pub const MAX_VOICES: usize = 16;
 /// An unconnected input.
@@ -143,6 +147,7 @@ enum Engine {
         on: [bool; MAX_VOICES],
         ages: [u64; MAX_VOICES],
     },
+    Sampler(Sampler),
 }
 
 /// An instrument node: plays note events through a patch or the drum synth.
@@ -193,8 +198,16 @@ impl Instrument {
         )
     }
 
-    /// Sets parameter `index` of module `slot` (the drum synth is slot 0:
-    /// level dB, tune, decay). Returns false if there is no such parameter.
+    /// The sampler playing `sample` (silent without one). Parameters: level
+    /// (dB), root note, tune (semitones), start (0–1), mode ([`crate::PlayMode`]
+    /// index), attack (s), release (s), velocity sensitivity (0–1), loop start (0–1).
+    pub fn sampler(events: Vec<NoteEvent>, sample: Option<Arc<Sample>>, params: [f32; MAX_PARAMS]) -> Instrument {
+        Instrument::with(events, Engine::Sampler(Sampler::new(sample, params)))
+    }
+
+    /// Sets parameter `index` of module `slot` (the drum synth and the
+    /// sampler are slot 0; the drum synth's parameters are level dB, tune,
+    /// decay). Returns false if there is no such parameter.
     pub fn set_param(&mut self, slot: u8, index: u8, v: f32) -> bool {
         match &mut self.engine {
             Engine::Patch { patch, .. } => match patch.mods.get_mut(slot as usize) {
@@ -219,6 +232,13 @@ impl Instrument {
                 }
                 _ => false,
             },
+            Engine::Sampler(s) => match (slot, index as usize) {
+                (0, i) if i < MAX_PARAMS => {
+                    s.params[i] = v;
+                    true
+                }
+                _ => false,
+            },
         }
     }
 
@@ -238,20 +258,27 @@ impl Instrument {
                 *on = *o2;
                 *ages = *a2;
             }
+            (Engine::Sampler(s), Engine::Sampler(o)) if s.same_sound(o) => {
+                *s.voices = *o.voices;
+            }
             _ => {}
         }
     }
 
     pub(crate) fn release_all(&mut self) {
-        if let Engine::Patch { voices, .. } = &mut self.engine {
-            for v in voices.iter_mut().filter(|v| v.active && v.remaining >= 0) {
-                v.remaining = -1;
+        match &mut self.engine {
+            Engine::Patch { voices, .. } => {
+                for v in voices.iter_mut().filter(|v| v.active && v.remaining >= 0) {
+                    v.remaining = -1;
+                }
             }
+            Engine::Sampler(s) => s.release_all(),
+            Engine::Drums { .. } => {}
         }
         self.expect = None;
     }
 
-    fn start(&mut self, e: &NoteEvent) {
+    fn start(&mut self, e: &NoteEvent, sr: f32) {
         self.clock += 1;
         let clock = self.clock;
         match &mut self.engine {
@@ -295,6 +322,7 @@ impl Instrument {
                 on[slot] = true;
                 ages[slot] = clock;
             }
+            Engine::Sampler(s) => s.start(e.pitch, e.velocity, e.len, clock, sr),
         }
     }
 
@@ -309,6 +337,9 @@ impl Instrument {
         }
         self.expect = pos.map(|p| p + len as i64);
         let sr = sr as f32;
+        if let Engine::Sampler(s) = &mut self.engine {
+            s.refresh(sr);
+        }
         for k in 0..len {
             if let Some(t0) = pos {
                 let t = t0 + k as i64;
@@ -317,7 +348,7 @@ impl Instrument {
                         break;
                     }
                     if e.at == t {
-                        self.start(&e);
+                        self.start(&e, sr);
                     }
                     self.cursor += 1;
                 }
@@ -336,6 +367,7 @@ impl Instrument {
                     }
                     (s * *level, s * *level)
                 }
+                Engine::Sampler(s) => s.next(sr),
             };
             out.l[off + k] += l;
             out.r[off + k] += r;

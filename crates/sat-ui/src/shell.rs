@@ -86,6 +86,8 @@ pub struct Frame<'a> {
     pub grid: &'a GridView,
     /// Macro learn mode is on.
     pub learn: bool,
+    /// The decoded sounds samplers play.
+    pub sounds: &'a sat_disk::Pool,
 }
 
 /// Layouts of everything drawn, for hit testing.
@@ -262,7 +264,9 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
     let mut gl = None;
     match f.view {
         MainView::Grid(g) => {
-            p.clip(sl.arrange, |p| gl = grid::draw(p, th, f.doc, g, f.grid, f.arrange.selected_clip, sl.arrange));
+            p.clip(sl.arrange, |p| {
+                gl = grid::draw(p, th, f.doc, g, f.grid, f.arrange.selected_clip, f.sounds, sl.arrange)
+            });
         }
         MainView::Arrange => {
             p.clip(sl.arrange, |p| arrange::draw(p, th, f.doc, f.arrange, &f.transport, f.levels, &al));

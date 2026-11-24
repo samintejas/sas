@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 sat-doc.workspace = true
+sat-disk.workspace = true
 sat-modules.workspace = true
 im.workspace = true
 sat-engine.workspace = true

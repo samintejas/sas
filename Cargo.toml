@@ -18,6 +18,7 @@ sat-modules = { path = "crates/sat-modules" }
 sat-dsp = { path = "crates/sat-dsp" }
 sat-theme = { path = "crates/sat-theme" }
 sat-ui = { path = "crates/sat-ui" }
+sat-disk = { path = "crates/sat-disk" }
 im = { version = "15", features = ["serde"] }
 uuid = { version = "1", features = ["v7", "serde"] }
 serde = { version = "1", features = ["derive"] }
@@ -37,6 +38,7 @@ winit = "0.30"
 cpal = "0.18"
 rfd = { version = "0.18", default-features = false, features = ["xdg-portal"] }
 dirs = "6"
+hound = "3.5"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

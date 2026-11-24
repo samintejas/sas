@@ -185,6 +185,27 @@ pub struct Module {
     pub params: OrdMap<String, f32>,
     /// Position on the grid canvas.
     pub pos: (f32, f32),
+    /// The sound a module plays (a sampler's sample), from the audio pool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<AudioId>,
+}
+
+/// A sound file in the project's audio pool. The samples live in the
+/// bundle's `audio/` folder; the document only records what they are.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AudioFile {
+    /// Its id.
+    pub id: AudioId,
+    /// Display name, usually the imported file's name without extension.
+    pub name: String,
+    /// File name inside the bundle's `audio/` folder.
+    pub file: String,
+    /// Sample rate in Hz.
+    pub rate: u32,
+    /// Channel count (1 or 2).
+    pub channels: u16,
+    /// Length in sample frames.
+    pub frames: u64,
 }
 
 /// One end of a cable on a module.

@@ -69,7 +69,7 @@ fn sixty_four_tracks_do_not_allocate() {
 }
 
 #[test]
-fn instrument_patches_and_drums_do_not_allocate() {
+fn instrument_patches_drums_and_samplers_do_not_allocate() {
     use sat_modules::instrument as ins;
     let mut s = song();
     let grid = s.h.doc().tracks[&s.bass].instrument_grid.unwrap();
@@ -84,6 +84,17 @@ fn instrument_patches_and_drums_do_not_allocate() {
         pos: (0.0, 0.0),
     });
     s.h.apply("patch", ops).unwrap();
+    // a looping sampler on the lead
+    let lgrid = s.h.doc().tracks[&s.lead].instrument_grid.unwrap();
+    let (smp, op) = sat_modules::add_module(s.h.doc(), lgrid, ins::SAMPLER, (0.0, 0.0));
+    let audio = AudioId::new();
+    let file = AudioFile { id: audio, name: "s".into(), file: "s.wav".into(), rate: 44_100, channels: 1, frames: 4410 };
+    s.h.apply("sampler", [op, Op::AddAudio { file }, Op::SetModuleAudio { module: smp, audio: Some(audio) }]).unwrap();
+    s.h.apply("loop", [Op::SetValue { target: ParamTarget::Module { module: smp, param: "mode".into() }, value: 2.0 }])
+        .unwrap();
+    let tone: Vec<f32> = (0..4410).map(|i| (i as f32 * 0.05).sin()).collect();
+    let mut sounds = sat_compile::Sounds::new();
+    sounds.insert(audio, std::sync::Arc::new(sat_engine::Sample::from_interleaved(44_100.0, 1, &tone)));
     // and a full fx chain on the bass
     let fx_grid = s.h.doc().tracks[&s.bass].fx_grids[0];
     use sat_modules::fx;
@@ -92,13 +103,13 @@ fn instrument_patches_and_drums_do_not_allocate() {
         s.h.apply("fx", ops).unwrap();
     }
     assert_eq!(sat_compile::build_fx(s.h.doc(), fx_grid).unwrap().0.len(), 9);
-    let c = sat_compile::compile(s.h.doc(), SR, BLOCK).unwrap();
+    let c = sat_compile::compile_with(s.h.doc(), SR, BLOCK, &sounds).unwrap();
     let cutoff = c.param_command(&ParamTarget::Module { module: ids[2], param: "cutoff".into() }, 300.0).unwrap();
     let (mut e, mut h) = engine(c.schedule, 64);
     // a knob change that recompiles (a new cable) swaps in a schedule that adopts the voices
     let ops = sat_modules::patch(s.h.doc(), &PortRef::new(ids[0], "vel"), &PortRef::new(ids[1], "fm"), None).unwrap();
     s.h.apply("patch", ops).unwrap();
-    let next = Box::new(sat_compile::compile(s.h.doc(), SR, BLOCK).unwrap().schedule);
+    let next = Box::new(sat_compile::compile_with(s.h.doc(), SR, BLOCK, &sounds).unwrap().schedule);
     let mut l = vec![0.0f32; BLOCK];
     let mut r = vec![0.0f32; BLOCK];
     h.send(Command::Play).unwrap();

@@ -61,6 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         view,
         grid: &sat_ui::grid::GridView::default(),
         learn: false,
+        sounds: &demo.sounds,
     };
     let t = std::time::Instant::now();
     shell::draw(&mut scene, &mut fonts, &theme, &frame, w, h);
