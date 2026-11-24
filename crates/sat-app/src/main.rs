@@ -81,12 +81,14 @@ struct Playback {
     /// Used when there is no audio device: a wall clock drives the playhead.
     clock: Option<(Instant, Ticks)>,
     status: String,
+    /// The decoded sounds samplers play.
+    pool: sat_disk::Pool,
 }
 
 impl Playback {
-    fn start(doc: &Document) -> Playback {
+    fn start(doc: &Document, pool: sat_disk::Pool) -> Playback {
         let rate = audio::device_rate().unwrap_or(FALLBACK_RATE);
-        let compiled = sat_compile::compile(doc, rate, MAX_BLOCK).expect("project compiles");
+        let compiled = sat_compile::compile_with(doc, rate, MAX_BLOCK, pool.sounds()).expect("project compiles");
         let (engine, mut handle) = sat_engine::engine(compiled.schedule.clone(), 256);
         let _ = handle.send(Command::SetLoop(compiled.loop_samples(doc)));
         match audio::start(engine, MAX_BLOCK) {
@@ -97,6 +99,7 @@ impl Playback {
                 _output: Some(out),
                 playing: false,
                 clock: None,
+                pool,
             },
             Err(e) => Playback {
                 status: format!("no audio ({e})"),
@@ -105,6 +108,7 @@ impl Playback {
                 _output: None,
                 playing: false,
                 clock: None,
+                pool,
             },
         }
     }
@@ -119,7 +123,7 @@ impl Playback {
     /// Recompiles after a structural edit and swaps the new schedule in.
     fn recompile(&mut self, doc: &Document) {
         let rate = self.compiled.schedule.sample_rate();
-        match sat_compile::compile(doc, rate, MAX_BLOCK) {
+        match sat_compile::compile_with(doc, rate, MAX_BLOCK, self.pool.sounds()) {
             Ok(c) => {
                 self.send(Command::Swap(Box::new(c.schedule.clone())));
                 self.send(Command::SetLoop(c.loop_samples(doc)));
@@ -374,9 +378,54 @@ impl App {
     /// Keeps unsaved work in an autosave before the document is replaced.
     fn keep_unsaved(&mut self) {
         let v = self.history.version();
-        if self.project.autosave(self.history.doc(), v, true) {
+        if self.project.autosave(self.history.doc(), self.playback.pool.sounds(), v, true) {
             eprintln!("unsaved changes kept in {}", self.project.autosave_dir().join("backups").display());
         }
+    }
+
+    /// A WAV dropped on the window: into the shown instrument grid's (or the
+    /// selected track's) sampler, adding one if the grid has none.
+    fn drop_sound(&mut self, path: &Path) {
+        let doc = self.history.doc();
+        let grid = match self.view {
+            MainView::Grid(g) if doc.grids.get(&g).is_some_and(|g| g.kind == GridKind::Instrument) => Some(g),
+            _ => self.arrange.selected_track.and_then(|t| doc.tracks.get(&t)).and_then(|t| t.instrument_grid),
+        };
+        let Some(grid) = grid else {
+            eprintln!("select a track to drop a sound on");
+            return;
+        };
+        let target = self
+            .grid
+            .selected
+            .filter(|id| {
+                doc.modules.get(id).is_some_and(|m| m.grid == grid && m.kind == sat_modules::instrument::SAMPLER)
+            })
+            .or_else(|| doc.modules_on(grid).find(|m| m.kind == sat_modules::instrument::SAMPLER).map(|m| m.id));
+        self.load_sound(target, grid, path);
+    }
+
+    /// Imports a WAV and sets it on sampler `module`, or on a new sampler on `grid`.
+    fn load_sound(&mut self, module: Option<ModuleId>, grid: sat_doc::GridId, path: &Path) {
+        let file = match self.playback.pool.import(path) {
+            Ok(f) => f,
+            Err(e) => return eprintln!("cannot load {}: {e}", path.display()),
+        };
+        let doc = self.history.doc();
+        let mut ops = vec![Op::AddAudio { file: file.clone() }];
+        let module = match module {
+            Some(m) => m,
+            None => {
+                let pos = grid::free_pos(doc, grid);
+                let (id, op) = sat_modules::add_module(doc, grid, sat_modules::instrument::SAMPLER, pos);
+                ops.push(op);
+                id
+            }
+        };
+        ops.push(Op::SetModuleAudio { module, audio: Some(file.id) });
+        eprintln!("loaded {} ({} frames at {} Hz)", file.name, file.frames, file.rate);
+        self.edit("load sound", ops);
+        self.grid.selected = Some(module);
     }
 
     fn open(&mut self) {
@@ -394,6 +443,7 @@ impl App {
         match self.project.open(path, 0) {
             Ok(doc) => {
                 eprintln!("opened {}", path.display());
+                self.playback.pool = load_sounds(path, &doc);
                 self.load(doc);
             }
             Err(e) => eprintln!("cannot open {}: {e}", path.display()),
@@ -404,13 +454,14 @@ impl App {
         self.keep_unsaved();
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
         self.project = Project::new(None, "untitled".into(), 0);
+        self.playback.pool = sat_disk::Pool::new();
         self.load(Document::new(seed as u64));
     }
 
     fn save(&mut self, choose: bool) {
         let v = self.history.version();
         let res = if self.project.path.is_some() && !choose {
-            self.project.save(self.history.doc(), v)
+            self.project.save(self.history.doc(), self.playback.pool.sounds(), v)
         } else {
             let mut dialog = rfd::FileDialog::new().set_title("Save sat project").set_file_name(format!(
                 "{}.{}",
@@ -421,7 +472,7 @@ impl App {
                 dialog = dialog.set_directory(dir);
             }
             let Some(path) = dialog.save_file() else { return };
-            self.project.save_as(&path, self.history.doc(), v)
+            self.project.save_as(&path, self.history.doc(), self.playback.pool.sounds(), v)
         };
         match res {
             Ok(p) => eprintln!("saved {}", p.display()),
@@ -459,6 +510,7 @@ impl App {
             view: self.view,
             grid: &self.grid,
             learn: self.learn,
+            sounds: &self.playback.pool,
         };
         let mut scene = Scene::new();
         let drawn = shell::draw(&mut scene, &mut self.fonts, &self.theme, &frame, w, h);
@@ -1062,6 +1114,13 @@ impl App {
                 self.begin_drag(target, Axis::Horizontal { travel }, double);
             }
             GridHit::Module(id) => self.grid.selected = Some(id),
+            GridHit::Sound(id) => {
+                self.grid.selected = Some(id);
+                let dialog = rfd::FileDialog::new().set_title("Load a sound").add_filter("WAV audio", &["wav", "WAV"]);
+                if let Some(path) = dialog.pick_file() {
+                    self.load_sound(Some(id), l.grid, &path);
+                }
+            }
             GridHit::Bypass(id) => {
                 let on = self.history.doc().modules.get(&id).is_some_and(sat_modules::fx::bypassed);
                 let target = ParamTarget::Module { module: id, param: sat_modules::fx::BYPASS.into() };
@@ -1368,7 +1427,13 @@ impl ApplicationHandler for App {
                 };
                 self.scroll(dx, dy);
             }
-            WindowEvent::DroppedFile(path) => self.open_path(&path),
+            WindowEvent::DroppedFile(path) => {
+                if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("wav")) {
+                    self.drop_sound(&path);
+                } else {
+                    self.open_path(&path);
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed && !event.repeat => {
                 self.key(&event.logical_key);
             }
@@ -1384,7 +1449,7 @@ impl ApplicationHandler for App {
             return self.quit(el);
         }
         let v = self.history.version();
-        if self.drag.is_none() && self.project.autosave(self.history.doc(), v, false) {
+        if self.drag.is_none() && self.project.autosave(self.history.doc(), self.playback.pool.sounds(), v, false) {
             self.update_title();
         }
         // while playing or meters are falling, redraw at display rate; otherwise
@@ -1402,9 +1467,19 @@ impl ApplicationHandler for App {
     }
 }
 
+/// The sounds of a project bundle; ones that cannot be read are reported
+/// and their samplers stay silent.
+fn load_sounds(bundle: &Path, doc: &Document) -> sat_disk::Pool {
+    let mut pool = sat_disk::Pool::new();
+    for (name, e) in pool.load(bundle, doc) {
+        eprintln!("sound {name} is missing: {e}");
+    }
+    pool
+}
+
 fn main() {
     let arg = std::env::args().nth(1).map(PathBuf::from);
-    let (doc, project, selected) = match &arg {
+    let (doc, project, selected, pool) = match &arg {
         Some(p) => {
             let mut project = Project::new(None, project::name_of(p), 0);
             let doc = project.open(p, 0).unwrap_or_else(|e| {
@@ -1412,14 +1487,15 @@ fn main() {
                 std::process::exit(1);
             });
             let first = doc.clips.keys().next().copied();
-            (doc, project, first)
+            let pool = load_sounds(p, &doc);
+            (doc, project, first, pool)
         }
         None => {
             let d = sat_ui::demo::demo();
-            (d.doc, Project::new(None, "demo set".into(), 0), Some(d.selected))
+            (d.doc, Project::new(None, "demo set".into(), 0), Some(d.selected), d.sounds)
         }
     };
-    let playback = Playback::start(&doc);
+    let playback = Playback::start(&doc, pool);
     let arrange = ArrangeState {
         selected_clip: selected,
         selected_track: selected.and_then(|c| doc.clips.get(&c)).map(|c| c.track),

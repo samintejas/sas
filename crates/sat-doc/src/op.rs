@@ -123,6 +123,12 @@ pub enum Op {
     Connect { id: CableId, from: PortRef, to: Endpoint },
     /// Removes a cable.
     Disconnect { id: CableId },
+    /// Adds a sound file to the audio pool.
+    AddAudio { file: AudioFile },
+    /// Removes a sound file from the pool; modules playing it go silent.
+    RemoveAudio { id: AudioId },
+    /// Sets (or clears) the sound a module plays.
+    SetModuleAudio { module: ModuleId, audio: Option<AudioId> },
 
     // --- values ---
     /// Sets the base value of a parameter, macro, fader, pan or send level.
@@ -527,7 +533,7 @@ pub fn apply(d: &mut Document, op: Op) -> Result<Change, OpError> {
             for v in params.values() {
                 finite(*v, "parameter")?;
             }
-            d.modules.insert(id, Module { id, grid, kind, name, params, pos });
+            d.modules.insert(id, Module { id, grid, kind, name, params, pos, audio: None });
             Structure
         }
         Op::RemoveModule { id } => {
@@ -535,6 +541,35 @@ pub fn apply(d: &mut Document, op: Op) -> Result<Change, OpError> {
                 return Err(nf("module", id));
             }
             drop_module(d, id);
+            Structure
+        }
+        Op::AddAudio { file } => {
+            if d.audio.contains_key(&file.id) {
+                return Err(exists("audio file", file.id));
+            }
+            if file.file.is_empty() || file.file.contains(['/', '\\']) || file.file.starts_with('.') {
+                return Err(OpError::BadValue("audio file names are plain names inside audio/"));
+            }
+            if file.rate == 0 || !(1..=2).contains(&file.channels) {
+                return Err(OpError::BadValue("audio needs a rate and 1 or 2 channels"));
+            }
+            d.audio.insert(file.id, file);
+            Structure
+        }
+        Op::RemoveAudio { id } => {
+            if d.audio.remove(&id).is_none() {
+                return Err(nf("audio file", id));
+            }
+            d.modules.update_where(|m| m.audio == Some(id), |m| m.audio = None);
+            Structure
+        }
+        Op::SetModuleAudio { module, audio } => {
+            if let Some(a) = audio
+                && !d.audio.contains_key(&a)
+            {
+                return Err(nf("audio file", a));
+            }
+            d.modules.get_mut(&module).ok_or_else(|| nf("module", module))?.audio = audio;
             Structure
         }
         Op::MoveModule { id, pos } => {

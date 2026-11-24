@@ -7,7 +7,8 @@
 //! state carries over when a recompiled schedule replaces the running one.
 //!
 //! A track's instrument is the voice patch on its instrument grid (see
-//! [`build_patch`]), else its drum synth, else the old built-in test synth
+//! [`build_patch`]), else its drum synth, else its sampler (playing a sound
+//! from the [`Sounds`] the app has loaded), else the old built-in test synth
 //! (a module of kind [`TEST_SYNTH`]). A clip plays the pattern
 //! of the source module wired straight into its dock inlet (a generator's
 //! output plus the clip's hand edits; see `sat_modules`). Every track's fx
@@ -23,10 +24,14 @@ use sat_doc::sat_time::{TempoMap, Ticks};
 use sat_doc::*;
 use sat_engine::{
     AutoCurve, AutoPoint, Automation, Command, FX_PARAMS, Fx, FxKind, FxModule, Instrument, MAX_FX, MAX_FX_REGS,
-    MAX_MODS, MAX_PARAMS, MAX_REGS, Meter, NONE, NodeId, NodeKind, NoteEvent, Param, Patch, Schedule, ScheduleBuilder,
-    Strip, Synth, SynthParam, VKind, VModule, Wave, db_to_gain,
+    MAX_MODS, MAX_PARAMS, MAX_REGS, Meter, NONE, NodeId, NodeKind, NoteEvent, Param, Patch, Sample, Schedule,
+    ScheduleBuilder, Strip, Synth, SynthParam, VKind, VModule, Wave, db_to_gain,
 };
 use sat_modules::instrument as ins;
+
+/// Decoded sounds of the audio pool, by id. The compiler shares them into
+/// the schedule; it never loads files itself.
+pub type Sounds = HashMap<AudioId, Arc<Sample>>;
 
 /// Module kind of the built-in test synth.
 pub const TEST_SYNTH: &str = "test_synth";
@@ -421,6 +426,7 @@ fn build_instrument(
     doc: &Document,
     track: &Track,
     events: Vec<NoteEvent>,
+    sounds: &Sounds,
 ) -> Option<(NodeKind, Vec<(ParamTarget, Param)>)> {
     let g = track.instrument_grid?;
     if let Some((patch, slots)) = build_patch(doc, g) {
@@ -429,14 +435,13 @@ fn build_instrument(
     }
     if let Some(m) = doc.modules_on(g).find(|m| m.kind == ins::DRUM_SYNTH) {
         let v = param_values(doc, m);
-        let targets = sat_modules::params_of(&m.kind)
-            .iter()
-            .enumerate()
-            .map(|(i, s)| {
-                (ParamTarget::Module { module: m.id, param: s.key.into() }, Param::Module { slot: 0, index: i as u8 })
-            })
-            .collect();
-        return Some((NodeKind::Instrument(Box::new(Instrument::drums(events, v[0], v[1], v[2]))), targets));
+        let i = Instrument::drums(events, v[0], v[1], v[2]);
+        return Some((NodeKind::Instrument(Box::new(i)), module_targets(doc, &[m.id])));
+    }
+    if let Some(m) = doc.modules_on(g).find(|m| m.kind == ins::SAMPLER) {
+        let sound = m.audio.and_then(|a| sounds.get(&a)).cloned();
+        let i = Instrument::sampler(events, sound, param_values(doc, m));
+        return Some((NodeKind::Instrument(Box::new(i)), module_targets(doc, &[m.id])));
     }
     let m = doc.modules_on(g).find(|m| m.kind == TEST_SYNTH)?;
     let wave = if m.params.get("wave").copied().unwrap_or(0.0) >= 0.5 { Wave::Saw } else { Wave::Sine };
@@ -458,8 +463,19 @@ fn build_instrument(
     Some((NodeKind::Synth(Box::new(s)), targets))
 }
 
-/// Compiles `doc` for `sample_rate`, processing at most `max_block` frames per run.
+/// Compiles `doc` for `sample_rate`, processing at most `max_block` frames
+/// per run, with no sounds loaded (samplers are silent).
 pub fn compile(doc: &Document, sample_rate: f64, max_block: usize) -> Result<Compiled, CompileError> {
+    compile_with(doc, sample_rate, max_block, &Sounds::new())
+}
+
+/// Like [`compile`], with samplers playing from `sounds`.
+pub fn compile_with(
+    doc: &Document,
+    sample_rate: f64,
+    max_block: usize,
+    sounds: &Sounds,
+) -> Result<Compiled, CompileError> {
     let tempo = doc.tempo_map().map_err(CompileError::Tempo)?;
     let audible = solo_audible(doc);
     let mut b = ScheduleBuilder::new(sample_rate, max_block);
@@ -484,7 +500,7 @@ pub fn compile(doc: &Document, sample_rate: f64, max_block: usize) -> Result<Com
                         events.push(NoteEvent { at, len, pitch: n.pitch, velocity: n.velocity });
                     }
                 }
-                build_instrument(doc, tr, events).map(|(kind, targets)| {
+                build_instrument(doc, tr, events, sounds).map(|(kind, targets)| {
                     let id = nid(t, SALT_SYNTH);
                     for (target, param) in targets {
                         params.insert(target, (id, param, Conv::Same));

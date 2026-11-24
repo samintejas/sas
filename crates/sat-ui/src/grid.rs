@@ -64,7 +64,7 @@ pub struct Card {
     pub outs: Vec<(&'static str, Point)>,
     /// Input ports: key and where the dot is.
     pub ins: Vec<(&'static str, Point)>,
-    /// The pattern preview (source modules only).
+    /// The pattern preview (source modules), or a sampler's waveform.
     pub preview: Option<Rect>,
     /// Parameter rows: key (if draggable) and rect.
     pub params: Vec<(Option<&'static str>, Rect)>,
@@ -107,6 +107,8 @@ pub enum GridHit {
     Header(ModuleId),
     /// An effect's bypass switch.
     Bypass(ModuleId),
+    /// A sampler's waveform (click to load a sound).
+    Sound(ModuleId),
     /// A module's output port.
     Out(ModuleId, &'static str),
     /// A module's input port.
@@ -162,6 +164,13 @@ fn is_source(kind: &str) -> bool {
     sat_modules::SOURCES.iter().any(|(k, _)| *k == kind)
 }
 
+fn is_sampler(kind: &str) -> bool {
+    kind == sat_modules::instrument::SAMPLER
+}
+
+/// Height of a sampler's waveform.
+pub const WAVE_H: f64 = 56.0;
+
 fn rows_of(m: &Module) -> Vec<Option<&'static str>> {
     match m.kind.as_str() {
         sat_modules::EUCLID => EUCLID_ROWS.iter().map(|k| Some(*k)).collect(),
@@ -189,7 +198,13 @@ pub fn to_pos(canvas: Rect, scroll: Vec2, pt: Point) -> (f32, f32) {
 /// A card's height for module `m`.
 pub fn card_h(m: &Module) -> f64 {
     let ports = port_rows(sat_modules::ports(&m.kind)) as f64;
-    let preview = if is_source(&m.kind) { PREVIEW_H } else { 4.0 };
+    let preview = if is_source(&m.kind) {
+        PREVIEW_H
+    } else if is_sampler(&m.kind) {
+        WAVE_H
+    } else {
+        4.0
+    };
     HEADER_H + PORT_H * ports + preview + PARAM_H * rows_of(m).len() as f64 + 10.0
 }
 
@@ -219,9 +234,10 @@ fn card(m: &Module, canvas: Rect, scroll: Vec2) -> Card {
     let outs: Vec<_> =
         ports.iter().filter(|p| !p.input).enumerate().map(|(i, p)| (p.key, Point::new(rect.x1, row_y(i)))).collect();
     let mut y = header.y1 + PORT_H * port_rows(ports) as f64;
-    let preview = if is_source(&m.kind) {
-        let r = Rect::new(rect.x0 + 8.0, y + 2.0, rect.x1 - 8.0, y + PREVIEW_H - 2.0);
-        y += PREVIEW_H;
+    let preview = if is_source(&m.kind) || is_sampler(&m.kind) {
+        let h = if is_sampler(&m.kind) { WAVE_H } else { PREVIEW_H };
+        let r = Rect::new(rect.x0 + 8.0, y + 2.0, rect.x1 - 8.0, y + h - 2.0);
+        y += h;
         Some(r)
     } else {
         y += 4.0;
@@ -348,6 +364,9 @@ impl GridLayout {
             if let Some((Some(k), _)) = c.params.iter().find(|(_, r)| r.contains(pt)) {
                 return GridHit::Param(c.module, k);
             }
+            if self.kind == GridKind::Instrument && c.preview.is_some_and(|r| r.contains(pt)) {
+                return GridHit::Sound(c.module);
+            }
             return GridHit::Module(c.module);
         }
         GridHit::Canvas
@@ -425,7 +444,50 @@ fn preview_clip(doc: &Document, m: ModuleId, selected: Option<ClipId>) -> Option
     selected.filter(|s| feeds.contains(s)).or(feeds.first().copied())
 }
 
+/// A sampler's waveform, with where notes start and where the loop starts.
+fn draw_sound(p: &mut Painter<'_>, th: &Theme, doc: &Document, m: &Module, sounds: &sat_disk::Pool, pv: Rect) {
+    let c = &th.c;
+    p.rrect(pv, 3.0, Rgba::hex(0x101010));
+    let name = sat_modules::instrument::sound_name(doc, m);
+    let peaks = m.audio.and_then(|a| sounds.peaks(a, (pv.width() - 4.0).max(1.0) as usize));
+    let small = TextStyle::mono(10.5, c.text_secondary);
+    let (Some(name), Some(peaks)) = (name, peaks) else {
+        let msg = if name.is_some() { "sound missing · click to load" } else { "click to load a wav" };
+        p.text(pv.center().x, pv.center().y, msg, &small, Align::Center);
+        return;
+    };
+    let wave = Rect::new(pv.x0 + 2.0, pv.y0 + 14.0, pv.x1 - 2.0, pv.y1 - 3.0);
+    let (mid, half) = (wave.center().y, wave.height() / 2.0);
+    let r = sat_modules::macros::resolved(doc, m);
+    let at = |key: &str| r.params.get(key).copied().unwrap_or(0.0) as f64;
+    let (start, looped) = (at("start"), at("mode").round() as i32 == 2);
+    let col = th.track(doc.tracks.get(&doc.grids[&m.grid].track).map_or(0, |t| t.color.0));
+    for (i, (lo, hi)) in peaks.iter().enumerate() {
+        let x = wave.x0 + i as f64;
+        let a = if (i as f64) < start * peaks.len() as f64 { 0.35 } else { 0.9 };
+        let (y0, y1) = (mid - *hi as f64 * half, mid - *lo as f64 * half);
+        p.rect(Rect::new(x, y0.min(mid - 0.5), x + 1.0, y1.max(mid + 0.5)), col.alpha(a));
+    }
+    let mark = |p: &mut Painter<'_>, f: f64, col: Rgba| {
+        let x = wave.x0 + f * wave.width();
+        p.rect(Rect::new(x - 0.5, wave.y0, x + 0.5, wave.y1), col);
+    };
+    mark(p, start, c.text_max);
+    if looped {
+        let lf = at("loop");
+        mark(p, lf, c.accent_warning);
+        let x = wave.x0 + lf * wave.width();
+        p.rect(Rect::new(x, wave.y0, wave.x1, wave.y0 + 2.0), c.accent_warning.alpha(0.8));
+    }
+    p.text(pv.x0 + 5.0, pv.y0 + 8.0, name, &TextStyle::mono(10.5, c.text_strong), Align::Left);
+    if let Some(f) = m.audio.and_then(|a| doc.audio.get(&a)) {
+        let secs = f.frames as f64 / f.rate.max(1) as f64;
+        p.text(pv.x1 - 5.0, pv.y0 + 8.0, &format!("{secs:.2}s"), &small, Align::Right);
+    }
+}
+
 /// Draws `grid` in `r` and returns its layout.
+#[allow(clippy::too_many_arguments)]
 pub fn draw(
     p: &mut Painter<'_>,
     th: &Theme,
@@ -433,6 +495,7 @@ pub fn draw(
     grid: GridId,
     view: &GridView,
     selected_clip: Option<ClipId>,
+    sounds: &sat_disk::Pool,
     r: Rect,
 ) -> Option<GridLayout> {
     let l = layout(doc, grid, r, view)?;
@@ -523,8 +586,17 @@ pub fn draw(
                 let y = card.header.y1 + PORT_H / 2.0;
                 p.text(r.x0 + 12.0, y, "plays drums by pitch", &TextStyle::mono(10.5, c.text_secondary), Align::Left);
             }
+            if is_sampler(&m.kind) {
+                let y = card.header.y1 + PORT_H / 2.0;
+                let msg = "plays its sound by pitch";
+                p.text(r.x0 + 12.0, y, msg, &TextStyle::mono(10.5, c.text_secondary), Align::Left);
+            }
+            // a sampler's sound
+            if let Some(pv) = card.preview.filter(|_| is_sampler(&m.kind)) {
+                draw_sound(p, th, doc, m, sounds, pv);
+            }
             // preview
-            if let Some(pv) = card.preview {
+            if let Some(pv) = card.preview.filter(|_| is_source(&m.kind)) {
                 p.rrect(pv, 3.0, Rgba::hex(0x101010));
                 let pc = preview_clip(doc, m.id, selected_clip);
                 match pc.and_then(|id| doc.clips.get(&id)) {

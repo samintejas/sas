@@ -1,6 +1,7 @@
 //! Instrument-grid modules: a voice patch (note in, oscillators, noise, mixer,
-//! filter, envelope, vca, lfo, voice out) that every voice runs, or a drum
-//! synth that plays General MIDI drums by pitch.
+//! filter, envelope, vca, lfo, voice out) that every voice runs, a drum
+//! synth that plays General MIDI drums by pitch, or a sampler that plays a
+//! sound from the audio pool repitched by note.
 //!
 //! Parameter order here is the order the engine reads them in.
 
@@ -27,6 +28,10 @@ pub const LFO: &str = "lfo";
 pub const VOICE_OUT: &str = "voice_out";
 /// A self-contained drum synth (no patch needed).
 pub const DRUM_SYNTH: &str = "drum_synth";
+/// A self-contained sampler: plays its module's sound (see `Module::audio`).
+pub const SAMPLER: &str = "sampler";
+/// Sampler play modes, in engine order.
+pub const PLAY_MODES: &[&str] = &["gate", "one shot", "loop"];
 
 const fn input(key: &'static str, kind: PortKind) -> PortSpec {
     PortSpec { key, kind, input: true }
@@ -39,7 +44,7 @@ const fn output(key: &'static str, kind: PortKind) -> PortSpec {
 const WAVES: &[&str] = &["sine", "tri", "saw", "square"];
 
 /// Instrument modules that can be added: kind and label.
-pub const MODULES: [(&str, &str); 10] = [
+pub const MODULES: [(&str, &str); 11] = [
     (NOTE_IN, "note in"),
     (VCO, "vco"),
     (NOISE, "noise"),
@@ -50,6 +55,7 @@ pub const MODULES: [(&str, &str); 10] = [
     (LFO, "lfo"),
     (VOICE_OUT, "voice out"),
     (DRUM_SYNTH, "drum synth"),
+    (SAMPLER, "sampler"),
 ];
 
 /// Ports of an instrument module kind.
@@ -121,6 +127,17 @@ pub fn params(kind: &str) -> &'static [ParamSpec] {
         p("tune", "tune", -12.0, 12.0, 0.0, Unit::Semis),
         p("decay", "decay", 0.25, 4.0, 1.0, Unit::Percent),
     ];
+    const SAMPLER_P: [ParamSpec; 9] = [
+        p("level", "level", -60.0, 6.0, -6.0, Unit::Db),
+        p("root", "root", 0.0, 127.0, 60.0, Unit::Note),
+        p("tune", "tune", -24.0, 24.0, 0.0, Unit::Semis),
+        p("start", "start", 0.0, 0.99, 0.0, Unit::Percent),
+        p("mode", "mode", 0.0, 2.0, 0.0, Unit::Choice(PLAY_MODES)),
+        p("attack", "attack", 0.0005, 2.0, 0.002, Unit::Seconds),
+        p("release", "release", 0.002, 8.0, 0.08, Unit::Seconds),
+        p("vel", "vel sens", 0.0, 1.0, 0.7, Unit::Percent),
+        p("loop", "loop from", 0.0, 0.95, 0.0, Unit::Percent),
+    ];
     match kind {
         NOTE_IN => &NOTE_IN_P,
         VCO => &VCO_P,
@@ -132,6 +149,7 @@ pub fn params(kind: &str) -> &'static [ParamSpec] {
         LFO => &LFO_P,
         VOICE_OUT => &VOICE_OUT_P,
         DRUM_SYNTH => &DRUM_P,
+        SAMPLER => &SAMPLER_P,
         _ => &[],
     }
 }
@@ -141,17 +159,26 @@ pub fn is_instrument(kind: &str) -> bool {
     MODULES.iter().any(|(k, _)| *k == kind)
 }
 
-/// How an instrument grid reads in a track header: the drum synth's name,
-/// "synth patch" for a voice patch, or the first module's name.
+/// How an instrument grid reads in a track header: "synth patch" for a voice
+/// patch, the drum synth's name, the sampler's sound, or the first module's
+/// name (in the order the compiler picks an instrument).
 pub fn label(doc: &sat_doc::Document, grid: sat_doc::GridId) -> Option<String> {
     let mods: Vec<&sat_doc::Module> = doc.modules_on(grid).collect();
-    if let Some(m) = mods.iter().find(|m| m.kind == DRUM_SYNTH) {
-        return Some(m.name.clone());
-    }
     if mods.iter().any(|m| m.kind == VOICE_OUT) {
         return Some("synth patch".into());
     }
+    if let Some(m) = mods.iter().find(|m| m.kind == DRUM_SYNTH) {
+        return Some(m.name.clone());
+    }
+    if let Some(m) = mods.iter().find(|m| m.kind == SAMPLER) {
+        return Some(sound_name(doc, m).map_or_else(|| "sampler".into(), |n| format!("sampler · {n}")));
+    }
     mods.first().map(|m| m.name.clone())
+}
+
+/// The name of the sound a module plays, if it has one in the pool.
+pub fn sound_name<'a>(doc: &'a sat_doc::Document, m: &sat_doc::Module) -> Option<&'a str> {
+    m.audio.and_then(|a| doc.audio.get(&a)).map(|f| f.name.as_str())
 }
 
 /// A starting patch: (kind, name, position, param overrides) per module and

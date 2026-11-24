@@ -333,3 +333,38 @@ fn macros_drive_their_parameters() {
     s.h.apply("more hits", [Op::SetValue { target: hits, value: 0.25 }]).unwrap();
     assert!(n(&s) > few, "{} > {few}", n(&s));
 }
+
+#[test]
+fn samplers_play_pool_sounds_and_go_silent_without_one() {
+    use sat_modules::instrument as ins;
+    use std::sync::Arc;
+    let mut s = song();
+    let grid = s.h.doc().tracks[&s.bass].instrument_grid.unwrap();
+    let (smp, op) = sat_modules::add_module(s.h.doc(), grid, ins::SAMPLER, (0.0, 0.0));
+    let audio = AudioId::new();
+    let file =
+        AudioFile { id: audio, name: "saw".into(), file: "saw.wav".into(), rate: 44_100, channels: 1, frames: 44_100 };
+    s.h.apply("sampler", [op, Op::AddAudio { file }]).unwrap();
+    // removing the test synth leaves the sampler as the bass's instrument
+    let synth = s.bass_synth;
+    s.h.apply("rm synth", [Op::RemoveModule { id: synth }]).unwrap();
+    let saw: Vec<f32> = (0..44_100).map(|i| (i % 100) as f32 / 50.0 - 1.0).collect();
+    let mut sounds = sat_compile::Sounds::new();
+    sounds.insert(audio, Arc::new(sat_engine::Sample::from_interleaved(44_100.0, 1, &saw)));
+    let play = |d: &Document, sounds: &sat_compile::Sounds| {
+        let c = sat_compile::compile_with(d, SR, BLOCK, sounds).unwrap();
+        sat_engine::render(c.schedule, 0, 96_000, BLOCK)
+    };
+    assert_eq!(rms(&play(s.h.doc(), &sounds).0), rms(&render(s.h.doc(), 96_000).0), "no sound set yet");
+    s.h.apply("set sound", [Op::SetModuleAudio { module: smp, audio: Some(audio) }]).unwrap();
+    let with = play(s.h.doc(), &sounds);
+    assert!(rms(&with.0) > rms(&render(s.h.doc(), 96_000).0) + 0.005, "the sampler sounds");
+    assert_eq!(ins::label(s.h.doc(), grid).as_deref(), Some("sampler · saw"));
+    let c = sat_compile::compile_with(s.h.doc(), SR, BLOCK, &sounds).unwrap();
+    let tune = ParamTarget::Module { module: smp, param: "tune".into() };
+    assert!(c.param_command(&tune, 7.0).is_some(), "knobs are live");
+    // removing the sound from the pool unsets it
+    s.h.apply("rm sound", [Op::RemoveAudio { id: audio }]).unwrap();
+    assert_eq!(s.h.doc().modules[&smp].audio, None);
+    assert!(s.h.apply("bad", [Op::SetModuleAudio { module: smp, audio: Some(audio) }]).is_err());
+}

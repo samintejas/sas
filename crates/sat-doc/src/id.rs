@@ -56,4 +56,6 @@ ids! {
     SceneId,
     /// An automation lane.
     LaneId,
+    /// A sound file in the project's audio pool.
+    AudioId,
 }

@@ -1,0 +1,20 @@
+[package]
+name = "sat-disk"
+description = "Sound files for sat: WAV import, the project's audio pool, and writing it into the bundle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hound.workspace = true
+sat-doc.workspace = true
+sat-engine.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

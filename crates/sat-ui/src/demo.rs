@@ -24,8 +24,8 @@ enum Ins {
     Patch(&'static [(&'static str, &'static str, f32)]),
     /// The drum synth.
     Drums,
-    /// The built-in test synth with a name and a wave.
-    Test(&'static str, f32),
+    /// A sampler playing a pool sound, with (parameter, value) tweaks.
+    Sampler(AudioId, &'static [(&'static str, f32)]),
 }
 
 impl B {
@@ -139,14 +139,23 @@ impl B {
                     pos: (0.0, 0.0),
                 })
             }
-            Ins::Test(synth, wave) => self.ops.push(Op::AddModule {
-                id: ModuleId::new(),
-                grid: ins,
-                kind: "test_synth".into(),
-                name: synth.into(),
-                params: OrdMap::from(vec![("wave".to_string(), wave), ("level".to_string(), 0.2)]),
-                pos: (0.0, 0.0),
-            }),
+            Ins::Sampler(sound, tweaks) => {
+                let kind = sat_modules::instrument::SAMPLER;
+                let mut params = sat_modules::default_params(kind);
+                for (k, v) in tweaks {
+                    params.insert(k.to_string(), *v);
+                }
+                let module = ModuleId::new();
+                self.ops.push(Op::AddModule {
+                    id: module,
+                    grid: ins,
+                    kind: kind.into(),
+                    name: sat_modules::label_of(kind).into(),
+                    params,
+                    pos: (0.0, 0.0),
+                });
+                self.ops.push(Op::SetModuleAudio { module, audio: Some(sound) });
+            }
         }
         self.ops.push(Op::AddModule {
             id: seq,
@@ -202,6 +211,39 @@ pub struct Demo {
     pub doc: Document,
     /// The clip shown in the bottom panel.
     pub selected: ClipId,
+    /// The sounds its samplers play (generated, so the demo needs no files).
+    pub sounds: sat_disk::Pool,
+}
+
+/// A sung "ah" on A4, 1.6 s at 48 kHz: additive harmonics shaped by three
+/// vowel formants, with vibrato fading in so a loop over its second half
+/// sounds alive.
+pub fn vowel() -> sat_disk::Sample {
+    const RATE: f32 = 48_000.0;
+    const FORMANTS: [(f32, f32, f32); 3] = [(730.0, 90.0, 1.0), (1090.0, 110.0, 0.5), (2440.0, 170.0, 0.22)];
+    let frames = (1.6 * RATE) as usize;
+    let mut phase = 0.0f64;
+    let mut out = Vec::with_capacity(frames);
+    for i in 0..frames {
+        let t = i as f32 / RATE;
+        let depth = ((t - 0.25) / 0.5).clamp(0.0, 1.0) * 0.25;
+        let f0 = 440.0 * 2f32.powf(depth * (t * 5.5 * std::f32::consts::TAU).sin() / 12.0);
+        phase += f0 as f64 / RATE as f64;
+        let mut s = 0.0;
+        for k in 1..=30 {
+            let f = k as f32 * f0;
+            if f > 9_000.0 {
+                break;
+            }
+            let shape: f32 = FORMANTS.iter().map(|(c, bw, g)| g / (1.0 + ((f - c) / (bw * 0.5)).powi(2))).sum();
+            s += (shape + 0.02) / (k as f32).sqrt() * ((phase * k as f64).fract() as f32 * std::f32::consts::TAU).sin();
+        }
+        let env = (t / 0.04).min(1.0) * ((1.6 - t) / 0.05).clamp(0.0, 1.0);
+        out.push(s * env);
+    }
+    let peak = out.iter().fold(0.0f32, |a, x| a.max(x.abs())).max(1e-6);
+    let l: Vec<f32> = out.iter().map(|x| x / peak * 0.7).collect();
+    sat_disk::Sample { rate: RATE, r: l.clone(), l }
 }
 
 /// Plausible meter levels for screenshots: each strip reads a little below
@@ -322,7 +364,19 @@ pub fn demo() -> Demo {
     b.clip(keys, kseq, "pads 2", 6, 4, pads(60), 8, 8);
 
     let vocals = b.group("vocals", 4, 2);
-    let (vox, vseq) = b.track("vox", 4, Some(vocals), Ins::Test("audio in", 0.0));
+    let mut sounds = sat_disk::Pool::new();
+    let ah = sounds.add_with_id(AudioId::from_u128(0xa4), "ah", vowel());
+    b.ops.push(Op::AddAudio { file: ah.clone() });
+    const VOX: &[(&str, f32)] = &[
+        ("root", 69.0),
+        ("mode", 2.0),
+        ("loop", 0.5),
+        ("attack", 0.03),
+        ("release", 0.25),
+        ("level", -7.0),
+        ("vel", 0.4),
+    ];
+    let (vox, vseq) = b.track("vox", 4, Some(vocals), Ins::Sampler(ah.id, VOX));
     let line = vec![n(0, 6, 69, 0.7), n(8, 4, 72, 0.7), n(12, 4, 71, 0.6), n(16, 12, 67, 0.7)];
     b.clip(vox, vseq, "take 2", 4, 2, line.clone(), 4, 4);
     b.clip(vox, vseq, "take 3", 4, 2, line, 12, 4);
@@ -419,5 +473,5 @@ pub fn demo() -> Demo {
     for op in b.ops {
         apply(&mut doc, op).expect("demo ops are valid");
     }
-    Demo { doc, selected }
+    Demo { doc, selected, sounds }
 }

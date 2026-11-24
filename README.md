@@ -16,15 +16,20 @@ project file end to end. Phase 3 (source grid) is done: notes are edited
 in the piano roll, the drum sequencer or the euclid generator (with hand edits
 over it) and heard while the set plays, and each track's source grid shows its
 modules and the clip dock, where cables decide which module feeds each clip.
-Phase 4 (instrument + fx grids) has started: each track's instrument grid is a
+Phase 4 (instrument + fx grids) is done: each track's instrument grid is a
 patchable voice (note in, vco, noise, mixer, filter, adsr, vca, lfo, voice out)
-that every voice runs, or a drum synth that plays drums by pitch; every
+that every voice runs, a drum synth that plays drums by pitch, or a sampler
+that plays a WAV repitched from its root note (gate, one shot or loop, with a
+start point, a crossfaded loop point and an envelope); every
 track's fx grid (eq, comp with side chain, drive, filter, delay, reverb,
 limiter, split and mix) runs between its sound and its strip, buses and the
 master included. Every grid has 16 macros: each drives one or more of its
 grid's parameters over a range, and the bottom panel's macros page shows the
 selected track's macros with its fader and pan. Knobs, macros and bypass
-switches change the sound live while it plays. The arrange view, piano roll and mixer from
+switches change the sound live while it plays. The demo song is made with
+built-in modules only (its vocal is a sampler playing a generated "ah"),
+which is the phase 4 gate. Sounds live in the bundle's `audio/` folder; an
+imported sound is copied there when the project is saved. The arrange view, piano roll and mixer from
 the prototype are drawn with vello; the engine plays through the default
 audio device and feeds live per-track meters.
 
@@ -33,8 +38,9 @@ audio device and feeds live per-track meters.
 | `sat-time` | ticks (960 PPQ), tempo map with step and linear ramps, meter map, quantisation | done |
 | `sat-doc` | entities, `Op` reducer, transactions, undo with gestures, project bundle with migrations | done |
 | `sat-dsp` | oscillators (polyBLEP), state-variable filter, ADSR, noise, drum voices, gain and pan laws, biquads, eq, compressor, delay, reverb, saturation, limiter | in progress |
-| `sat-engine` | flat schedule, mixer strips, test synth, patchable voice instrument, drum synth, fx chains, automation, loop, lock-free commands, schedule swap with state carry-over, offline render | done (single-threaded) |
-| `sat-compile` | document → schedule: track tree, solo, sends, placements and looping clips, instrument patches and fx chains from their grids, live parameter mapping | done |
+| `sat-engine` | flat schedule, mixer strips, test synth, patchable voice instrument, drum synth, sampler, fx chains, automation, loop, lock-free commands, schedule swap with state carry-over, offline render | done (single-threaded) |
+| `sat-compile` | document → schedule: track tree, solo, sends, placements and looping clips, instrument patches, samplers and fx chains from their grids, live parameter mapping | done |
+| `sat-disk` | WAV import and export (hound), the open project's pool of decoded sounds, writing sounds into the bundle, waveform peaks | in progress |
 | `sat-modules` | built-in modules and their parameter specs: source modules (which editor each opens, the euclid generator, the drum kit, the hand-edit layer), instrument and fx modules, the default voice patch, fx chains and insertion, patching rules | in progress |
 | `sat-theme` | Dots design tokens (`assets/dots/tokens.json`) generated into a Rust `Palette`, plus spacing, radius and type scales | done |
 | `sat-ui` | vello + parley painter, top bar, arrange view, source grid, piano roll, step editors, mixer, shared controls (faders, knobs, meters), hit-testing, headless GPU rendering | in progress |
@@ -90,6 +96,7 @@ cargo run --release -p sat-app -- my.sat  # opens a project bundle
 | Ctrl+Z, Ctrl+Shift+Z | undo, redo |
 | Ctrl+O, Ctrl+S, Ctrl+Shift+S, Ctrl+N, Ctrl+Q | open, save, save as, new, quit (Cmd on macOS) |
 | drop a `.sat` folder on the window | open it |
+| drop a `.wav` on the window | load it into the shown instrument grid's (or the selected track's) sampler, adding a sampler if there is none |
 | click a clip, the ruler, a group's chevron | edit it in the piano roll, move the playhead, fold the group |
 | piano roll: click empty space (draw tool) | draw a note; keep dragging to set its length |
 | piano roll: drag a note, its right edge, the velocity lane | move it (time and pitch), resize it, set velocity; the selection moves together |
@@ -101,6 +108,7 @@ cargo run --release -p sat-app -- my.sat  # opens a project bundle
 | source grid: + module, the dock's +, Delete, Esc | add a piano roll, drum seq or euclid; add a one-bar clip after the track's last one; remove the selected module; deselect |
 | instrument grid: drag from an out to an in of the same colour, drag a cable off an in | patch them (replacing what fed that input; loops are refused), repatch or unplug it |
 | instrument grid: drag a parameter row, + module, Delete | change the sound while it plays, add a module, remove the selected module |
+| sampler: click its waveform | load a WAV (white line: where notes start; amber: where the loop starts) |
 | macros page: drag a macro, learn, click an empty macro, open | play it; map the next touched parameter (in any grid or the euclid editor) to a free macro, click a macro to clear it; start learning; show that grid |
 | a parameter row with a macro badge (m1–m16) | drag it to play its macro |
 | fx grid: + module, the power icon, dragging between ports | add an effect just before out (an empty grid gets its in and out), bypass it, reroute (split, mix, side chain) |
@@ -125,6 +133,7 @@ cargo run --release -p sat-ui --example screenshot -- euclid.png 2 euclid   # a 
 cargo run --release -p sat-ui --example screenshot -- grid.png 2 clip grid  # its source grid
 cargo run --release -p sat-ui --example screenshot -- ins.png 2 clip instrument  # its instrument grid
 cargo run --release -p sat-ui --example screenshot -- fx.png 2 clip fx       # its fx grid
+cargo run --release -p sat-ui --example screenshot -- smp.png 2 "take 2" instrument  # the vox sampler
 cargo run --release -p sat-ui --example screenshot -- mac.png 2 macros instrument  # macros page
 ```
 
