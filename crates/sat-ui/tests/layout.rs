@@ -177,3 +177,62 @@ mod mixer {
         assert_eq!(l1.hit(under), MixHit::Nothing);
     }
 }
+
+mod roll {
+    use sat_doc::sat_time::Ticks;
+    use sat_ui::demo::demo;
+    use sat_ui::piano_roll::{RollHit, RollView, SNAPS, Tool, clip_notes, geometry, next_snap, snap_label};
+    use vello::kurbo::{Point, Rect};
+
+    fn panel() -> Rect {
+        Rect::new(4.0, 594.0, 1436.0, 896.0)
+    }
+
+    #[test]
+    fn notes_grid_velocity_and_buttons_hit_where_drawn() {
+        let d = demo();
+        let g = geometry(&d.doc, Some(d.selected), panel(), &RollView::default()).unwrap();
+        let (module, notes) = clip_notes(&d.doc, d.selected);
+        assert_eq!(g.module, module);
+        let l = &g.layout;
+        let n = notes[3];
+        let r = l.note_rect(&n);
+        assert_eq!(g.hit(&notes, Point::new(r.x0 + 2.0, r.center().y)), RollHit::Note { index: 3, edge: false });
+        assert_eq!(g.hit(&notes, Point::new(r.x1 - 1.0, r.center().y)), RollHit::Note { index: 3, edge: true });
+        // an empty cell maps back to its tick and pitch
+        let (t, p) = (Ticks(240 * 31), l.lo);
+        assert!(!notes.iter().any(|n| n.pitch == p && n.start <= t && n.start + n.len > t));
+        let pt = Point::new(l.x_of(t) + 0.05, l.y_of(p) + l.row_h() / 2.0);
+        assert_eq!(g.hit(&notes, pt), RollHit::Grid { tick: t, pitch: p });
+        // the velocity lane finds the nearest stem and reads the value
+        let vx = l.x_of(notes[0].start) + 1.0;
+        let RollHit::Velocity { index, value } = g.hit(&notes, Point::new(vx, l.vel_y(0.5))) else { panic!() };
+        assert_eq!(index, Some(0));
+        assert!((value - 0.5).abs() < 0.01);
+        assert_eq!(g.hit(&notes, g.tools[1].1.center()), RollHit::Tool(Tool::Select));
+        assert_eq!(g.hit(&notes, g.snap.center()), RollHit::Snap);
+        assert_eq!(g.hit(&notes, g.quantise.center()), RollHit::Quantise);
+    }
+
+    #[test]
+    fn a_fixed_bottom_pitch_holds_the_rows_still() {
+        let d = demo();
+        let view = RollView { lo: Some(30), ..Default::default() };
+        let g = geometry(&d.doc, Some(d.selected), panel(), &view).unwrap();
+        assert_eq!(g.layout.lo, 30);
+        let top = RollView { lo: Some(127), ..Default::default() };
+        let g = geometry(&d.doc, Some(d.selected), panel(), &top).unwrap();
+        assert_eq!(g.layout.hi, 127, "scrolling up stops with the top row at 127");
+    }
+
+    #[test]
+    fn grid_choices_cycle() {
+        assert_eq!(snap_label(Some(Ticks(240))), "snap 1/16");
+        assert_eq!(snap_label(None), "snap off");
+        let mut s = SNAPS[0];
+        for _ in 0..SNAPS.len() {
+            s = next_snap(s);
+        }
+        assert_eq!(s, SNAPS[0]);
+    }
+}

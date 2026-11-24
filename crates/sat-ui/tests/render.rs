@@ -10,6 +10,7 @@ use sat_ui::gfx::Gpu;
 use sat_ui::mixer::Levels;
 use sat_ui::paint::{Fonts, color};
 use sat_ui::panel::PanelView;
+use sat_ui::piano_roll::RollView;
 use sat_ui::shell::{self, Frame, PANEL_H};
 use vello::wgpu;
 
@@ -55,6 +56,7 @@ fn renders_the_arrange_view() {
         mixer_scroll: 0.0,
         levels: &levels,
         edited: false,
+        roll: &RollView::default(),
     };
     let (w, h) = (1280u32, 800u32);
     let mut scene = vello::Scene::new();
@@ -105,6 +107,7 @@ fn renders_the_mixer() {
         mixer_scroll: 0.0,
         levels: &levels,
         edited: true,
+        roll: &RollView::default(),
     };
     let (w, h) = (1280u32, 800u32);
     let mut scene = vello::Scene::new();

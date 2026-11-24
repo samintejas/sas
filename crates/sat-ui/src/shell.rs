@@ -11,7 +11,7 @@ use crate::icons::{self, Icon};
 use crate::mixer::{self, Levels, MixerLayout};
 use crate::paint::{Align, Fonts, Painter, TextStyle};
 use crate::panel::PanelView;
-use crate::piano_roll;
+use crate::piano_roll::{self, RollGeom, RollView};
 
 /// Height of the top bar.
 pub const TOPBAR_H: f64 = 40.0;
@@ -38,6 +38,8 @@ pub struct Frame<'a> {
     pub levels: &'a Levels,
     /// Unsaved changes.
     pub edited: bool,
+    /// Piano roll selection, tool and grid.
+    pub roll: &'a RollView,
 }
 
 /// Layouts of everything drawn, for hit testing.
@@ -49,6 +51,8 @@ pub struct Drawn {
     pub arrange: ArrangeLayout,
     /// The mixer, when the panel shows it.
     pub mixer: Option<MixerLayout>,
+    /// The clip panel, when it shows a clip.
+    pub roll: Option<RollGeom>,
 }
 
 /// Rectangles of the shell's regions.
@@ -200,14 +204,17 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
     p.clip(sl.arrange, |p| arrange::draw(p, th, f.doc, f.arrange, &f.transport, f.levels, &al));
     p.rrect_stroke(sl.arrange.inset(0.5), 0.0, 1.0, th.c.border_default);
     let mut ml = None;
+    let mut rl = None;
     if sl.panel.height() > 0.0 {
         p.clip(sl.panel, |p| match f.panel {
-            PanelView::Clip => piano_roll::draw(p, th, f.doc, f.arrange.selected_clip, &f.transport, sl.panel),
+            PanelView::Clip => {
+                rl = piano_roll::draw(p, th, f.doc, f.arrange.selected_clip, f.roll, &f.transport, sl.panel)
+            }
             PanelView::Mixer => {
                 ml = Some(mixer::draw(p, th, f.doc, f.arrange.selected_track, f.levels, f.mixer_scroll, sl.panel))
             }
         });
         p.rrect_stroke(sl.panel.inset(0.5), 0.0, 1.0, th.c.border_default);
     }
-    Drawn { shell: sl, arrange: al, mixer: ml }
+    Drawn { shell: sl, arrange: al, mixer: ml, roll: rl }
 }

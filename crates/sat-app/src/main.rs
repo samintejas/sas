@@ -7,6 +7,10 @@
 //! - click a clip to edit it in the bottom panel; click the ruler to move the playhead
 //! - drag faders and knobs (shift for fine steps, double-click to reset);
 //!   click m / s / arm buttons; tab switches the bottom panel between clip and mixer
+//! - piano roll: draw notes by clicking (drag to set the length), drag notes to
+//!   move them, drag their right edge to resize, drag in the velocity lane;
+//!   double-click deletes; the select tool drags a box; delete, arrows
+//!   (shift: octave), ctrl+a, escape; alt drags off the grid
 //! - m / s: mute / solo the selected track; ctrl+z / ctrl+shift+z: undo / redo
 //! - ctrl+o open (or drop a .sat folder on the window), ctrl+s save, ctrl+shift+s save as,
 //!   ctrl+n new, ctrl+q quit
@@ -24,15 +28,17 @@ use std::time::{Duration, Instant};
 
 use sat_compile::Compiled;
 use sat_doc::sat_time::Ticks;
-use sat_doc::{Document, History, Op, ParamTarget, TrackFlag, TrackId, TrackKind};
+use sat_doc::{ClipId, Document, History, Note, Op, ParamTarget, TrackFlag, TrackId, TrackKind};
 use sat_engine::{Command, EngineHandle};
 use sat_ui::arrange::{ArrangeLayout, ArrangeState, Hit, TransportView, header_controls};
 use sat_ui::controls::{self, SILENT_DB};
 use sat_ui::mixer::{Knob, Levels, MixHit, MixerLayout};
 use sat_ui::paint::{Fonts, color};
 use sat_ui::panel::{self, PanelView, Tab};
+use sat_ui::piano_roll::{RollGeom, RollHit, RollView, Tool, clip_notes, next_snap};
+use sat_ui::roll_edit::{self, Edited};
 use sat_ui::shell::{self, Frame, PANEL_H, ShellLayout};
-use vello::kurbo::Point;
+use vello::kurbo::{Point, Rect};
 use vello::util::{RenderContext, RenderSurface};
 use vello::{AaConfig, RenderParams, Renderer, RendererOptions, Scene, wgpu};
 use winit::application::ApplicationHandler;
@@ -177,6 +183,20 @@ struct Drag {
     start: f64,
 }
 
+/// A piano-roll drag. Each keeps the notes and selection from when it began,
+/// so every move recomputes from the same starting point.
+#[derive(Debug, Clone)]
+enum RollDrag {
+    /// Move the selection; `anchor` is the note under the pointer.
+    Move { notes: Vec<Note>, sel: Vec<usize>, anchor: Note, from: Point },
+    /// Resize the selection by the anchor note's end.
+    Resize { notes: Vec<Note>, sel: Vec<usize>, anchor: Note, from: Point },
+    /// Set the selection's velocity.
+    Velocity { notes: Vec<Note>, sel: Vec<usize> },
+    /// Box-select from a point; `keep` is the selection to add to.
+    Box { from: Point, keep: Vec<usize> },
+}
+
 /// A parameter's position (0–1) on its control.
 fn position_of(doc: &Document, target: &ParamTarget) -> f64 {
     match target {
@@ -233,6 +253,11 @@ struct App {
     layout: Option<ArrangeLayout>,
     mixer: Option<MixerLayout>,
     drag: Option<Drag>,
+    roll: RollView,
+    roll_geom: Option<RollGeom>,
+    roll_drag: Option<RollDrag>,
+    /// Length of the last drawn or resized note.
+    note_len: sat_doc::sat_time::Ticks,
     last_click: Option<(Instant, Point)>,
     last_frame: Instant,
     quit: bool,
@@ -247,7 +272,9 @@ impl App {
     }
 
     fn after_change(&mut self, structural: bool, changes: &[sat_doc::Change]) {
-        if structural {
+        // pattern edits change the note events baked into the schedule
+        let patterns = changes.iter().any(|c| matches!(c, sat_doc::Change::Pattern { .. }));
+        if structural || patterns {
             self.playback.recompile(self.history.doc());
         } else {
             for ch in changes {
@@ -271,6 +298,8 @@ impl App {
         };
         self.mixer_scroll = 0.0;
         self.levels.clear();
+        self.roll = RollView { tool: self.roll.tool, snap: self.roll.snap, ..Default::default() };
+        self.roll_drag = None;
         self.playback.recompile(&doc);
         self.history = History::new(doc, 500);
         self.playback.locate(Ticks::ZERO);
@@ -367,6 +396,7 @@ impl App {
             mixer_scroll: self.mixer_scroll,
             levels: &self.levels,
             edited: self.project.edited(self.history.version()),
+            roll: &self.roll,
         };
         let mut scene = Scene::new();
         let drawn = shell::draw(&mut scene, &mut self.fonts, &self.theme, &frame, w, h);
@@ -376,6 +406,13 @@ impl App {
             self.mixer_scroll = self.mixer_scroll.min(m.max_scroll);
         }
         self.mixer = drawn.mixer;
+        if self.roll.lo.is_none()
+            && let Some(g) = &drawn.roll
+        {
+            // hold the rows still once shown, so edits do not re-fit them
+            self.roll.lo = Some(g.layout.lo);
+        }
+        self.roll_geom = drawn.roll;
         self.scene.reset();
         self.scene.append(&scene, Some(vello::kurbo::Affine::scale(scale)));
         let dev = &self.ctx.devices[g.surface.dev_id];
@@ -475,6 +512,190 @@ impl App {
         if self.drag.take().is_some() {
             self.history.end_gesture();
         }
+        if self.roll_drag.take().is_some() {
+            self.roll.rubber = None;
+            self.history.end_gesture();
+        }
+    }
+
+    fn select_clip(&mut self, clip: ClipId) {
+        if self.arrange.selected_clip != Some(clip) {
+            self.roll.selected.clear();
+            self.roll.lo = None;
+        }
+        self.arrange.selected_clip = Some(clip);
+        self.arrange.selected_track = self.history.doc().clips.get(&clip).map(|c| c.track);
+    }
+
+    /// The edited clip, its source module, its notes and its length.
+    fn roll_target(&self) -> Option<(ClipId, sat_doc::ModuleId, Vec<Note>, Ticks)> {
+        let clip = self.arrange.selected_clip?;
+        let len = self.history.doc().clips.get(&clip)?.length;
+        let (module, notes) = clip_notes(self.history.doc(), clip);
+        Some((clip, module?, notes, len))
+    }
+
+    /// Writes edited notes into the clip's pattern and takes their selection.
+    fn write_notes(&mut self, label: &str, e: Edited) {
+        let Some((clip, module, notes, _)) = self.roll_target() else { return };
+        if e.notes != notes {
+            self.edit(label, vec![Op::WritePattern { module, clip, notes: im::Vector::from(e.notes) }]);
+        }
+        self.roll.selected = e.selected;
+    }
+
+    fn press_roll(&mut self, pt: Point, double: bool) {
+        let (Some(g), Some((_, _, notes, len))) = (self.roll_geom.clone(), self.roll_target()) else { return };
+        let shift = self.mods.shift_key();
+        match g.hit(&notes, pt) {
+            RollHit::Tool(t) => self.roll.tool = t,
+            RollHit::Snap => self.roll.snap = next_snap(self.roll.snap),
+            RollHit::Quantise => {
+                let snap = self.roll.snap.unwrap_or(Ticks::sixteenths(1));
+                self.write_notes("quantise", roll_edit::quantise(&notes, &self.roll.selected, snap, len));
+            }
+            RollHit::Note { index, .. } if double => {
+                self.write_notes("delete note", roll_edit::delete(&notes, &[index]));
+            }
+            RollHit::Note { index, .. } if shift => {
+                if let Some(k) = self.roll.selected.iter().position(|&i| i == index) {
+                    self.roll.selected.remove(k);
+                } else {
+                    self.roll.selected.push(index);
+                }
+            }
+            RollHit::Note { index, edge } => {
+                if !self.roll.selected.contains(&index) {
+                    self.roll.selected = vec![index];
+                }
+                let (sel, anchor) = (self.roll.selected.clone(), notes[index]);
+                self.history.begin_gesture(if edge { "resize notes" } else { "move notes" });
+                self.roll_drag = Some(if edge {
+                    RollDrag::Resize { notes, sel, anchor, from: pt }
+                } else {
+                    RollDrag::Move { notes, sel, anchor, from: pt }
+                });
+            }
+            RollHit::Grid { tick, pitch } if self.roll.tool == Tool::Draw => {
+                let start = roll_edit::snap_floor(tick, self.roll.snap);
+                let note = Note { start, len: self.note_len, pitch, velocity: 0.8, chance: 1.0 };
+                self.history.begin_gesture("draw note");
+                let e = roll_edit::add(&notes, note, len);
+                let (sel, anchor) = (e.selected.clone(), e.notes[e.selected[0]]);
+                let after = e.notes.clone();
+                self.write_notes("draw note", e);
+                // keep dragging to set its length
+                self.roll_drag = Some(RollDrag::Resize { notes: after, sel, anchor, from: pt });
+            }
+            RollHit::Grid { .. } => {
+                let keep = if shift { self.roll.selected.clone() } else { Vec::new() };
+                self.roll.selected = keep.clone();
+                self.roll_drag = Some(RollDrag::Box { from: pt, keep });
+                self.history.begin_gesture("select");
+            }
+            RollHit::Velocity { index: Some(i), value } => {
+                if !self.roll.selected.contains(&i) {
+                    self.roll.selected = vec![i];
+                }
+                let sel = self.roll.selected.clone();
+                self.history.begin_gesture("velocity");
+                self.write_notes("velocity", roll_edit::set_velocity(&notes, &sel, value));
+                self.roll_drag = Some(RollDrag::Velocity { notes, sel });
+            }
+            RollHit::Key(pitch) => {
+                self.roll.selected =
+                    notes.iter().enumerate().filter(|(_, n)| n.pitch == pitch).map(|(i, _)| i).collect();
+            }
+            RollHit::Velocity { index: None, .. } | RollHit::Nothing => {
+                if !shift {
+                    self.roll.selected.clear();
+                }
+            }
+        }
+    }
+
+    fn roll_drag_to(&mut self) {
+        let (Some(d), Some(g), Some((_, _, _, len))) =
+            (self.roll_drag.clone(), self.roll_geom.clone(), self.roll_target())
+        else {
+            return;
+        };
+        let l = &g.layout;
+        let snap = if self.mods.alt_key() { None } else { self.roll.snap };
+        let pt = self.cursor;
+        match d {
+            RollDrag::Move { notes, sel, anchor, from } => {
+                let raw = l.tick_at(pt.x).0 - l.tick_at(from.x).0;
+                let start = roll_edit::snap_round(Ticks(anchor.start.0 + raw), snap);
+                let dp = l.pitch_at(pt.y) as i32 - l.pitch_at(from.y) as i32;
+                self.write_notes("move notes", roll_edit::move_by(&notes, &sel, start.0 - anchor.start.0, dp, len));
+            }
+            RollDrag::Resize { notes, sel, anchor, from } => {
+                let raw = l.tick_at(pt.x).0 - l.tick_at(from.x).0;
+                let end = anchor.start + anchor.len;
+                let new_end = roll_edit::snap_round(Ticks(end.0 + raw), snap);
+                let min = snap.unwrap_or(Ticks(sat_doc::sat_time::PPQ / 16));
+                let e = roll_edit::resize_by(&notes, &sel, new_end.0 - end.0, min, len);
+                if let Some(&i) = e.selected.first() {
+                    self.note_len = e.notes[i].len;
+                }
+                self.write_notes("resize notes", e);
+            }
+            RollDrag::Velocity { notes, sel } => {
+                self.write_notes("velocity", roll_edit::set_velocity(&notes, &sel, l.vel_at(pt.y)));
+            }
+            RollDrag::Box { from, keep } => {
+                let notes = self.roll_target().map(|t| t.2).unwrap_or_default();
+                let b = Rect::from_points(from, pt).intersect(l.grid);
+                let mut sel = roll_edit::in_box(
+                    &notes,
+                    l.tick_at(b.x0),
+                    l.tick_at(b.x1),
+                    l.pitch_at(b.y1 - 0.5),
+                    l.pitch_at(b.y0 + 0.5),
+                );
+                for k in keep {
+                    if !sel.contains(&k) {
+                        sel.push(k);
+                    }
+                }
+                self.roll.rubber = Some(b);
+                self.roll.selected = sel;
+            }
+        }
+    }
+
+    /// Keys for the piano roll; returns whether the key was used.
+    fn roll_key(&mut self, key: &Key) -> bool {
+        if self.panel != PanelView::Clip || self.roll_drag.is_some() {
+            return false;
+        }
+        let Some((_, _, notes, len)) = self.roll_target() else { return false };
+        let sel = self.roll.selected.clone();
+        let ctrl = self.mods.control_key() || self.mods.super_key();
+        let step = self.roll.snap.unwrap_or(Ticks::sixteenths(1)).0;
+        let octave = if self.mods.shift_key() { 12 } else { 1 };
+        match key {
+            Key::Named(NamedKey::Delete | NamedKey::Backspace) if !sel.is_empty() => {
+                self.write_notes("delete notes", roll_edit::delete(&notes, &sel));
+            }
+            Key::Named(NamedKey::ArrowUp) if !sel.is_empty() => {
+                self.write_notes("transpose", roll_edit::move_by(&notes, &sel, 0, octave, len));
+            }
+            Key::Named(NamedKey::ArrowDown) if !sel.is_empty() => {
+                self.write_notes("transpose", roll_edit::move_by(&notes, &sel, 0, -octave, len));
+            }
+            Key::Named(NamedKey::ArrowLeft) if !sel.is_empty() => {
+                self.write_notes("move notes", roll_edit::move_by(&notes, &sel, -step, 0, len));
+            }
+            Key::Named(NamedKey::ArrowRight) if !sel.is_empty() => {
+                self.write_notes("move notes", roll_edit::move_by(&notes, &sel, step, 0, len));
+            }
+            Key::Named(NamedKey::Escape) => self.roll.selected.clear(),
+            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("a") => self.roll.selected = (0..notes.len()).collect(),
+            _ => return false,
+        }
+        true
     }
 
     fn press(&mut self) {
@@ -490,10 +711,7 @@ impl App {
         }
         let Some(layout) = &self.layout else { return };
         match layout.hit(pt) {
-            Hit::Clip { clip, .. } => {
-                self.arrange.selected_clip = Some(clip);
-                self.arrange.selected_track = self.history.doc().clips.get(&clip).map(|c| c.track);
-            }
+            Hit::Clip { clip, .. } => self.select_clip(clip),
             Hit::Mute(t) => self.toggle_flag(t, TrackFlag::Mute),
             Hit::Solo(t) => self.toggle_flag(t, TrackFlag::Solo),
             Hit::Arm(t) => self.toggle_flag(t, TrackFlag::Arm),
@@ -530,6 +748,9 @@ impl App {
             Some(Tab::Macros) => return,
             None => {}
         }
+        if self.panel == PanelView::Clip {
+            return self.press_roll(pt, double);
+        }
         let Some(m) = &self.mixer else { return };
         match m.hit(pt) {
             MixHit::Fader(t) => {
@@ -551,6 +772,9 @@ impl App {
     }
 
     fn key(&mut self, key: &Key) {
+        if self.roll_key(key) {
+            return self.update_title();
+        }
         let ctrl = self.mods.control_key() || self.mods.super_key();
         let shift = self.mods.shift_key();
         match key {
@@ -563,6 +787,7 @@ impl App {
                 self.end_drag();
                 let did = if shift { self.history.redo() } else { self.history.undo() };
                 if did.is_some() {
+                    self.roll.selected.clear();
                     self.playback.recompile(self.history.doc());
                 }
             }
@@ -597,6 +822,11 @@ impl App {
                 let d = if dx.abs() > dy.abs() { dx } else { dy };
                 let max = self.mixer.as_ref().map(|m| m.max_scroll).unwrap_or(0.0);
                 self.mixer_scroll = (self.mixer_scroll - d).clamp(0.0, max);
+            } else if let (Some(g), Some(lo)) = (&self.roll_geom, self.roll.lo) {
+                // wheel up shows higher notes, a row per 20 px
+                let rows = (dy / 20.0).round() as i32;
+                let max = 127 - (g.layout.hi - g.layout.lo) as i32;
+                self.roll.lo = Some((lo as i32 + rows).clamp(0, max.max(0)) as u8);
             }
             return;
         }
@@ -670,8 +900,9 @@ impl ApplicationHandler for App {
             WindowEvent::CursorMoved { position, .. } => {
                 let scale = self.gfx.as_ref().map(|g| g.window.scale_factor()).unwrap_or(1.0);
                 self.cursor = Point::new(position.x / scale, position.y / scale);
-                dirty = self.drag.is_some();
+                dirty = self.drag.is_some() || self.roll_drag.is_some();
                 self.drag_to();
+                self.roll_drag_to();
             }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => match state {
                 ElementState::Pressed => self.press(),
@@ -764,6 +995,10 @@ fn main() {
         layout: None,
         mixer: None,
         drag: None,
+        roll: RollView::default(),
+        roll_geom: None,
+        roll_drag: None,
+        note_len: Ticks::sixteenths(1),
         last_click: None,
         last_frame: Instant::now(),
         quit: false,
