@@ -368,3 +368,39 @@ fn samplers_play_pool_sounds_and_go_silent_without_one() {
     assert_eq!(s.h.doc().modules[&smp].audio, None);
     assert!(s.h.apply("bad", [Op::SetModuleAudio { module: smp, audio: Some(audio) }]).is_err());
 }
+
+#[test]
+fn session_clips_launch_over_the_arrangement() {
+    let mut s = song();
+    s.h.apply("solo", [Op::SetTrackFlag { id: s.lead, flag: TrackFlag::Solo, on: true }]).unwrap();
+    let d = s.h.doc();
+    let clip = d.clips_on(s.lead).next().unwrap().id;
+    let play = |cmds: Vec<Command>, frames: usize| {
+        let c = compile(d, SR, BLOCK).unwrap();
+        let (mut e, mut h) = engine(c.schedule, 16);
+        for cmd in cmds {
+            h.send(cmd).unwrap();
+        }
+        h.send(Command::Play).unwrap();
+        let mut out = vec![0.0f32; frames];
+        let mut r = vec![0.0f32; frames];
+        for (l, r) in out.chunks_mut(BLOCK).zip(r.chunks_mut(BLOCK)) {
+            e.process(l, r);
+        }
+        out
+    };
+    let c = compile(d, SR, BLOCK).unwrap();
+    // the lead's arrangement starts at beat 2; launched at sample 0 it plays from the start
+    assert_eq!(rms(&play(vec![], 96_000)[..48_000]), 0.0);
+    let launch = c.launch(s.lead, Some(clip), 0).unwrap();
+    let launched = play(vec![launch], 96_000);
+    assert!(rms(&launched[..48_000]) > 0.001);
+    // a stop at beat 1 silences the track, the arrangement included
+    let stop = c.launch(s.lead, None, 24_000).unwrap();
+    let stopped = play(vec![c.launch(s.lead, Some(clip), 0).unwrap(), stop], 96_000);
+    assert!(rms(&stopped[40_000..]) < 1e-4, "{}", rms(&stopped[40_000..]));
+    // back to the arrangement
+    let back = play(vec![c.launch(s.lead, None, 0).unwrap(), Command::BackToArrangement], 96_000);
+    assert_eq!(back, play(vec![], 96_000));
+    assert!(c.launch(s.ret, Some(clip), 0).is_none(), "returns launch nothing");
+}

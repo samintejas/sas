@@ -19,6 +19,7 @@ mod fx;
 mod instrument;
 mod sampler;
 mod schedule;
+mod sequencer;
 mod synth;
 
 use std::sync::Arc;
@@ -29,6 +30,7 @@ pub use fx::{FX_PARAMS, Fx, FxKind, FxModule, MAX_FX, MAX_FX_REGS};
 pub use instrument::{Instrument, MAX_MODS, MAX_PARAMS, MAX_REGS, MAX_VOICES, NONE, Patch, VKind, VModule};
 pub use sampler::{PlayMode, Sample};
 pub use schedule::{Buf, Meter, NodeId, NodeKind, Param, Schedule, ScheduleBuilder, ScheduleError, Strip, db_to_gain};
+pub use sequencer::SessionClip;
 pub use synth::{NoteEvent, Synth, SynthParam, Wave};
 
 /// A message to the audio thread.
@@ -53,6 +55,19 @@ pub enum Command {
     Locate(i64),
     /// Set or clear the loop range in timeline samples (start, end).
     SetLoop(Option<(i64, i64)>),
+    /// Launch a session clip (by key) on a node at a timeline sample, or
+    /// stop the node's clip there with `None`. The node then follows the
+    /// session until [`Command::BackToArrangement`].
+    Launch {
+        /// The instrument node.
+        node: NodeId,
+        /// The clip's key, or `None` to stop.
+        clip: Option<u64>,
+        /// When, in timeline samples.
+        at: i64,
+    },
+    /// Every track plays the arrangement again.
+    BackToArrangement,
 }
 
 /// Read-only engine state for the UI, updated every block.
@@ -183,6 +198,10 @@ impl Engine {
                     self.sched.all_notes_off();
                 }
                 Command::SetLoop(r) => self.loop_range = r.filter(|(s, e)| e > s),
+                Command::Launch { node, clip, at } => {
+                    self.sched.launch(node, clip, at);
+                }
+                Command::BackToArrangement => self.sched.back_to_arrangement(),
             }
         }
         if let Some(p) = self.pending_garbage.take()

@@ -1,6 +1,6 @@
 //! Renders the demo project to a PNG without a window.
 //!
-//! `cargo run -p sat-ui --example screenshot -- out.png [scale] [clip|mixer|macros|<clip name>] [grid|instrument|fx]`
+//! `cargo run -p sat-ui --example screenshot -- out.png [scale] [clip|mixer|macros|<clip name>] [grid|instrument|fx|session]`
 //!
 //! A clip name selects that clip and shows it in the bottom panel. A fourth
 //! argument `grid` shows the selected clip's source grid instead of the arrangement.
@@ -39,11 +39,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let view = match args.next().as_deref() {
         Some("grid") => MainView::Grid(demo.doc.tracks[&demo.doc.clips[&demo.selected].track].source_grid.unwrap()),
         Some("fx") => MainView::Grid(demo.doc.tracks[&demo.doc.clips[&demo.selected].track].fx_grids[0]),
+        Some("session") => MainView::Session,
         Some("instrument") => {
             MainView::Grid(demo.doc.tracks[&demo.doc.clips[&demo.selected].track].instrument_grid.unwrap())
         }
         _ => MainView::Arrange,
     };
+    // in the session view, the verse playing and the break queued on the drums
+    let mut session = sat_ui::session::SessionView::default();
+    if view == MainView::Session {
+        let verse = demo.doc.scenes[1].id;
+        for ((scene, track), clip) in demo.doc.slots.iter() {
+            if *scene == verse {
+                session.playing.insert(*track, *clip);
+                session.started.insert(*track, sat_ui::demo::bars(4));
+                session.following.insert(*track);
+            }
+        }
+        let brk = demo.doc.scenes[2].id;
+        if let Some(((_, t), c)) = demo.doc.slots.iter().find(|((s, _), _)| *s == brk) {
+            session.queued.insert(*t, (Some(*c), sat_ui::demo::bars(8)));
+        }
+    }
     let (w, h) = (1440.0, 900.0);
     let levels = sat_ui::demo::levels(&demo.doc);
     let frame = Frame {
@@ -62,6 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         grid: &sat_ui::grid::GridView::default(),
         learn: false,
         sounds: &demo.sounds,
+        session: &session,
     };
     let t = std::time::Instant::now();
     shell::draw(&mut scene, &mut fonts, &theme, &frame, w, h);

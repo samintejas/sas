@@ -14,6 +14,7 @@ use sat_dsp::{Adsr, AdsrParams, Mode, Noise, Osc, Shape, Svf, db_gain, midi_hz, 
 use std::sync::Arc;
 
 use crate::sampler::{Sample, Sampler};
+use crate::sequencer::{Cue, Sequencer, SessionClip};
 use crate::synth::NoteEvent;
 
 /// Most modules in a patch.
@@ -153,9 +154,7 @@ enum Engine {
 /// An instrument node: plays note events through a patch or the drum synth.
 #[derive(Debug, Clone)]
 pub struct Instrument {
-    events: Vec<NoteEvent>,
-    cursor: usize,
-    expect: Option<i64>,
+    seq: Sequencer,
     clock: u64,
     engine: Engine,
 }
@@ -165,9 +164,23 @@ fn reg(r: &[f32; MAX_REGS], i: u8, default: f32) -> f32 {
 }
 
 impl Instrument {
-    fn with(mut events: Vec<NoteEvent>, engine: Engine) -> Instrument {
-        events.sort_by(|a, b| a.at.cmp(&b.at).then(a.pitch.cmp(&b.pitch)));
-        Instrument { events, cursor: 0, expect: None, clock: 0, engine }
+    fn with(events: Vec<NoteEvent>, engine: Engine) -> Instrument {
+        Instrument { seq: Sequencer::new(events), clock: 0, engine }
+    }
+
+    /// The same instrument with session clips it can launch.
+    pub fn with_clips(mut self, clips: Vec<SessionClip>) -> Instrument {
+        self.seq.set_clips(clips);
+        self
+    }
+
+    pub(crate) fn seq_mut(&mut self) -> &mut Sequencer {
+        &mut self.seq
+    }
+
+    /// The key of the session clip playing, if any.
+    pub fn playing_clip(&self) -> Option<u64> {
+        self.seq.playing()
     }
 
     /// An instrument running `patch` (truncated to [`MAX_MODS`] modules;
@@ -244,7 +257,7 @@ impl Instrument {
 
     pub(crate) fn adopt(&mut self, old: &Instrument) {
         self.clock = old.clock;
-        self.expect = None;
+        self.seq.adopt(&old.seq);
         match (&mut self.engine, &old.engine) {
             // voices carry over only if the patch kept its shape
             (Engine::Patch { patch, voices }, Engine::Patch { patch: op, voices: ov })
@@ -266,76 +279,78 @@ impl Instrument {
     }
 
     pub(crate) fn release_all(&mut self) {
-        match &mut self.engine {
-            Engine::Patch { voices, .. } => {
-                for v in voices.iter_mut().filter(|v| v.active && v.remaining >= 0) {
-                    v.remaining = -1;
+        release(&mut self.engine);
+        self.seq.invalidate();
+    }
+}
+
+/// Releases every held note.
+fn release(engine: &mut Engine) {
+    match engine {
+        Engine::Patch { voices, .. } => {
+            for v in voices.iter_mut().filter(|v| v.active && v.remaining >= 0) {
+                v.remaining = -1;
+            }
+        }
+        Engine::Sampler(s) => s.release_all(),
+        Engine::Drums { .. } => {}
+    }
+}
+
+/// Starts a note on a free (or the oldest) voice.
+fn start(engine: &mut Engine, clock: &mut u64, e: &NoteEvent, sr: f32) {
+    *clock += 1;
+    let clock = *clock;
+    match engine {
+        Engine::Patch { patch, voices } => {
+            let n = patch.voices();
+            let slot = (0..n)
+                .find(|&i| !voices[i].active)
+                .unwrap_or_else(|| (0..n).min_by_key(|&i| voices[i].age).unwrap_or(0));
+            let v = &mut voices[slot];
+            let fresh = !v.active;
+            v.active = true;
+            v.remaining = e.len.max(1);
+            v.pitch = e.pitch as f32 + patch.transpose();
+            v.vel = e.velocity;
+            v.age = clock;
+            v.fade = if fresh { 0.0 } else { v.fade };
+            if fresh {
+                v.regs = [0.0; MAX_REGS];
+                for (i, s) in v.st.iter_mut().enumerate() {
+                    *s = ModState {
+                        noise: Noise::new((clock as u32).wrapping_mul(31).wrapping_add(i as u32)),
+                        ..ModState::default()
+                    };
                 }
             }
-            Engine::Sampler(s) => s.release_all(),
-            Engine::Drums { .. } => {}
         }
-        self.expect = None;
-    }
-
-    fn start(&mut self, e: &NoteEvent, sr: f32) {
-        self.clock += 1;
-        let clock = self.clock;
-        match &mut self.engine {
-            Engine::Patch { patch, voices } => {
-                let n = patch.voices();
-                let slot = (0..n)
-                    .find(|&i| !voices[i].active)
-                    .unwrap_or_else(|| (0..n).min_by_key(|&i| voices[i].age).unwrap_or(0));
-                let v = &mut voices[slot];
-                let fresh = !v.active;
-                v.active = true;
-                v.remaining = e.len.max(1);
-                v.pitch = e.pitch as f32 + patch.transpose();
-                v.vel = e.velocity;
-                v.age = clock;
-                v.fade = if fresh { 0.0 } else { v.fade };
-                if fresh {
-                    v.regs = [0.0; MAX_REGS];
-                    for (i, s) in v.st.iter_mut().enumerate() {
-                        *s = ModState {
-                            noise: Noise::new((clock as u32).wrapping_mul(31).wrapping_add(i as u32)),
-                            ..ModState::default()
-                        };
+        Engine::Drums { voices, on, ages, .. } => {
+            let kind = drums::Kind::of(e.pitch);
+            // a closed hat chokes an open one
+            if kind == drums::Kind::ClosedHat {
+                for i in 0..MAX_VOICES {
+                    if on[i] && voices[i].kind == drums::Kind::OpenHat {
+                        on[i] = false;
                     }
                 }
             }
-            Engine::Drums { voices, on, ages, .. } => {
-                let kind = drums::Kind::of(e.pitch);
-                // a closed hat chokes an open one
-                if kind == drums::Kind::ClosedHat {
-                    for i in 0..MAX_VOICES {
-                        if on[i] && voices[i].kind == drums::Kind::OpenHat {
-                            on[i] = false;
-                        }
-                    }
-                }
-                let slot = (0..MAX_VOICES)
-                    .find(|&i| !on[i])
-                    .unwrap_or_else(|| (0..MAX_VOICES).min_by_key(|&i| ages[i]).unwrap_or(0));
-                voices[slot] = drums::Voice::new(e.pitch, e.velocity, clock as u32);
-                on[slot] = true;
-                ages[slot] = clock;
-            }
-            Engine::Sampler(s) => s.start(e.pitch, e.velocity, e.len, clock, sr),
+            let slot = (0..MAX_VOICES)
+                .find(|&i| !on[i])
+                .unwrap_or_else(|| (0..MAX_VOICES).min_by_key(|&i| ages[i]).unwrap_or(0));
+            voices[slot] = drums::Voice::new(e.pitch, e.velocity, clock as u32);
+            on[slot] = true;
+            ages[slot] = clock;
         }
+        Engine::Sampler(s) => s.start(e.pitch, e.velocity, e.len, clock, sr),
     }
+}
 
+impl Instrument {
     pub(crate) fn process(&mut self, out: &mut crate::Buf, off: usize, len: usize, pos: Option<i64>, sr: f64) {
-        if let Some(t0) = pos
-            && self.expect != Some(t0)
-        {
-            if self.expect.is_some() {
-                self.release_all();
-            }
-            self.cursor = self.events.partition_point(|e| e.at < t0);
+        if self.seq.begin(pos, len) {
+            self.release_all();
         }
-        self.expect = pos.map(|p| p + len as i64);
         let sr = sr as f32;
         if let Engine::Sampler(s) = &mut self.engine {
             s.refresh(sr);
@@ -343,15 +358,11 @@ impl Instrument {
         for k in 0..len {
             if let Some(t0) = pos {
                 let t = t0 + k as i64;
-                while let Some(e) = self.events.get(self.cursor).copied() {
-                    if e.at > t {
-                        break;
-                    }
-                    if e.at == t {
-                        self.start(&e, sr);
-                    }
-                    self.cursor += 1;
-                }
+                let Instrument { seq, clock, engine } = self;
+                seq.step(t, |c| match c {
+                    Cue::Cut => release(engine),
+                    Cue::Start(e) => start(engine, clock, e, sr),
+                });
             }
             let (l, r) = match &mut self.engine {
                 Engine::Patch { patch, voices } => run_patch(patch, voices, sr),

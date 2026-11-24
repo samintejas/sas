@@ -50,6 +50,7 @@ use sat_ui::paint::{Fonts, color};
 use sat_ui::panel::{self, PanelView, Tab};
 use sat_ui::piano_roll::{self, RollGeom, RollHit, RollView, Tool, clip_notes, next_snap};
 use sat_ui::roll_edit::{self, Edited};
+use sat_ui::session::{SessionHit, SessionLayout, SessionView};
 use sat_ui::shell::{self, Frame, MainView, PANEL_H, ShellLayout, ViewButton};
 use sat_ui::steps::{StepGeom, StepHit, StepView};
 use vello::kurbo::{Point, Rect, Vec2};
@@ -304,6 +305,9 @@ struct App {
     view: MainView,
     grid: GridView,
     grid_layout: Option<GridLayout>,
+    /// What the session is playing and queued.
+    session: SessionView,
+    session_layout: Option<SessionLayout>,
     /// Macro learn mode: the next touched parameter maps to a free macro.
     learn: bool,
     macro_layout: Option<sat_ui::macros::MacroLayout>,
@@ -348,6 +352,7 @@ impl App {
     /// Replaces the document (after open or new) and resets the view.
     fn load(&mut self, doc: Document) {
         self.playback.stop();
+        self.session.clear();
         let first = doc.clips.keys().next().copied();
         self.arrange = ArrangeState {
             selected_clip: first,
@@ -491,6 +496,7 @@ impl App {
         self.playback.update_levels(self.history.doc(), &mut self.levels, dt);
         let scale = g.window.scale_factor();
         let (w, h) = (size.width as f64 / scale, size.height as f64 / scale);
+        self.session.advance(self.history.doc(), self.playback.playhead());
         let frame = Frame {
             doc: self.history.doc(),
             name: &self.project.name,
@@ -511,6 +517,7 @@ impl App {
             grid: &self.grid,
             learn: self.learn,
             sounds: &self.playback.pool,
+            session: &self.session,
         };
         let mut scene = Scene::new();
         let drawn = shell::draw(&mut scene, &mut self.fonts, &self.theme, &frame, w, h);
@@ -534,6 +541,7 @@ impl App {
         }
         self.grid_layout = drawn.grid;
         self.macro_layout = drawn.macros;
+        self.session_layout = drawn.session;
         self.scene.reset();
         self.scene.append(&scene, Some(vello::kurbo::Affine::scale(scale)));
         let dev = &self.ctx.devices[g.surface.dev_id];
@@ -660,6 +668,64 @@ impl App {
         if let Some(d) = self.grid_drag.take() {
             self.end_grid_drag(d);
         }
+    }
+
+    fn press_session(&mut self, pt: Point) {
+        let Some(l) = &self.session_layout else { return };
+        let doc = self.history.doc();
+        let hit = l.hit(doc, &self.session, pt);
+        let columns: Vec<TrackId> = l.cols.iter().filter(|c| !c.group).map(|c| c.track).collect();
+        let slot = |scene: sat_doc::SceneId, t: TrackId| doc.slots.get(&(scene, t)).copied();
+        let launches: Vec<(TrackId, Option<ClipId>)> = match hit {
+            SessionHit::Launch(t, c) => vec![(t, Some(c))],
+            SessionHit::Group(g, scene) => {
+                sat_ui::session::tracks_of(doc, g).into_iter().map(|t| (t, slot(scene, t))).collect()
+            }
+            SessionHit::Scene(scene) => columns.iter().map(|t| (*t, slot(scene, *t))).collect(),
+            SessionHit::Stop(t) => sat_ui::session::tracks_of(doc, t).into_iter().map(|t| (t, None)).collect(),
+            SessionHit::StopAll => {
+                self.session.playing.keys().chain(self.session.queued.keys()).map(|t| (*t, None)).collect()
+            }
+            SessionHit::Select(c) => {
+                self.select_clip(c);
+                return;
+            }
+            SessionHit::Track(t) => {
+                self.arrange.selected_track = Some(t);
+                return;
+            }
+            SessionHit::BackToArrangement => return self.back_to_arrangement(),
+            SessionHit::Nothing => return,
+        };
+        if let SessionHit::Launch(_, c) = hit {
+            self.select_clip(c);
+        }
+        self.launch(launches);
+    }
+
+    /// Launches clips (or stops, with `None`) on tracks at the next bar,
+    /// starting the transport if it is stopped (then they start now).
+    fn launch(&mut self, launches: Vec<(TrackId, Option<ClipId>)>) {
+        if launches.is_empty() {
+            return;
+        }
+        let was_playing = self.playback.playing;
+        let at = sat_ui::session::launch_tick(self.history.doc(), self.playback.playhead(), was_playing);
+        let sample = self.playback.compiled.sample(at);
+        for (t, clip) in launches {
+            if let Some(cmd) = self.playback.compiled.launch(t, clip, sample) {
+                self.playback.send(cmd);
+                self.session.queued.insert(t, (clip, at));
+            }
+        }
+        if !was_playing && self.session.queued.values().any(|(c, _)| c.is_some()) {
+            self.playback.toggle();
+        }
+    }
+
+    fn back_to_arrangement(&mut self) {
+        self.playback.send(Command::BackToArrangement);
+        self.session.clear();
     }
 
     fn select_clip(&mut self, clip: ClipId) {
@@ -859,6 +925,7 @@ impl App {
         {
             match shell::view_buttons(sl.topbar).into_iter().find(|(_, r)| r.contains(pt)).map(|(b, _)| b) {
                 Some(ViewButton::Arrange) => self.view = MainView::Arrange,
+                Some(ViewButton::Session) => self.view = MainView::Session,
                 Some(ViewButton::SourceGrid) => self.open_grid(self.arrange.selected_track, GridKind::Source),
                 Some(ViewButton::Instrument) => self.open_grid(self.arrange.selected_track, GridKind::Instrument),
                 Some(ViewButton::Fx) => self.open_grid(self.arrange.selected_track, GridKind::Fx),
@@ -868,6 +935,15 @@ impl App {
         }
         if matches!(self.view, MainView::Grid(_)) {
             return self.press_grid(pt, double);
+        }
+        if let Some(sl) = self.shell
+            && !self.session.following.is_empty()
+            && sat_ui::session::back_button(sl.arrange).contains(pt)
+        {
+            return self.back_to_arrangement();
+        }
+        if self.view == MainView::Session {
+            return self.press_session(pt);
         }
         let Some(layout) = &self.layout else { return };
         match layout.hit(pt) {
@@ -1528,6 +1604,8 @@ fn main() {
         view: MainView::Arrange,
         grid: GridView::default(),
         grid_layout: None,
+        session: SessionView::default(),
+        session_layout: None,
         learn: false,
         macro_layout: None,
         grid_drag: None,
