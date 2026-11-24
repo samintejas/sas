@@ -290,3 +290,46 @@ fn fx_grids_process_tracks_and_returns() {
     let open = render(s.h.doc(), 48_000);
     assert!(open.0.iter().chain(&open.1).any(|x| x.abs() > ceil + 0.01));
 }
+
+#[test]
+fn macros_drive_their_parameters() {
+    use sat_modules::{instrument as ins, macros};
+    let mut s = song();
+    let grid = s.h.doc().tracks[&s.bass].instrument_grid.unwrap();
+    let (ops, ids) = ins::default_patch_ops(grid, &[]);
+    s.h.apply("patch", ops).unwrap();
+    let filter = ids[2];
+    let (index, ops) = macros::learn(s.h.doc(), filter, "cutoff").unwrap();
+    s.h.apply("learn", ops).unwrap();
+    let before = render(s.h.doc(), 24_000);
+    let target = ParamTarget::Macro { grid, index };
+    // a macro is a live value: one command per parameter it drives
+    let c = sat_compile::compile(s.h.doc(), SR, BLOCK).unwrap();
+    let cmds = c.param_commands(&target, 0.1);
+    assert_eq!(cmds.len(), 1);
+    let Command::SetParam { value, .. } = cmds[0] else { panic!() };
+    let spec = sat_modules::spec(ins::FILTER, "cutoff").unwrap();
+    assert!((value - spec.at(0.1)).abs() < 1e-3);
+    // the parameter itself no longer answers to its own knob
+    let own = ParamTarget::Module { module: filter, param: "cutoff".into() };
+    assert!(c.param_commands(&own, 5000.0).is_empty());
+    // and a recompile reads the macro, not the stored value
+    s.h.apply("macro", [Op::SetValue { target: target.clone(), value: 0.1 }]).unwrap();
+    let after = render(s.h.doc(), 24_000);
+    assert_ne!(before, after);
+    s.h.apply("own", [Op::SetValue { target: own, value: 15_000.0 }]).unwrap();
+    assert_eq!(render(s.h.doc(), 24_000), after, "the macro decides");
+    // a macro on a generator reshapes the notes
+    let src = s.h.doc().tracks[&s.bass].source_grid.unwrap();
+    let (eu, op) = sat_modules::add_module(s.h.doc(), src, sat_modules::EUCLID, (0.0, 0.0));
+    s.h.apply("eu", [op]).unwrap();
+    s.h.apply("wire", sat_modules::wire(s.h.doc(), eu, s.bass_clip)).unwrap();
+    let (j, ops) = macros::learn(s.h.doc(), eu, "hits").unwrap();
+    s.h.apply("learn hits", ops).unwrap();
+    let hits = ParamTarget::Macro { grid: src, index: j };
+    assert!(sat_modules::shapes_notes(s.h.doc(), &hits));
+    let n = |s: &Song| sat_modules::effective_notes(s.h.doc(), eu, s.bass_clip).len();
+    let few = n(&s);
+    s.h.apply("more hits", [Op::SetValue { target: hits, value: 0.25 }]).unwrap();
+    assert!(n(&s) > few, "{} > {few}", n(&s));
+}

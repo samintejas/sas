@@ -21,7 +21,10 @@ patchable voice (note in, vco, noise, mixer, filter, adsr, vca, lfo, voice out)
 that every voice runs, or a drum synth that plays drums by pitch; every
 track's fx grid (eq, comp with side chain, drive, filter, delay, reverb,
 limiter, split and mix) runs between its sound and its strip, buses and the
-master included. Knobs and bypass switches change the sound live while it plays. The arrange view, piano roll and mixer from
+master included. Every grid has 16 macros: each drives one or more of its
+grid's parameters over a range, and the bottom panel's macros page shows the
+selected track's macros with its fader and pan. Knobs, macros and bypass
+switches change the sound live while it plays. The arrange view, piano roll and mixer from
 the prototype are drawn with vello; the engine plays through the default
 audio device and feeds live per-track meters.
 
@@ -98,6 +101,8 @@ cargo run --release -p sat-app -- my.sat  # opens a project bundle
 | source grid: + module, the dock's +, Delete, Esc | add a piano roll, drum seq or euclid; add a one-bar clip after the track's last one; remove the selected module; deselect |
 | instrument grid: drag from an out to an in of the same colour, drag a cable off an in | patch them (replacing what fed that input; loops are refused), repatch or unplug it |
 | instrument grid: drag a parameter row, + module, Delete | change the sound while it plays, add a module, remove the selected module |
+| macros page: drag a macro, learn, click an empty macro, open | play it; map the next touched parameter (in any grid or the euclid editor) to a free macro, click a macro to clear it; start learning; show that grid |
+| a parameter row with a macro badge (m1–m16) | drag it to play its macro |
 | fx grid: + module, the power icon, dragging between ports | add an effect just before out (an empty grid gets its in and out), bypass it, reroute (split, mix, side chain) |
 | drum seq: click a step, Shift-click it, the page buttons | toggle it, cycle its velocity (normal, accent, ghost), show another bar |
 | euclid: drag a knob, click a trig | change steps, hits, rotation, accents, note, rate, gate or velocity; add or remove a hand edit over the generator |
@@ -120,6 +125,7 @@ cargo run --release -p sat-ui --example screenshot -- euclid.png 2 euclid   # a 
 cargo run --release -p sat-ui --example screenshot -- grid.png 2 clip grid  # its source grid
 cargo run --release -p sat-ui --example screenshot -- ins.png 2 clip instrument  # its instrument grid
 cargo run --release -p sat-ui --example screenshot -- fx.png 2 clip fx       # its fx grid
+cargo run --release -p sat-ui --example screenshot -- mac.png 2 macros instrument  # macros page
 ```
 
 ## Listening

@@ -58,6 +58,48 @@ impl B {
         self.ops.extend(sat_modules::fx::chain(grid, effects));
     }
 
+    /// The instrument grid of a track added by these ops.
+    fn ins_grid(&self, track: TrackId) -> GridId {
+        self.ops
+            .iter()
+            .find_map(|op| match op {
+                Op::AddTrack { id, grids, .. } if *id == track => grids.instrument,
+                _ => None,
+            })
+            .expect("track added")
+    }
+
+    /// The first module of `kind` added to `grid`, with its parameters.
+    fn module_on(&self, grid: GridId, kind: &str) -> (ModuleId, OrdMap<String, f32>) {
+        self.ops
+            .iter()
+            .find_map(|op| match op {
+                Op::AddModule { id, grid: g, kind: k, params, .. } if *g == grid && k == kind => {
+                    Some((*id, params.clone()))
+                }
+                _ => None,
+            })
+            .expect("module added")
+    }
+
+    /// Assigns macro `index` of `grid`: `name`, driving (module kind,
+    /// parameter, knob range) on that grid, set where the first one sits now.
+    fn macro_slot(&mut self, grid: GridId, index: u8, name: &str, binds: &[(&str, &str, f32, f32)]) {
+        let mut value = 0.0;
+        let mut out = Vector::new();
+        for (k, (kind, param, lo, hi)) in binds.iter().enumerate() {
+            let (module, params) = self.module_on(grid, kind);
+            if k == 0 {
+                let spec = sat_modules::spec(kind, param).expect("known parameter");
+                let pos = spec.pos(params.get(*param).copied().unwrap_or(spec.default)) as f32;
+                value = ((pos - lo) / (hi - lo)).clamp(0.0, 1.0);
+            }
+            out.push_back(MacroBind { module, param: param.to_string(), lo: *lo, hi: *hi });
+        }
+        self.ops.push(Op::SetMacroSlot { grid, index, slot: Some(MacroSlot { name: name.into(), binds: out }) });
+        self.ops.push(Op::SetValue { target: ParamTarget::Macro { grid, index }, value });
+    }
+
     /// The grid a module was added to.
     fn grid_of(&self, module: ModuleId) -> GridId {
         self.ops
@@ -357,6 +399,17 @@ pub fn demo() -> Demo {
         doc.master,
         &[(COMP, &[("thresh", -14.0), ("ratio", 2.0), ("release", 0.2), ("makeup", 2.0)]), (LIMITER, &[])],
     );
+    // macros: the bass's tone and pluck (one macro, two parameters), the
+    // pads' envelope, and the spare euclid's density
+    let bg = b.ins_grid(bass);
+    b.macro_slot(bg, 0, "cutoff", &[(FILTER, "cutoff", 0.25, 0.8)]);
+    b.macro_slot(bg, 1, "res", &[(FILTER, "res", 0.0, 0.9)]);
+    b.macro_slot(bg, 2, "pluck", &[(ADSR, "d", 0.75, 0.45), (FILTER, "amount", 0.65, 0.95)]);
+    let kg = b.ins_grid(keys);
+    b.macro_slot(kg, 0, "attack", &[(ADSR, "a", 0.0, 0.8)]);
+    b.macro_slot(kg, 1, "release", &[(ADSR, "r", 0.2, 0.9)]);
+    let bsrc = b.grid_of(bseq);
+    b.macro_slot(bsrc, 0, "density", &[(sat_modules::EUCLID, "hits", 0.02, 0.2)]);
     let tempo = doc.tempo_lane;
     b.ops.push(Op::SetLanePoints {
         id: tempo,

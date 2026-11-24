@@ -135,6 +135,39 @@ pub struct Grid {
     pub kind: GridKind,
     /// Macro values, normalised 0–1.
     pub macros: [f32; MACROS],
+    /// What each assigned macro is called and drives, by index.
+    #[serde(default)]
+    pub slots: OrdMap<u8, MacroSlot>,
+}
+
+impl Grid {
+    /// A grid with every macro at 0 and none assigned.
+    pub fn new(id: GridId, track: TrackId, kind: GridKind) -> Grid {
+        Grid { id, track, kind, macros: [0.0; MACROS], slots: OrdMap::new() }
+    }
+}
+
+/// An assigned macro: its name and the parameters it drives.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MacroSlot {
+    /// Shown under the knob.
+    pub name: String,
+    /// The parameters it drives.
+    pub binds: Vector<MacroBind>,
+}
+
+/// One parameter a macro drives: as the macro goes 0 to 1 the parameter's
+/// knob position goes `lo` to `hi`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MacroBind {
+    /// The module, on the macro's own grid.
+    pub module: ModuleId,
+    /// Parameter key.
+    pub param: String,
+    /// Knob position (0–1) at macro 0.
+    pub lo: f32,
+    /// Knob position (0–1) at macro 1.
+    pub hi: f32,
 }
 
 /// A module on a grid.

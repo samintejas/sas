@@ -438,3 +438,35 @@ mod grid {
         }
     }
 }
+
+mod macros {
+    use sat_ui::demo::demo;
+    use sat_ui::macros::{MacroHit, Section, grids_for, layout};
+    use vello::kurbo::Rect;
+
+    #[test]
+    fn the_page_shows_a_tracks_grids_and_its_fader() {
+        let d = demo();
+        let track = d.doc.clips[&d.selected].track;
+        let tr = &d.doc.tracks[&track];
+        let panel = Rect::new(4.0, 594.0, 1436.0, 900.0);
+        let l = layout(&d.doc, Some(track), None, panel);
+        let grids: Vec<_> = l.sections.iter().map(|s| s.grid).collect();
+        assert_eq!(grids, vec![tr.source_grid.unwrap(), tr.instrument_grid.unwrap()]);
+        let ins = &l.sections[1];
+        assert_eq!(ins.knobs.len(), 16);
+        let (i, cell) = ins.knobs[2];
+        assert_eq!(l.hit(Section::knob_center(cell)), MacroHit::Knob(ins.grid, i));
+        assert_eq!(sat_modules::macros::readout(&d.doc, ins.grid, 2).unwrap().0, "pluck");
+        assert_eq!(l.hit(l.learn.center()), MacroHit::Learn);
+        assert_eq!(l.hit(ins.open.center()), MacroHit::Open(ins.grid));
+        assert_eq!(l.hit(l.fader.center()), MacroHit::Fader(track));
+        assert!(l.sections.iter().all(|s| s.rect.x1 <= l.track_card.x0), "sections sit left of the track card");
+        // with an fx grid on screen, the page shows that grid; a bus shows its fx grid
+        let fx = tr.fx_grids[0];
+        assert_eq!(grids_for(&d.doc, Some(track), Some(fx)), vec![fx]);
+        let master = &d.doc.tracks[&d.doc.master];
+        assert_eq!(grids_for(&d.doc, Some(d.doc.master), None), vec![master.fx_grids[0]]);
+        assert!(grids_for(&d.doc, None, None).is_empty());
+    }
+}

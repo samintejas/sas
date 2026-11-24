@@ -294,3 +294,40 @@ fn rejects_newer_schema_and_foreign_files() {
 fn zstd_bytes(v: &serde_json::Value) -> Vec<u8> {
     zstd::encode_all(&serde_json::to_vec(v).unwrap()[..], 1).unwrap()
 }
+
+#[test]
+fn macros_bind_parameters_on_their_own_grid() {
+    let mut f = fixture();
+    let ins = f.h.doc().tracks[&f.track].instrument_grid.unwrap();
+    let synth = ModuleId::new();
+    let add = Op::AddModule {
+        id: synth,
+        grid: ins,
+        kind: "vco".into(),
+        name: "vco".into(),
+        params: OrdMap::new(),
+        pos: (0.0, 0.0),
+    };
+    f.h.apply("synth", [add]).unwrap();
+    let bind = |module, lo, hi| MacroBind { module, param: "tune".into(), lo, hi };
+    let slot = |b: MacroBind| Some(MacroSlot { name: "pitch".into(), binds: Vector::unit(b) });
+    // a macro drives modules on its own grid only, over knob positions 0–1
+    let other = f.h.apply("bad", [Op::SetMacroSlot { grid: f.src, index: 0, slot: slot(bind(synth, 0.0, 1.0)) }]);
+    assert!(other.is_err());
+    let range = f.h.apply("bad", [Op::SetMacroSlot { grid: ins, index: 0, slot: slot(bind(synth, 0.0, 2.0)) }]);
+    assert!(range.is_err());
+    let index = f.h.apply("bad", [Op::SetMacroSlot { grid: ins, index: 16, slot: slot(bind(synth, 0.0, 1.0)) }]);
+    assert!(index.is_err());
+    f.h.apply("map", [Op::SetMacroSlot { grid: ins, index: 2, slot: slot(bind(synth, 0.25, 0.75)) }]).unwrap();
+    assert_eq!(f.h.doc().grids[&ins].slots[&2].name, "pitch");
+    // saved and loaded
+    let back = file::from_bytes(&file::to_bytes(f.h.doc()).unwrap()).unwrap();
+    assert_eq!(back.grids[&ins].slots, f.h.doc().grids[&ins].slots);
+    // removing the module leaves the macro with nothing to drive; undo brings it back
+    f.h.apply("rm", [Op::RemoveModule { id: synth }]).unwrap();
+    assert!(f.h.doc().grids[&ins].slots[&2].binds.is_empty());
+    f.h.undo();
+    assert_eq!(f.h.doc().grids[&ins].slots[&2].binds.len(), 1);
+    f.h.apply("clear", [Op::SetMacroSlot { grid: ins, index: 2, slot: None }]).unwrap();
+    assert!(f.h.doc().grids[&ins].slots.is_empty());
+}

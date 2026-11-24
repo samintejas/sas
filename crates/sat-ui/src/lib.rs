@@ -13,6 +13,7 @@ pub mod demo;
 pub mod gfx;
 pub mod grid;
 pub mod icons;
+pub mod macros;
 pub mod mixer;
 pub mod paint;
 pub mod panel;

@@ -67,6 +67,9 @@ pub struct Compiled {
     /// The tempo map the schedule was built with.
     pub tempo: TempoMap,
     params: HashMap<ParamTarget, (NodeId, Param, Conv)>,
+    /// What each assigned macro drives: (node, param, spec, bind).
+    #[allow(clippy::type_complexity)]
+    macros: HashMap<ParamTarget, Vec<(NodeId, Param, &'static sat_modules::ParamSpec, MacroBind)>>,
     meters: HashMap<TrackId, Arc<Meter>>,
 }
 
@@ -74,6 +77,28 @@ impl Compiled {
     /// The post-fader peak meter of a track's strip.
     pub fn meter(&self, track: TrackId) -> Option<&Arc<Meter>> {
         self.meters.get(&track)
+    }
+
+    /// The engine commands for a value change: one for a plain parameter,
+    /// one per driven parameter for a macro, none for a parameter a macro
+    /// drives (its macro decides its value).
+    pub fn param_commands(&self, target: &ParamTarget, value: f32) -> Vec<Command> {
+        if let Some(driven) = self.macros.get(target) {
+            return driven
+                .iter()
+                .map(|(node, param, spec, bind)| Command::SetParam {
+                    node: *node,
+                    param: *param,
+                    value: sat_modules::macros::value_at(spec, bind, value),
+                })
+                .collect();
+        }
+        if matches!(target, ParamTarget::Module { .. }) && self.macros.values().flatten().any(|d| {
+            matches!(target, ParamTarget::Module { module, param } if *module == d.3.module && *param == d.3.param)
+        }) {
+            return Vec::new();
+        }
+        self.param_command(target, value).into_iter().collect()
     }
 
     /// Turns a value change from the document into an engine command, or
@@ -221,7 +246,8 @@ fn vkind(kind: &str) -> Option<VKind> {
 }
 
 /// A module's parameter values in engine order, clamped to their ranges.
-fn param_values(m: &Module) -> [f32; MAX_PARAMS] {
+fn param_values(doc: &Document, m: &Module) -> [f32; MAX_PARAMS] {
+    let m = &sat_modules::macros::resolved(doc, m);
     let mut v = [0.0; MAX_PARAMS];
     for (i, s) in sat_modules::params_of(&m.kind).iter().take(MAX_PARAMS).enumerate() {
         v[i] = s.clamp(m.params.get(s.key).copied().unwrap_or(s.default));
@@ -317,7 +343,7 @@ pub fn build_patch(doc: &Document, grid: GridId) -> Option<(Patch, Vec<ModuleId>
         for (j, r) in o.iter().take(3).enumerate() {
             vm.outs[j] = *r;
         }
-        vm.params = param_values(m);
+        vm.params = param_values(doc, m);
         out.push(vm);
         slots.push(m.id);
     }
@@ -361,7 +387,7 @@ pub fn build_fx(doc: &Document, grid: GridId) -> Option<(Vec<FxModule>, Vec<Modu
         for (j, r) in o.iter().take(2).enumerate() {
             fm.outs[j] = *r;
         }
-        let v = param_values(m);
+        let v = param_values(doc, m);
         fm.params[..FX_PARAMS - 1].copy_from_slice(&v[..FX_PARAMS - 1]);
         fm.params[FX_PARAMS - 1] = if f::bypassed(m) { 1.0 } else { 0.0 };
         out.push(fm);
@@ -402,7 +428,7 @@ fn build_instrument(
         return Some((NodeKind::Instrument(Box::new(Instrument::patch(events, patch))), targets));
     }
     if let Some(m) = doc.modules_on(g).find(|m| m.kind == ins::DRUM_SYNTH) {
-        let v = param_values(m);
+        let v = param_values(doc, m);
         let targets = sat_modules::params_of(&m.kind)
             .iter()
             .enumerate()
@@ -525,7 +551,25 @@ pub fn compile(doc: &Document, sample_rate: f64, max_block: usize) -> Result<Com
         }
         b.node(nid(t, SALT_BUS), NodeKind::Sum, inputs.into_iter().map(|(n, g, _)| (n, g)).collect());
     }
+    // macros fan out to the parameters they drive
+    let mut macros: HashMap<ParamTarget, Vec<_>> = HashMap::new();
+    for g in doc.grids.values() {
+        for (i, slot) in g.slots.iter() {
+            for b in slot.binds.iter() {
+                let target = ParamTarget::Module { module: b.module, param: b.param.clone() };
+                let spec = doc.modules.get(&b.module).and_then(|m| sat_modules::spec(&m.kind, &b.param));
+                if let (Some((node, param, _)), Some(spec)) = (params.get(&target), spec) {
+                    macros.entry(ParamTarget::Macro { grid: g.id, index: *i }).or_default().push((
+                        *node,
+                        *param,
+                        spec,
+                        b.clone(),
+                    ));
+                }
+            }
+        }
+    }
     let output = nid(doc.master, SALT_STRIP);
     let schedule = b.build(output).map_err(CompileError::Schedule)?;
-    Ok(Compiled { schedule, output, tempo, params, meters })
+    Ok(Compiled { schedule, output, tempo, params, macros, meters })
 }

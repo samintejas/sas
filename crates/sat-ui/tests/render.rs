@@ -60,6 +60,7 @@ fn renders_the_arrange_view() {
         steps: &sat_ui::steps::StepView::default(),
         view: sat_ui::shell::MainView::Arrange,
         grid: &sat_ui::grid::GridView::default(),
+        learn: false,
     };
     let (w, h) = (1280u32, 800u32);
     let mut scene = vello::Scene::new();
@@ -114,6 +115,7 @@ fn renders_the_mixer() {
         steps: &sat_ui::steps::StepView::default(),
         view: sat_ui::shell::MainView::Arrange,
         grid: &sat_ui::grid::GridView::default(),
+        learn: false,
     };
     let (w, h) = (1280u32, 800u32);
     let mut scene = vello::Scene::new();
