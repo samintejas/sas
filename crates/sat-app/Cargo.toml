@@ -21,6 +21,8 @@ vello.workspace = true
 winit.workspace = true
 cpal.workspace = true
 pollster.workspace = true
+rfd.workspace = true
+dirs.workspace = true
 
 [lints]
 workspace = true

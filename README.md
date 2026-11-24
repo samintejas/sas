@@ -11,9 +11,10 @@ repository follows the architecture doc's crate layout and build phases.
 ## Status
 
 Phase 1 (headless core) is done; its gate passes single-threaded (see below).
-Phase 2 has started: the app opens a window with the arrange view and piano
-roll from the prototype, drawn with vello, and plays the set through the
-default audio device.
+Phase 2 (shell + arrange) is in progress: the app opens, plays, mixes and
+saves a project file end to end. The arrange view, piano roll and mixer from
+the prototype are drawn with vello; the engine plays through the default
+audio device and feeds live per-track meters.
 
 | Crate | What it does | State |
 |---|---|---|
@@ -22,8 +23,8 @@ default audio device.
 | `sat-engine` | flat schedule, mixer strips, test synth, automation, loop, lock-free commands, schedule swap with state carry-over, offline render | done (single-threaded) |
 | `sat-compile` | document → schedule: track tree, solo, sends, placements and looping clips, live parameter mapping | done |
 | `sat-theme` | Dots design tokens (`assets/dots/tokens.json`) generated into a Rust `Palette`, plus spacing, radius and type scales | done |
-| `sat-ui` | vello + parley painter, icons, top bar, arrange view, piano roll, hit-testing, headless GPU rendering | in progress |
-| `sat-app` | the `sat` binary: winit window, vello surface, cpal output running the engine | in progress |
+| `sat-ui` | vello + parley painter, top bar, arrange view, piano roll, mixer, shared controls (faders, knobs, meters), hit-testing, headless GPU rendering | in progress |
+| `sat-app` | the `sat` binary: winit window, vello surface, cpal output running the engine, mixing gestures with undo, open / save / autosave | in progress |
 
 ## Phase 1 gate
 
@@ -66,18 +67,30 @@ cargo run --release -p sat-app            # opens the demo set
 cargo run --release -p sat-app -- my.sat  # opens a project bundle
 ```
 
-Space plays and stops, Home returns to the start, `l` toggles the loop, `m`
-and `s` mute and solo the selected track, and Ctrl+Z / Ctrl+Shift+Z undo and
-redo. Click a clip to show it in the piano roll, click the ruler to move the
-playhead, and click a group's chevron to fold it. Ctrl+scroll zooms and
-Shift+scroll moves through time. On Linux you need `libasound2-dev` and
-`libxkbcommon-dev` to build.
+| Keys and mouse | Does |
+|---|---|
+| Space, Home, `l` | play / stop, back to the start, loop on / off |
+| Tab, or the panel tabs | switch the bottom panel between the clip and the mixer |
+| drag a fader or knob | set level, pan or a send (Shift for fine steps, double-click to reset); one drag is one undo step |
+| `m` / `s` buttons, or the keys | mute / solo (the keys act on the selected track); the round button arms recording |
+| Ctrl+Z, Ctrl+Shift+Z | undo, redo |
+| Ctrl+O, Ctrl+S, Ctrl+Shift+S, Ctrl+N, Ctrl+Q | open, save, save as, new, quit (Cmd on macOS) |
+| drop a `.sat` folder on the window | open it |
+| click a clip, the ruler, a group's chevron | edit it in the piano roll, move the playhead, fold the group |
+| wheel, Shift+wheel, Ctrl+wheel | scroll tracks (or the mixer), scroll time, zoom |
+
+Edits are autosaved every two minutes, and on quit or before opening another
+project, into the bundle's `backups/` folder (the last 10 are kept); a project
+that was never saved autosaves under your data folder (`sat/autosave/`). On
+Linux you need `libasound2-dev` and `libxkbcommon-dev` to build; the file
+dialogs use the desktop portal, with `zenity` as a fallback.
 
 To render a frame without a window (any Vulkan, Metal or DX12 adapter,
 including Mesa's lavapipe):
 
 ```sh
-cargo run --release -p sat-ui --example screenshot -- arrange.png 2
+cargo run --release -p sat-ui --example screenshot -- arrange.png 2         # clip panel
+cargo run --release -p sat-ui --example screenshot -- mixer.png 2 mixer     # mixer panel
 ```
 
 ## Listening

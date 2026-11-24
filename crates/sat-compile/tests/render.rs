@@ -146,3 +146,19 @@ fn loop_wraps_inside_a_block() {
         assert!((0..1000).contains(&e.position()));
     }
 }
+
+#[test]
+fn strip_meters_follow_the_signal() {
+    let mut s = song();
+    s.h.apply("mute", [Op::SetTrackFlag { id: s.drums, flag: TrackFlag::Mute, on: true }]).unwrap();
+    let d = s.h.doc();
+    let c = compile(d, SR, BLOCK).unwrap();
+    let meter = |t| c.meter(t).expect("every strip has a meter").clone();
+    let (bass, drums, master) = (meter(s.bass), meter(s.drums), meter(d.master));
+    let (out, _) = sat_engine::render(c.schedule.clone(), 0, 24_000, BLOCK);
+    let peak = out.iter().fold(0f32, |m, v| m.max(v.abs()));
+    assert!(bass.take().0 > 0.0, "bass plays from the start");
+    assert_eq!(drums.take(), (0.0, 0.0), "muted strips read silent");
+    // master's meter is the output peak
+    assert!((master.take().0 - peak).abs() < 1e-6);
+}
