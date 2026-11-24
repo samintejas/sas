@@ -28,7 +28,7 @@ rtrb = "0.4"
 assert_no_alloc = "1.1"
 criterion = "0.8"
 vello = "0.12"
-parley = "0.13"
+parley = { version = "0.13", default-features = false, features = ["std"] }
 pollster = "0.4"
 png = "0.18"
 winit = "0.30"
