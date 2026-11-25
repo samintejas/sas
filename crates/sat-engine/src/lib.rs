@@ -17,6 +17,7 @@
 mod automation;
 mod fx;
 mod instrument;
+mod monitor;
 mod player;
 mod sampler;
 mod schedule;
@@ -29,6 +30,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 pub use automation::{AutoCurve, AutoPoint, Automation};
 pub use fx::{FX_PARAMS, Fx, FxKind, FxModule, MAX_FX, MAX_FX_REGS};
 pub use instrument::{Instrument, MAX_MODS, MAX_PARAMS, MAX_REGS, MAX_VOICES, NONE, Patch, VKind, VModule};
+pub use monitor::{InputChannel, Monitor, MonitorMode};
 pub use player::{AudioPlayer, AudioSeg};
 pub use sampler::{PlayMode, Sample};
 pub use schedule::{Buf, Meter, NodeId, NodeKind, Param, Schedule, ScheduleBuilder, ScheduleError, Strip, db_to_gain};
@@ -70,6 +72,9 @@ pub enum Command {
     },
     /// Every track plays the arrangement again.
     BackToArrangement,
+    /// Recording started or stopped (tracks monitoring on auto hear their
+    /// input while recording).
+    SetRecording(bool),
 }
 
 /// Read-only engine state for the UI, updated every block.
@@ -114,6 +119,9 @@ pub struct Engine {
     playing: bool,
     pos: i64,
     loop_range: Option<(i64, i64)>,
+    recording: bool,
+    /// The input of the current block.
+    input: Buf,
     tel: Arc<Telemetry>,
 }
 
@@ -151,7 +159,7 @@ pub fn engine(sched: Schedule, capacity: usize) -> (Engine, EngineHandle) {
     let (tx, rx) = rtrb::RingBuffer::new(capacity.max(1));
     let (gtx, grx) = rtrb::RingBuffer::new(16);
     let tel = Arc::new(Telemetry::default());
-    let e = Engine {
+    let mut e = Engine {
         sched: Box::new(sched),
         rx,
         garbage: gtx,
@@ -159,8 +167,12 @@ pub fn engine(sched: Schedule, capacity: usize) -> (Engine, EngineHandle) {
         playing: false,
         pos: 0,
         loop_range: None,
+        recording: false,
+        input: Buf { l: Vec::new(), r: Vec::new() },
         tel: tel.clone(),
     };
+    let n = e.sched.max_block();
+    e.input = Buf { l: vec![0.0; n], r: vec![0.0; n] };
     (e, EngineHandle { tx, garbage: grx, tel })
 }
 
@@ -204,6 +216,7 @@ impl Engine {
                     self.sched.launch(node, clip, at);
                 }
                 Command::BackToArrangement => self.sched.back_to_arrangement(),
+                Command::SetRecording(on) => self.recording = on,
             }
         }
         if let Some(p) = self.pending_garbage.take()
@@ -213,15 +226,26 @@ impl Engine {
         }
     }
 
-    /// Fills `left` and `right` (equal lengths) with the next frames.
+    /// Fills `left` and `right` (equal lengths) with the next frames, with
+    /// no input (monitored tracks hear silence).
     pub fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
+        self.process_with_input(&[], &[], left, right);
+    }
+
+    /// Like [`Engine::process`], with the device input for the same frames
+    /// (missing frames are silence).
+    pub fn process_with_input(&mut self, in_l: &[f32], in_r: &[f32], left: &mut [f32], right: &mut [f32]) {
         debug_assert_eq!(left.len(), right.len());
         self.handle_commands();
-        let max = self.sched.max_block();
+        let max = self.sched.max_block().min(self.input.l.len());
         let mut done = 0;
         let (mut pl, mut pr) = (0f32, 0f32);
         while done < left.len() {
             let n = (left.len() - done).min(max);
+            for (k, (l, r)) in self.input.l[..n].iter_mut().zip(&mut self.input.r[..n]).enumerate() {
+                *l = in_l.get(done + k).copied().unwrap_or(0.0);
+                *r = in_r.get(done + k).copied().unwrap_or(0.0);
+            }
             self.run_block(n);
             let out = self.sched.output();
             for k in 0..n {
@@ -243,7 +267,7 @@ impl Engine {
     /// Runs one block of `n` frames, splitting it where the loop wraps.
     fn run_block(&mut self, n: usize) {
         if !self.playing {
-            self.sched.run(0, n, None);
+            self.sched.run(0, n, None, &self.input, self.recording);
             return;
         }
         let mut off = 0;
@@ -254,7 +278,7 @@ impl Engine {
             {
                 len = len.min((e - self.pos) as usize);
             }
-            self.sched.run(off, len, Some(self.pos));
+            self.sched.run(off, len, Some(self.pos), &self.input, self.recording);
             self.pos += len as i64;
             off += len;
             if let Some((s, e)) = self.loop_range
@@ -287,4 +311,44 @@ pub fn render(sched: Schedule, start: i64, frames: usize, block: usize) -> (Vec<
         i += n;
     }
     (l, r)
+}
+
+#[cfg(test)]
+mod monitor_tests {
+    use super::*;
+
+    fn sched(mode: MonitorMode) -> Schedule {
+        let mut b = ScheduleBuilder::new(48_000.0, 64);
+        let m = NodeId(1);
+        b.node(m, NodeKind::Monitor(Box::new(Monitor::new(mode, InputChannel::Left))), vec![]);
+        b.build(m).unwrap()
+    }
+
+    fn run(e: &mut Engine) -> Vec<f32> {
+        let input = vec![0.5f32; 64];
+        let (mut l, mut r) = (vec![0.0; 64], vec![0.0; 64]);
+        e.process_with_input(&input, &[0.25; 64], &mut l, &mut r);
+        assert_eq!(l, r, "the first channel on both sides");
+        l
+    }
+
+    #[test]
+    fn monitors_follow_their_mode_and_ramp() {
+        let (mut e, mut h) = engine(sched(MonitorMode::Auto), 8);
+        let v = run(&mut e);
+        assert!(v[0] > 0.0 && v[0] < 0.1 && v[63] == 0.5, "ramps in while stopped");
+        assert_eq!(run(&mut e)[0], 0.5);
+        h.send(Command::Play).unwrap();
+        assert_eq!(run(&mut e)[63], 0.0, "auto: quiet while playing back");
+        h.send(Command::SetRecording(true)).unwrap();
+        run(&mut e);
+        assert_eq!(run(&mut e)[0], 0.5, "and heard while recording");
+        let (mut off, _) = engine(sched(MonitorMode::Off), 8);
+        assert!(run(&mut off).iter().all(|x| *x == 0.0));
+        // without input the monitor hears silence
+        let (mut e, _) = engine(sched(MonitorMode::In), 8);
+        let (mut l, mut r) = (vec![1.0; 64], vec![1.0; 64]);
+        e.process(&mut l, &mut r);
+        assert!(l.iter().all(|x| *x == 0.0));
+    }
 }

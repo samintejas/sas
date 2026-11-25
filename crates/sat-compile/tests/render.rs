@@ -487,3 +487,34 @@ fn audio_clips_play_their_comp_with_fades_and_crossfades() {
     let c = sat_compile::compile_with(h.doc(), SR, BLOCK, &sat_compile::Sounds::new()).unwrap();
     assert_eq!(rms(&sat_engine::render(c.schedule, 0, 4 * 24_000, BLOCK).0), 0.0);
 }
+
+#[test]
+fn armed_tracks_monitor_their_input_through_their_strip() {
+    let mut s = song();
+    let run = |d: &Document, play: bool| {
+        let c = compile(d, SR, BLOCK).unwrap();
+        let (mut e, mut h) = engine(c.schedule, 4);
+        if play {
+            h.send(Command::Locate(10_000_000)).unwrap();
+            h.send(Command::Play).unwrap();
+        }
+        let input = vec![0.25f32; BLOCK];
+        let (mut l, mut r) = (vec![0.0; BLOCK], vec![0.0; BLOCK]);
+        for _ in 0..4 {
+            e.process_with_input(&input, &input, &mut l, &mut r);
+        }
+        rms(&l)
+    };
+    assert_eq!(run(s.h.doc(), false), 0.0, "nothing armed: the input is not heard");
+    s.h.apply("arm", [Op::SetTrackFlag { id: s.lead, flag: TrackFlag::Arm, on: true }]).unwrap();
+    let heard = run(s.h.doc(), false);
+    assert!(heard > 0.05, "auto: heard while stopped ({heard})");
+    assert_eq!(run(s.h.doc(), true), 0.0, "auto: not while playing back (past the song's end)");
+    s.h.apply("in", [Op::SetMonitor { id: s.lead, monitor: Monitor::In }]).unwrap();
+    assert!(run(s.h.doc(), true) > 0.05, "in: always");
+    // through the strip: the fader turns it down
+    s.h.apply("down", [Op::SetValue { target: ParamTarget::Gain(s.lead), value: -20.0 }]).unwrap();
+    assert!(run(s.h.doc(), true) < heard * 0.2);
+    s.h.apply("off", [Op::SetMonitor { id: s.lead, monitor: Monitor::Off }]).unwrap();
+    assert_eq!(run(s.h.doc(), false), 0.0);
+}

@@ -496,3 +496,16 @@ fn audio_clips_show_take_lanes_and_fade_handles() {
     // note clips have no fades
     assert!(l.clips.iter().filter(|c| d.doc.clips[&c.clip].audio.is_none()).all(|c| c.fades.is_none()));
 }
+
+#[test]
+fn armed_tracks_show_a_monitor_switch() {
+    let (d, l) = layout();
+    let vox = d.doc.tracks.values().find(|t| t.name == "vox").unwrap().id;
+    let row = l.rows.iter().find(|r| r.track == vox).unwrap();
+    assert!(row.monitor, "the demo's vox is armed");
+    let hc = sat_ui::arrange::header_controls(row, l.headers);
+    let parts = sat_ui::arrange::monitor_parts(hc.monitor.unwrap());
+    assert_eq!(l.hit(parts[2].1.center()), Hit::Monitor(vox, Monitor::Off));
+    let bass = d.doc.tracks.values().find(|t| t.name == "bass").unwrap().id;
+    assert!(!l.rows.iter().find(|r| r.track == bass).unwrap().monitor);
+}

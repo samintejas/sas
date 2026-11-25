@@ -45,7 +45,13 @@ and with the loop on every time round the loop is another take of the same
 clip, comped in where it was sung. Selecting an audio clip shows its comp
 in the bottom panel with its gain, fades and crossfade time. Setting
 `SAT_INPUT_WAV=some.wav` records from that file (played in real time)
-instead of a device, for headless runs. The arrange view, piano roll and mixer from
+instead of a device, for headless runs. A track hears its input through its
+fx and strip when its monitor switch (in the header of an armed track) is
+on "in", or on "auto" while it is armed and the transport is stopped or
+recording. Recording adds a recorder module to the track's source grid
+(its `input` picks both input channels or one) and wires new clips to it;
+takes are shifted by the input and output latency the device reports, so
+they line up with what was heard. The arrange view, piano roll and mixer from
 the prototype are drawn with vello; the engine plays through the default
 audio device and feeds live per-track meters.
 
@@ -107,6 +113,7 @@ cargo run --release -p sat-app -- my.sat  # opens a project bundle
 |---|---|
 | Space, Home, `l` | play / stop, back to the start, loop on / off |
 | top bar: stop, play, record, loop | stop (again: back to the start), play / pause, record onto the armed tracks (arming the selected track if none is; starts the transport; again: stop recording, keep playing), loop on / off |
+| an armed track's in / auto / off | monitor its input always, while stopped or recording, or never |
 | audio clip panel: drag gain, fade in, fade out or xfade up / down, double-click | change it (shift for fine steps), reset it |
 | Ctrl+K (Cmd+K), or the search box | the command palette: type part of a track's name and what to open (`bass fx`, `vox ins`, `mixer`), arrows and Enter to run |
 | Ctrl+1 to Ctrl+5 | session, arrangement, and the selected track's source, instrument or fx grid |

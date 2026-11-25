@@ -131,6 +131,8 @@ fn instrument_patches_drums_and_samplers_do_not_allocate() {
         ],
     )
     .unwrap();
+    // the lead monitors its input
+    s.h.apply("monitor", [Op::SetMonitor { id: s.lead, monitor: Monitor::In }]).unwrap();
     // and a full fx chain on the bass
     let fx_grid = s.h.doc().tracks[&s.bass].fx_grids[0];
     use sat_modules::fx;
@@ -150,9 +152,11 @@ fn instrument_patches_drums_and_samplers_do_not_allocate() {
     let mut r = vec![0.0f32; BLOCK];
     h.send(Command::Play).unwrap();
     h.send(cutoff).unwrap();
+    h.send(Command::SetRecording(true)).unwrap();
+    let input = vec![0.1f32; BLOCK];
     assert_no_alloc(|| {
         for _ in 0..400 {
-            e.process(&mut l, &mut r);
+            e.process_with_input(&input, &input, &mut l, &mut r);
         }
     });
     assert!(l.iter().any(|v| *v != 0.0));

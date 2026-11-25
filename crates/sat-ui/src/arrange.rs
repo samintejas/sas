@@ -120,6 +120,8 @@ pub struct Row {
     pub h: f64,
     /// Nesting depth in the group tree.
     pub depth: usize,
+    /// The header shows the track's monitor switch (armed, or not on auto).
+    pub monitor: bool,
 }
 
 /// One clip placement on screen.
@@ -193,6 +195,8 @@ pub enum Hit {
     Solo(TrackId),
     /// A header's record-arm button.
     Arm(TrackId),
+    /// A part of a header's monitor switch.
+    Monitor(TrackId, Monitor),
     /// A header's fader.
     Fader(TrackId),
     /// A take lane of an audio clip, at a clip time.
@@ -369,13 +373,15 @@ impl ArrangeLayout {
             };
             let lanes = if kind == RowKind::Track { take_lanes(doc, t) } else { 0 };
             let h = row_height(kind) + if lanes > 0 { lanes as f64 * TAKE_H + 4.0 } else { 0.0 };
-            rows.push(Row { track: t, kind, y, h, depth: depth(t) });
+            let tr = &doc.tracks[&t];
+            let monitor = kind == RowKind::Track && (tr.armed || tr.monitor != Monitor::Auto);
+            rows.push(Row { track: t, kind, y, h, depth: depth(t), monitor });
             y += h;
             if matches!(kind, RowKind::Track | RowKind::Group) && !st.hidden_lanes.contains(&t) {
                 for target in crate::automation::lane_targets(t) {
                     if let Some(l) = crate::automation::lane_of(doc, &target) {
                         let k = RowKind::Lane(l.id);
-                        rows.push(Row { track: t, kind: k, y, h: row_height(k), depth: depth(t) });
+                        rows.push(Row { track: t, kind: k, y, h: row_height(k), depth: depth(t), monitor: false });
                         y += row_height(k);
                     }
                 }
@@ -554,6 +560,9 @@ impl ArrangeLayout {
             if inside(hc.arm) {
                 return Hit::Arm(t);
             }
+            if let Some((m, _)) = hc.monitor.and_then(|r| monitor_parts(r).into_iter().find(|(_, p)| p.contains(pt))) {
+                return Hit::Monitor(t, m);
+            }
             if hc.fader.is_some_and(|f| pt.x >= f.x0 - 6.0 && pt.x <= f.x1 + 6.0 && (pt.y - f.y).abs() <= 7.0) {
                 return Hit::Fader(t);
             }
@@ -608,6 +617,22 @@ pub struct HeaderControls {
     pub lane_add: Option<Rect>,
     /// A lane header's remove-lane button.
     pub lane_remove: Option<Rect>,
+    /// The monitor switch: in, auto, off.
+    pub monitor: Option<Rect>,
+}
+
+/// The monitor modes, in the order the switch shows them.
+pub const MONITOR_MODES: [(Monitor, &str); 3] = [(Monitor::In, "in"), (Monitor::Auto, "auto"), (Monitor::Off, "off")];
+
+/// The three parts of a monitor switch.
+pub fn monitor_parts(r: Rect) -> [(Monitor, Rect); 3] {
+    let w = r.width() / 3.0;
+    let mut k = 0.0;
+    MONITOR_MODES.map(|(m, _)| {
+        let x = r.x0 + w * k;
+        k += 1.0;
+        (m, Rect::new(x, r.y0, x + w, r.y1))
+    })
 }
 
 /// The header controls of `row` in the header column `headers`.
@@ -637,6 +662,10 @@ pub fn header_controls(row: &Row, headers: Rect) -> HeaderControls {
                 fader: Some(HFader { x0: x1 - 98.0, x1: x1 - 30.0, y: y0 + TRACK_H - 13.0 }),
                 meter: Some(Rect::new(x1 - 16.0, y0 + 10.0, x1 - 9.0, y0 + TRACK_H - 6.0)),
                 auto: button(x1 - 124.0, cy),
+                monitor: row.monitor.then(|| {
+                    let cy = y0 + TRACK_H - 13.0;
+                    Rect::new(headers.x0 + indent - 2.0, cy - 9.0, headers.x0 + indent + 94.0, cy + 9.0)
+                }),
                 ..Default::default()
             }
         }
@@ -906,13 +935,25 @@ fn draw_row(
             } else {
                 let cy = hr.y0 + 17.0;
                 p.text_fit(hr.x0 + indent, cy, &t.name, &TextStyle::sans(13.0, c.text_strong).medium(), 70.0);
-                p.text_fit(
-                    hr.x0 + indent,
-                    hr.y0 + TRACK_H - 13.0,
-                    &track_label(doc, t),
-                    &TextStyle::sans(11.5, c.text_secondary),
-                    hr.width() - indent - 112.0,
-                );
+                if let Some(mr) = hc.monitor {
+                    p.rrect_stroke(mr.inset(-0.5), 4.0, 1.0, c.border_default);
+                    for ((m, part), (_, label)) in monitor_parts(mr).into_iter().zip(MONITOR_MODES) {
+                        let on = t.monitor == m;
+                        if on {
+                            p.rrect(part.inset(-2.0), 3.0, c.bg_fill);
+                        }
+                        let col = if on { c.accent_primary } else { c.text_secondary };
+                        p.text(part.center().x, part.center().y, label, &TextStyle::mono(10.5, col), Align::Center);
+                    }
+                } else {
+                    p.text_fit(
+                        hr.x0 + indent,
+                        hr.y0 + TRACK_H - 13.0,
+                        &track_label(doc, t),
+                        &TextStyle::sans(11.5, c.text_secondary),
+                        hr.width() - indent - 112.0,
+                    );
+                }
                 draw_mute_solo(p, th, &hc, t);
                 draw_auto_button(p, th, doc, st, &hc, t);
                 if let Some(ar) = hc.arm {
