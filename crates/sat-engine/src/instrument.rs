@@ -7,9 +7,13 @@
 //! no allocation. Unconnected inputs fall back to sensible defaults: an
 //! oscillator's pitch follows the voice, a vca's cv is 1, an envelope's gate
 //! is the voice's gate.
+//!
+//! Control signals are plain numbers: pitch in MIDI notes, gates and
+//! envelopes 0–1, lfos and random -1–1 (scaled by depth). A signal is "high"
+//! (for gates, triggers and logic) while it is above 0.
 
 use sat_dsp::drums::{self, Kit};
-use sat_dsp::{Adsr, AdsrParams, Mode, Noise, Osc, Shape, Svf, db_gain, midi_hz, pan_gains};
+use sat_dsp::{Adsr, AdsrParams, Mode, Noise, Osc, Shape, Svf, db_gain, midi_hz, pan_gains, scale};
 
 use std::sync::Arc;
 
@@ -18,7 +22,7 @@ use crate::sequencer::{Cue, Sequencer, SessionClip};
 use crate::synth::NoteEvent;
 
 /// Most modules in a patch.
-pub const MAX_MODS: usize = 24;
+pub const MAX_MODS: usize = 32;
 /// Most registers (connected outputs) in a patch.
 pub const MAX_REGS: usize = 64;
 /// Most parameters per module.
@@ -46,10 +50,39 @@ pub enum VKind {
     Adsr,
     /// In: audio, cv. Out: audio. Params: level (dB).
     Vca,
-    /// Out: -1–1 scaled by depth. Params: rate (Hz), wave, depth.
+    /// In: rate mod (±1 = ±4 oct), sync (restarts on a rising edge). Out:
+    /// -1–1 scaled by depth, 0–1 scaled by depth. Params: rate (Hz), wave, depth.
     Lfo,
     /// In: audio. Params: level (dB), pan.
     VoiceOut,
+    /// In: 1, 2, 3. Out: their sum. Params: gain 1, 2, 3 (-1–1), offset.
+    CvMix,
+    /// In: signal, cv (default 1). Out: signal × amount × cv + offset.
+    /// Params: amount (-1–1), offset.
+    Atten,
+    /// In: pitch (default the voice's), cv. Out: pitch snapped to a scale, a
+    /// trigger whenever the note changes. Params: root, scale, transpose (st),
+    /// cv range (st).
+    Quantize,
+    /// In: signal (default noise), trigger (default the gate). Out: the
+    /// signal as it was at the last rising edge.
+    SampleHold,
+    /// In: signal. Out: the signal, smoothed. Params: rise (s), fall (s).
+    Slew,
+    /// Out: a new random value `rate` times a second (stepped and smoothly
+    /// joined). Params: rate (Hz), depth.
+    Random,
+    /// In: a, b (default 0). Out: 1 while a > b + threshold, its inverse.
+    /// Params: threshold.
+    Compare,
+    /// In: a, b. Out: and, or, xor.
+    Logic,
+    /// In: clock, reset. Out: high with every `div`th clock pulse. Params: div.
+    ClockDiv,
+    /// In: audio, carrier (audio). Out: audio × carrier, blended. Params: mix.
+    Ring,
+    /// In: audio, fold mod. Out: folded audio. Params: fold, bias, mod amount.
+    Fold,
 }
 
 /// One module of a patch.
@@ -79,6 +112,24 @@ struct ModState {
     svf: Svf,
     adsr: Adsr,
     noise: Noise,
+    /// Held or smoothed values.
+    a: f32,
+    b: f32,
+    /// A counter (clock div pulses, trigger samples left, started flag).
+    n: u32,
+    /// The last input was high (for rising edges).
+    hi: bool,
+    hi2: bool,
+}
+
+/// Is a control signal high?
+fn high(x: f32) -> bool {
+    x > 0.0
+}
+
+/// One-pole smoothing coefficient that gets about 99% of the way in `secs`.
+fn smooth_coef(secs: f32, sr: f32) -> f32 {
+    (-4.6 / (secs.max(1e-5) * sr)).exp()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -427,13 +478,111 @@ fn run_patch(patch: &Patch, voices: &mut [PVoice; MAX_VOICES], sr: f32) -> (f32,
                     (e, 0.0, 0.0)
                 }
                 VKind::Vca => (ins(0, 0.0) * ins(1, 1.0) * db_gain(p[0]), 0.0, 0.0),
-                VKind::Lfo => (st.osc.next(Shape::from_index(p[1]), p[0] / sr, 0.0) * p[2], 0.0, 0.0),
+                VKind::Lfo => {
+                    let sync = high(ins(1, 0.0));
+                    if sync && !st.hi {
+                        st.osc.phase = 0.0;
+                    }
+                    st.hi = sync;
+                    let hz = p[0] * 2f32.powf(ins(0, 0.0).clamp(-2.0, 2.0) * 4.0);
+                    let y = st.osc.next(Shape::from_index(p[1]), hz / sr, 0.0);
+                    (y * p[2], (y + 1.0) * 0.5 * p[2], 0.0)
+                }
                 VKind::VoiceOut => {
                     let s = ins(0, 0.0) * db_gain(p[0]) * v.fade.max(0.0);
                     let (gl, gr) = pan_gains(p[1]);
                     l += s * gl;
                     r += s * gr;
                     (0.0, 0.0, 0.0)
+                }
+                VKind::CvMix => (ins(0, 0.0) * p[0] + ins(1, 0.0) * p[1] + ins(2, 0.0) * p[2] + p[3], 0.0, 0.0),
+                VKind::Atten => (ins(0, 0.0) * p[0] * ins(1, 1.0) + p[1], 0.0, 0.0),
+                VKind::Quantize => {
+                    let x = ins(0, v.pitch) + ins(1, 0.0) * p[3] + p[2];
+                    let q = scale::quantize(x, p[0].round() as i32, p[1].round().max(0.0) as usize);
+                    // a 1 ms trigger when the note changes (and on the first sample)
+                    if st.n == 0 || q != st.a {
+                        st.a = q;
+                        st.b = (0.001 * sr).max(1.0);
+                    }
+                    st.n = 1;
+                    let trig = if st.b > 0.0 {
+                        st.b -= 1.0;
+                        1.0
+                    } else {
+                        0.0
+                    };
+                    (q, trig, 0.0)
+                }
+                VKind::SampleHold => {
+                    let x = if m.ins[0] == NONE { st.noise.sample() } else { ins(0, 0.0) };
+                    let t = high(ins(1, g));
+                    if t && !st.hi {
+                        st.a = x;
+                    }
+                    st.hi = t;
+                    (st.a, 0.0, 0.0)
+                }
+                VKind::Slew => {
+                    let x = ins(0, 0.0);
+                    if st.n == 0 {
+                        st.a = x;
+                        st.n = 1;
+                    }
+                    let c = smooth_coef(if x > st.a { p[0] } else { p[1] }, sr);
+                    st.a = x + (st.a - x) * c;
+                    (st.a, 0.0, 0.0)
+                }
+                VKind::Random => {
+                    if st.n == 0 {
+                        st.a = st.noise.sample();
+                        st.b = st.noise.sample();
+                        st.n = 1;
+                    }
+                    st.osc.phase += p[0].max(0.0) / sr;
+                    if st.osc.phase >= 1.0 {
+                        st.osc.phase -= st.osc.phase.floor();
+                        st.a = st.b;
+                        st.b = st.noise.sample();
+                    }
+                    let t = st.osc.phase;
+                    let k = t * t * (3.0 - 2.0 * t);
+                    (st.b * p[1], (st.a + (st.b - st.a) * k) * p[1], 0.0)
+                }
+                VKind::Compare => {
+                    let gt = ins(0, 0.0) > ins(1, 0.0) + p[0];
+                    (if gt { 1.0 } else { 0.0 }, if gt { 0.0 } else { 1.0 }, 0.0)
+                }
+                VKind::Logic => {
+                    let (a, b) = (high(ins(0, 0.0)), high(ins(1, 0.0)));
+                    let f = |x: bool| if x { 1.0 } else { 0.0 };
+                    (f(a && b), f(a || b), f(a ^ b))
+                }
+                VKind::ClockDiv => {
+                    let reset = high(ins(1, 0.0));
+                    if reset && !st.hi2 {
+                        st.n = 0;
+                    }
+                    st.hi2 = reset;
+                    let clk = high(ins(0, 0.0));
+                    let div = p[0].round().max(1.0) as u32;
+                    if clk && !st.hi {
+                        // the first pulse after a reset passes
+                        st.a = if st.n % div == 0 { 1.0 } else { 0.0 };
+                        st.n = st.n.wrapping_add(1);
+                    }
+                    st.hi = clk;
+                    (if clk { st.a } else { 0.0 }, 0.0, 0.0)
+                }
+                VKind::Ring => {
+                    let a = ins(0, 0.0);
+                    let mix = p[0].clamp(0.0, 1.0);
+                    (a * (1.0 - mix) + a * ins(1, 0.0) * mix, 0.0, 0.0)
+                }
+                VKind::Fold => {
+                    let gain = 1.0 + 7.0 * (p[0] + ins(1, 0.0) * p[2]).clamp(0.0, 1.0);
+                    let y = (core::f32::consts::FRAC_PI_2 * (ins(0, 0.0) * gain + p[1])).sin();
+                    (y, 0.0, 0.0)
                 }
             };
             for (j, o) in [o0, o1, o2].into_iter().enumerate() {
@@ -519,6 +668,152 @@ mod tests {
         assert!(!i.set_param(40, 0, 0.0));
         let v = render(&mut i, 1024);
         assert!(v.iter().all(|x| x.abs() < 1e-4));
+    }
+
+    /// Plays one note of `pitch` held for a second through `mods`, with a
+    /// voice out reading register `probe`; returns the left channel.
+    fn probe(mut mods: Vec<VModule>, probe: u8, pitch: u8, frames: usize) -> Vec<f32> {
+        let mut out = VModule::new(VKind::VoiceOut);
+        out.ins[0] = probe;
+        mods.push(out);
+        let ev = vec![NoteEvent { at: 0, len: 48_000, pitch, velocity: 1.0 }];
+        render(&mut Instrument::patch(ev, Patch { mods }), frames)
+    }
+
+    fn note_in() -> VModule {
+        let mut n = VModule::new(VKind::NoteIn);
+        n.outs = [0, 1, 2];
+        n.params[0] = 1.0;
+        n
+    }
+
+    fn rising(v: &[f32]) -> usize {
+        v.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count()
+    }
+
+    #[test]
+    fn the_quantizer_snaps_pitch_and_triggers_on_change() {
+        let mut q = VModule::new(VKind::Quantize);
+        q.ins[0] = 0;
+        q.outs = [3, 4, NONE];
+        q.params[..4].copy_from_slice(&[0.0, 1.0, 0.0, 12.0]); // c major
+        let v = probe(vec![note_in(), q], 3, 61, 512);
+        assert!((v[300] - 60.0).abs() < 1e-4, "c# to c: {}", v[300]);
+        // the cv input adds up to the range: +0.5 of 12 st from an atten offset
+        let mut a = VModule::new(VKind::Atten);
+        a.outs[0] = 5;
+        a.params[..2].copy_from_slice(&[1.0, 0.5]);
+        let mut q2 = q;
+        q2.ins[1] = 5;
+        let v = probe(vec![note_in(), a, q2], 3, 60, 512);
+        assert!((v[300] - 65.0).abs() < 1e-4, "c + 6 st to f: {}", v[300]);
+        // the trigger fires once, for about a millisecond
+        let t = probe(vec![note_in(), q], 4, 61, 4096);
+        assert!(t[20] > 0.0 && t[2000] == 0.0);
+    }
+
+    #[test]
+    fn sample_and_hold_holds_noise_until_the_next_trigger() {
+        // an lfo square as the trigger, 100 Hz
+        let mut lfo = VModule::new(VKind::Lfo);
+        lfo.outs = [3, NONE, NONE];
+        lfo.params[..3].copy_from_slice(&[100.0, 3.0, 1.0]);
+        let mut sh = VModule::new(VKind::SampleHold);
+        sh.ins[1] = 3;
+        sh.outs[0] = 4;
+        let v = probe(vec![note_in(), lfo, sh], 4, 60, 9600);
+        let mut levels = v[200..].to_vec();
+        levels.dedup();
+        // 0.2 s of 100 Hz: about 20 held values, each held for 480 samples
+        assert!((15..=25).contains(&levels.len()), "{}", levels.len());
+        assert!(v.iter().all(|x| x.abs() <= 1.0));
+    }
+
+    #[test]
+    fn slew_glides_and_random_steps_at_its_rate() {
+        let mut sl = VModule::new(VKind::Slew);
+        sl.ins[0] = 1; // the gate, 0 to 1
+        sl.outs[0] = 3;
+        sl.params[..2].copy_from_slice(&[0.01, 0.01]);
+        let v = probe(vec![note_in(), sl], 3, 60, 4096);
+        // starts where its input starts (the gate, 1)
+        assert!((v[1000] - 1.0).abs() < 1e-3);
+        let mut sl2 = sl;
+        sl2.ins[0] = 5;
+        let mut lfo = VModule::new(VKind::Lfo);
+        lfo.outs = [NONE, 5, NONE];
+        lfo.params[..3].copy_from_slice(&[10.0, 3.0, 1.0]); // square, 0–1
+        let v = probe(vec![note_in(), lfo, sl2], 3, 60, 4800);
+        // the square drops at 2400; half the fall time later the slew is about 10% of the way down
+        assert!((v[2399] - 1.0).abs() < 1e-3);
+        assert!(v[2400 + 240] > 0.05 && v[2400 + 240] < 0.2, "{}", v[2640]);
+        let mut rnd = VModule::new(VKind::Random);
+        rnd.outs = [3, 4, NONE];
+        rnd.params[..2].copy_from_slice(&[10.0, 1.0]);
+        let step = probe(vec![note_in(), rnd], 3, 60, 48_000);
+        let mut held = step[200..47_000].to_vec();
+        held.dedup();
+        assert!((9..=11).contains(&held.len()), "10 hz: {}", held.len());
+        let smooth = probe(vec![note_in(), rnd], 4, 60, 48_000);
+        let jump = smooth[200..47_000].windows(2).fold(0f32, |a, w| a.max((w[1] - w[0]).abs()));
+        assert!(jump < 0.01, "smooth: {jump}");
+    }
+
+    #[test]
+    fn clock_division_and_logic() {
+        let mut lfo = VModule::new(VKind::Lfo);
+        lfo.outs = [3, NONE, NONE];
+        lfo.params[..3].copy_from_slice(&[100.0, 3.0, 1.0]);
+        let mut div = VModule::new(VKind::ClockDiv);
+        div.ins[0] = 3;
+        div.outs[0] = 4;
+        div.params[0] = 4.0;
+        let clock = probe(vec![note_in(), lfo, div], 3, 60, 48_000);
+        let divided = probe(vec![note_in(), lfo, div], 4, 60, 48_000);
+        let (c, d) = (rising(&clock), rising(&divided));
+        assert!((99..=101).contains(&c) && (24..=26).contains(&d), "{c} {d}");
+        // clock and divided: and is the divided pulses, xor the rest
+        let mut lg = VModule::new(VKind::Logic);
+        lg.ins = [3, 4, NONE, NONE];
+        lg.outs = [5, 6, 7];
+        let and = probe(vec![note_in(), lfo, div, lg], 5, 60, 48_000);
+        let xor = probe(vec![note_in(), lfo, div, lg], 7, 60, 48_000);
+        assert_eq!(rising(&and), d);
+        assert_eq!(rising(&xor), c - d);
+        // cv mix adds with gains and an offset: gate·0.5 + vel·0.25 + 0.1
+        let mut mx = VModule::new(VKind::CvMix);
+        mx.ins = [1, 2, NONE, NONE];
+        mx.outs[0] = 3;
+        mx.params[..4].copy_from_slice(&[0.5, 0.25, 1.0, 0.1]);
+        let v = probe(vec![note_in(), mx], 3, 60, 512);
+        assert!((v[300] - 0.85).abs() < 1e-5, "{}", v[300]);
+    }
+
+    #[test]
+    fn ring_mod_and_folder_shape_audio() {
+        let mut a = VModule::new(VKind::Vco);
+        a.ins[0] = 0;
+        a.outs[0] = 3;
+        a.params[..5].copy_from_slice(&[0.0, 0.0, 0.0, 0.0, 1.0]);
+        let mut b = a;
+        b.outs[0] = 4;
+        b.params[1] = 7.0;
+        let mut ring = VModule::new(VKind::Ring);
+        ring.ins = [3, 4, NONE, NONE];
+        ring.outs[0] = 5;
+        ring.params[0] = 1.0;
+        let v = probe(vec![note_in(), a, b, ring], 5, 69, 4800);
+        let peak = v[480..].iter().fold(0f32, |m, x| m.max(x.abs()));
+        assert!(peak > 0.5 && peak <= 1.0, "{peak}");
+        let mut f = VModule::new(VKind::Fold);
+        f.ins[0] = 3;
+        f.outs[0] = 6;
+        f.params[..3].copy_from_slice(&[1.0, 0.0, 0.0]);
+        let folded = probe(vec![note_in(), a, f], 6, 69, 4800);
+        let plain = probe(vec![note_in(), a], 3, 69, 4800);
+        // folding adds zero crossings (harmonics) and stays bounded
+        assert!(rising(&folded[480..]) > rising(&plain[480..]) * 2);
+        assert!(folded.iter().all(|x| x.abs() <= 1.0));
     }
 
     #[test]
