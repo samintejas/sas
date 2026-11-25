@@ -95,13 +95,11 @@ pub fn copy_ops(doc: &Document, p: &Placement, span: Span) -> Option<(ClipId, Pl
     Some((id, pid, ops))
 }
 
-/// Ops that remove placement `p`, and its clip too when nothing else plays
-/// it (no other placement, no session slot), so the clip dock stays tidy.
+/// Ops that remove placement `p` from the arrangement. The clip itself
+/// stays in the clip bank (unused if nothing else plays it), so it can be
+/// placed again; it is deleted for good from the bank.
 pub fn remove_ops(doc: &Document, p: PlacementId) -> Vec<Op> {
-    let Some(pl) = doc.placements.get(&p) else { return Vec::new() };
-    let others = doc.placements.values().any(|q| q.id != p && q.clip == pl.clip);
-    let slotted = doc.slots.values().any(|c| *c == pl.clip);
-    if others || slotted { vec![Op::RemovePlacement { id: p }] } else { vec![Op::RemoveClip { id: pl.clip }] }
+    if doc.placements.contains_key(&p) { vec![Op::RemovePlacement { id: p }] } else { Vec::new() }
 }
 
 #[cfg(test)]
@@ -160,17 +158,13 @@ mod tests {
     }
 
     #[test]
-    fn removing_the_last_placement_removes_the_clip() {
+    fn removing_the_last_placement_keeps_the_clip() {
         let doc = crate::demo::demo().doc;
-        let lone = doc
-            .placements
-            .values()
-            .find(|p| {
-                doc.placements.values().filter(|q| q.clip == p.clip).count() == 1
-                    && !doc.slots.values().any(|c| *c == p.clip)
-            })
-            .expect("a clip placed once");
-        assert_eq!(remove_ops(&doc, lone.id), vec![Op::RemoveClip { id: lone.clip }]);
+        let p = doc.placements.values().next().unwrap();
+        assert_eq!(remove_ops(&doc, p.id), vec![Op::RemovePlacement { id: p.id }]);
+        let mut h = sat_doc::History::new(doc.clone(), 10);
+        h.apply("delete", remove_ops(&doc, p.id)).unwrap();
+        assert!(h.doc().clips.contains_key(&p.clip));
     }
 
     #[test]

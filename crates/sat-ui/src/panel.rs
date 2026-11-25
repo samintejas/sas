@@ -19,6 +19,8 @@ pub enum PanelView {
     Mixer,
     /// The selected track's macros.
     Macros,
+    /// The clip bank: every clip, to place in the arrangement or session.
+    Bank,
 }
 
 /// The tabs on the left of the bar.
@@ -30,10 +32,16 @@ pub enum Tab {
     Macros,
     /// Mixer.
     Mixer,
+    /// Clip bank.
+    Bank,
 }
 
-const TABS: [(Tab, Icon, &str); 3] =
-    [(Tab::Clip, Icon::Panel, "clip"), (Tab::Macros, Icon::Grid, "macros"), (Tab::Mixer, Icon::Sliders, "mixer")];
+const TABS: [(Tab, Icon, &str); 4] = [
+    (Tab::Clip, Icon::Panel, "clip"),
+    (Tab::Macros, Icon::Grid, "macros"),
+    (Tab::Mixer, Icon::Sliders, "mixer"),
+    (Tab::Bank, Icon::Lines, "bank"),
+];
 
 /// Width of a tab with an icon and a mono-12 label. Geist Mono advances are
 /// 0.6 em, so this needs no font access and hit testing can use it.
@@ -42,7 +50,7 @@ pub fn tab_width(label: &str, icon: bool) -> f64 {
 }
 
 /// Rectangles of the view tabs in a panel at `r`.
-pub fn tab_rects(r: Rect) -> [(Tab, Rect); 3] {
+pub fn tab_rects(r: Rect) -> [(Tab, Rect); 4] {
     let mut x = r.x0 + 4.0;
     TABS.map(|(t, _, label)| {
         let w = tab_width(label, true);
@@ -86,7 +94,10 @@ pub fn draw_bar(p: &mut Painter<'_>, th: &Theme, r: Rect, view: PanelView) -> (R
     for (t, icon, label) in TABS {
         let on = matches!(
             (t, view),
-            (Tab::Clip, PanelView::Clip) | (Tab::Mixer, PanelView::Mixer) | (Tab::Macros, PanelView::Macros)
+            (Tab::Clip, PanelView::Clip)
+                | (Tab::Mixer, PanelView::Mixer)
+                | (Tab::Macros, PanelView::Macros)
+                | (Tab::Bank, PanelView::Bank)
         );
         x += tab(p, th, x, bar, Some(icon), label, on);
     }
