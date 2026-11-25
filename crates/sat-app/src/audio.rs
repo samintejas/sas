@@ -1,7 +1,15 @@
-//! Audio output: runs the engine inside the device callback.
+//! Audio output: runs the engine inside the device callback, with the
+//! input (once one is handed over) for monitoring.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use sat_engine::Engine;
+
+/// Input queued past this many blocks is skipped, so monitoring stays close
+/// to live when the input and output clocks drift.
+const MAX_QUEUED_BLOCKS: usize = 3;
 
 /// A running output stream. Dropping it stops audio.
 pub struct Output {
@@ -10,6 +18,22 @@ pub struct Output {
     pub sample_rate: f64,
     /// Device description, for logs.
     pub name: String,
+    /// Hands the callback the input to monitor (once).
+    monitor: rtrb::Producer<rtrb::Consumer<f32>>,
+    /// Output latency the device reports, in microseconds.
+    latency_us: Arc<AtomicU32>,
+}
+
+impl Output {
+    /// Lets the engine hear `input` (stereo pairs) from now on.
+    pub fn monitor(&mut self, input: rtrb::Consumer<f32>) {
+        let _ = self.monitor.push(input);
+    }
+
+    /// Seconds from rendering a frame to hearing it.
+    pub fn latency(&self) -> f64 {
+        self.latency_us.load(Ordering::Relaxed) as f64 / 1e6
+    }
 }
 
 /// The device's sample rate, so the schedule can be compiled for it.
@@ -31,15 +55,44 @@ pub fn start(mut engine: Engine, max_block: usize) -> Result<Output, String> {
     // scratch buffers, allocated here so the callback never allocates
     let mut left = vec![0.0f32; max_block];
     let mut right = vec![0.0f32; max_block];
+    let (mut in_l, mut in_r) = (vec![0.0f32; max_block], vec![0.0f32; max_block]);
+    let (monitor, mut monitor_rx) = rtrb::RingBuffer::<rtrb::Consumer<f32>>::new(1);
+    let mut input: Option<rtrb::Consumer<f32>> = None;
+    let latency_us = Arc::new(AtomicU32::new(0));
+    let lat = latency_us.clone();
     let stream = dev
         .build_output_stream(
             config,
-            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+            move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
+                if input.is_none()
+                    && let Ok(i) = monitor_rx.pop()
+                {
+                    input = Some(i);
+                }
+                let ts = info.timestamp();
+                lat.store(ts.playback.duration_since(ts.callback).as_micros() as u32, Ordering::Relaxed);
                 let frames = data.len() / channels.max(1);
                 let mut done = 0;
                 while done < frames {
                     let n = (frames - done).min(max_block);
-                    engine.process(&mut left[..n], &mut right[..n]);
+                    let mut got = 0;
+                    if let Some(i) = &mut input {
+                        let excess = i.slots().saturating_sub(max_block * 2 * MAX_QUEUED_BLOCKS) / 2 * 2;
+                        if excess > 0
+                            && let Ok(c) = i.read_chunk(excess)
+                        {
+                            c.commit_all();
+                        }
+                        got = (i.slots() / 2).min(n);
+                        if let Ok(c) = i.read_chunk(got * 2) {
+                            let (a, b) = c.as_slices();
+                            for (k, v) in a.iter().chain(b.iter()).enumerate() {
+                                if k % 2 == 0 { in_l[k / 2] = *v } else { in_r[k / 2] = *v }
+                            }
+                            c.commit_all();
+                        }
+                    }
+                    engine.process_with_input(&in_l[..got], &in_r[..got], &mut left[..n], &mut right[..n]);
                     for k in 0..n {
                         let frame = &mut data[(done + k) * channels..(done + k + 1) * channels];
                         for (ch, s) in frame.iter_mut().enumerate() {
@@ -58,5 +111,5 @@ pub fn start(mut engine: Engine, max_block: usize) -> Result<Output, String> {
         )
         .map_err(|e| e.to_string())?;
     stream.play().map_err(|e| e.to_string())?;
-    Ok(Output { _stream: stream, sample_rate, name })
+    Ok(Output { _stream: stream, sample_rate, name, monitor, latency_us })
 }

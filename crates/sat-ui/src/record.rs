@@ -50,6 +50,16 @@ pub fn passes(start: f64, len: f64, looping: Option<(f64, f64)>) -> Vec<Pass> {
     out
 }
 
+/// The input a recorder takes (its `input` choice: 0 both channels, 1 the
+/// first, 2 the second, on both sides).
+pub fn channels(rec: &sat_disk::Sample, choice: f32) -> sat_disk::Sample {
+    match choice.round() as i32 {
+        1 => sat_disk::Sample { rate: rec.rate, l: rec.l.clone(), r: rec.l.clone() },
+        2 => sat_disk::Sample { rate: rec.rate, l: rec.r.clone(), r: rec.r.clone() },
+        _ => rec.clone(),
+    }
+}
+
 fn tick(tempo: &TempoMap, secs: f64) -> Ticks {
     Ticks(tempo.secs_to_tick(secs).round() as i64)
 }
@@ -71,6 +81,17 @@ pub fn record(
     let mut ops = Vec::new();
     for &t in tracks {
         let Some(track) = doc.tracks.get(&t).filter(|tr| tr.kind == TrackKind::Track) else { continue };
+        // the track's recorder, added to its source grid if it has none
+        let recorder = match (sat_modules::recorder(doc, t), track.source_grid) {
+            (Some(m), _) => Some(m.id),
+            (None, Some(g)) => {
+                let y = doc.modules_on(g).map(|m| m.pos.1 + 160.0).fold(40.0f32, f32::max);
+                let (id, op) = sat_modules::add_module(doc, g, sat_modules::RECORDER, (40.0, y));
+                ops.push(op);
+                Some(id)
+            }
+            (None, None) => None,
+        };
         // clips this recording has touched: their audio so far, origin and length
         let mut touched: HashMap<ClipId, (AudioClip, Ticks, Ticks)> = HashMap::new();
         for p in passes(start, len, looping) {
@@ -110,6 +131,10 @@ pub fn record(
                         offset: Ticks::ZERO,
                         length: e - o,
                     });
+                    if let Some(m) = recorder {
+                        let from = PortRef::new(m, sat_modules::AUDIO_OUT.key);
+                        ops.push(Op::Connect { id: CableId::new(), from, to: Endpoint::Inlet(id) });
+                    }
                     (id, o, e - o)
                 }
             };
@@ -208,6 +233,9 @@ mod record_tests {
         let a = c.audio.clone().unwrap();
         assert_eq!(a.takes[0].name, "take 1");
         assert_eq!(pool.get(a.takes[0].audio).unwrap().frames(), 24_000);
+        // a recorder was added to the track's source grid, feeding the new clip
+        let rec_mod = sat_modules::recorder(h.doc(), t).expect("a recorder").id;
+        assert_eq!(h.doc().inlet_cable(c.id).map(|k| k.from.module), Some(rec_mod));
         // a second pass over its middle second is take 2, comped in just there
         let mid = sat_disk::Sample { rate: 8_000.0, l: rec.l[..8_000].to_vec(), r: rec.r[..8_000].to_vec() };
         let ops = record(h.doc(), &mut pool, &[t], &mid, 2.0, None);

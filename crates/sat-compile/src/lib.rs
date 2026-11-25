@@ -26,9 +26,10 @@ use std::sync::Arc;
 use sat_doc::sat_time::{TempoMap, Ticks};
 use sat_doc::*;
 use sat_engine::{
-    AudioPlayer, AudioSeg, AutoCurve, AutoPoint, Automation, Command, FX_PARAMS, Fx, FxKind, FxModule, Instrument,
-    MAX_FX, MAX_FX_REGS, MAX_MODS, MAX_PARAMS, MAX_REGS, Meter, NONE, NodeId, NodeKind, NoteEvent, Param, Patch,
-    Sample, Schedule, ScheduleBuilder, SessionClip, Strip, Synth, SynthParam, VKind, VModule, Wave, db_to_gain,
+    AudioPlayer, AudioSeg, AutoCurve, AutoPoint, Automation, Command, FX_PARAMS, Fx, FxKind, FxModule, InputChannel,
+    Instrument, MAX_FX, MAX_FX_REGS, MAX_MODS, MAX_PARAMS, MAX_REGS, Meter, Monitor, MonitorMode, NONE, NodeId,
+    NodeKind, NoteEvent, Param, Patch, Sample, Schedule, ScheduleBuilder, SessionClip, Strip, Synth, SynthParam, VKind,
+    VModule, Wave, db_to_gain,
 };
 use sat_modules::instrument as ins;
 
@@ -152,6 +153,7 @@ const SALT_BUS: u128 = 0x5a7_0003;
 const SALT_FX: u128 = 0x5a7_0004;
 const SALT_AUDIO: u128 = 0x5a7_0005;
 const SALT_SOURCES: u128 = 0x5a7_0006;
+const SALT_MONITOR: u128 = 0x5a7_0007;
 
 fn nid(t: TrackId, salt: u128) -> NodeId {
     // salts sit in the middle bits, clear of ids that differ only in their low bits
@@ -633,14 +635,34 @@ pub fn compile_with(
                     b.node(id, NodeKind::Audio(Box::new(AudioPlayer::new(segs))), vec![]);
                     id
                 });
-                match (inst, audio) {
-                    (Some(i), Some(a)) => {
-                        // notes and audio clips on one track: sum them before the fx
+                // live input, when the track monitors it
+                let mode = match tr.monitor {
+                    sat_doc::Monitor::In => Some(MonitorMode::In),
+                    sat_doc::Monitor::Auto if tr.armed => Some(MonitorMode::Auto),
+                    _ => None,
+                };
+                let monitor = mode.map(|mode| {
+                    let id = nid(t, SALT_MONITOR);
+                    let rec = sat_modules::recorder(doc, t);
+                    let input = rec.and_then(|m| m.params.get("input").copied()).unwrap_or(0.0);
+                    if let Some(m) = rec {
+                        let target = ParamTarget::Module { module: m.id, param: "input".into() };
+                        params.insert(target, (id, Param::InputChannel, Conv::Same));
+                    }
+                    let node = Monitor::new(mode, InputChannel::from_index(input));
+                    b.node(id, NodeKind::Monitor(Box::new(node)), vec![]);
+                    id
+                });
+                let sources: Vec<NodeId> = [inst, audio, monitor].into_iter().flatten().collect();
+                match sources.as_slice() {
+                    [] => None,
+                    [one] => Some(*one),
+                    many => {
+                        // notes, audio clips and input on one track: summed before the fx
                         let id = nid(t, SALT_SOURCES);
-                        b.node(id, NodeKind::Sum, vec![(i, 1.0), (a, 1.0)]);
+                        b.node(id, NodeKind::Sum, many.iter().map(|n| (*n, 1.0)).collect());
                         Some(id)
                     }
-                    (i, a) => i.or(a),
                 }
             }
             TrackKind::Group | TrackKind::Return | TrackKind::Master => Some(nid(t, SALT_BUS)),

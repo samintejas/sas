@@ -78,7 +78,7 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(350);
 struct Playback {
     handle: Option<EngineHandle>,
     compiled: Compiled,
-    _output: Option<audio::Output>,
+    output: Option<audio::Output>,
     playing: bool,
     /// Used when there is no audio device: a wall clock drives the playhead.
     clock: Option<(Instant, Ticks)>,
@@ -98,7 +98,7 @@ impl Playback {
                 status: format!("{} @ {} Hz", out.name, out.sample_rate),
                 handle: Some(handle),
                 compiled,
-                _output: Some(out),
+                output: Some(out),
                 playing: false,
                 clock: None,
                 pool,
@@ -107,7 +107,7 @@ impl Playback {
                 status: format!("no audio ({e})"),
                 handle: None,
                 compiled,
-                _output: None,
+                output: None,
                 playing: false,
                 clock: None,
                 pool,
@@ -265,6 +265,15 @@ fn comp_segment(a: &sat_doc::AudioClip, at: Ticks, take: u16, len: Ticks) -> sat
     a.comped(start, end, take, len)
 }
 
+/// Does any track hear its input (so the input should be open)?
+fn monitored(doc: &Document) -> bool {
+    doc.tracks.values().any(|t| match t.monitor {
+        sat_doc::Monitor::In => t.kind == TrackKind::Track,
+        sat_doc::Monitor::Auto => t.armed,
+        sat_doc::Monitor::Off => false,
+    })
+}
+
 /// Clip time snapped to the sixteenth it falls in.
 fn snap16(t: Ticks) -> Ticks {
     let s = Ticks::sixteenths(1).0;
@@ -358,6 +367,8 @@ struct App {
     last_frame: Instant,
     /// The input, opened the first time something is recorded.
     input: Option<input::Input>,
+    /// Opening the input failed; not retried until something is recorded.
+    input_failed: bool,
     rec: Option<Recording>,
     quit: bool,
 }
@@ -532,6 +543,9 @@ impl App {
 
     fn redraw(&mut self) {
         self.poll_recording();
+        if self.input.is_none() && !self.input_failed && monitored(self.history.doc()) {
+            self.ensure_input();
+        }
         let Some(g) = &mut self.gfx else { return };
         let size = g.window.inner_size();
         if size.width == 0 || size.height == 0 {
@@ -652,26 +666,51 @@ impl App {
                 None => return eprintln!("record: arm a track first"),
             }
         }
-        if self.input.is_none() {
-            match input::Input::open() {
-                Ok(i) => {
-                    eprintln!("sat: recording from {} @ {} Hz", i.name, i.rate);
-                    self.input = Some(i);
-                }
-                Err(e) => return eprintln!("record: {e}"),
-            }
+        self.input_failed = false;
+        if !self.ensure_input() {
+            return;
         }
         if let Some(i) = &mut self.input {
             i.clear();
         }
+        // what was sung at a moment lines up with what was heard then
+        let latency = self.input.as_ref().map_or(0.0, |i| i.latency())
+            + self.playback.output.as_ref().map_or(0.0, |o| o.latency());
         let doc = self.history.doc();
         let tempo = &self.playback.compiled.tempo;
-        let start = tempo.tick_to_secs(self.playback.playhead().0 as f64);
+        let start = tempo.tick_to_secs(self.playback.playhead().0 as f64) - latency;
         let lr = doc.loop_range;
         let looping = lr.enabled.then(|| (tempo.tick_to_secs(lr.start.0 as f64), tempo.tick_to_secs(lr.end.0 as f64)));
         self.rec = Some(Recording { tracks, start, looping, l: Vec::new(), r: Vec::new() });
+        self.playback.send(Command::SetRecording(true));
         if !self.playback.playing {
             self.playback.toggle();
+        }
+    }
+
+    /// Opens the input if it is not open, and lets the engine monitor it.
+    /// False (after saying why) if there is none.
+    fn ensure_input(&mut self) -> bool {
+        if self.input.is_some() {
+            return true;
+        }
+        if self.input_failed {
+            return false;
+        }
+        match input::Input::open() {
+            Ok(mut i) => {
+                eprintln!("sat: input {} @ {} Hz", i.name, i.rate);
+                if let (Some(o), Some(m)) = (&mut self.playback.output, i.take_monitor()) {
+                    o.monitor(m);
+                }
+                self.input = Some(i);
+                true
+            }
+            Err(e) => {
+                eprintln!("input: {e}");
+                self.input_failed = true;
+                false
+            }
         }
     }
 
@@ -686,15 +725,16 @@ impl App {
     fn stop_recording(&mut self) {
         self.poll_recording();
         let (Some(rec), Some(i)) = (self.rec.take(), &self.input) else { return };
+        self.playback.send(Command::SetRecording(false));
         let sample = sat_disk::Sample { rate: i.rate, l: rec.l, r: rec.r };
-        let ops = sat_ui::record::record(
-            self.history.doc(),
-            &mut self.playback.pool,
-            &rec.tracks,
-            &sample,
-            rec.start,
-            rec.looping,
-        );
+        let mut ops = Vec::new();
+        for t in &rec.tracks {
+            // each track records the input its recorder takes
+            let doc = self.history.doc();
+            let choice = sat_modules::recorder(doc, *t).and_then(|m| m.params.get("input").copied()).unwrap_or(0.0);
+            let s = sat_ui::record::channels(&sample, choice);
+            ops.extend(sat_ui::record::record(doc, &mut self.playback.pool, &[*t], &s, rec.start, rec.looping));
+        }
         if !ops.is_empty() {
             self.edit("record", ops);
         }
@@ -1116,6 +1156,12 @@ impl App {
             Hit::Mute(t) => self.toggle_flag(t, TrackFlag::Mute),
             Hit::Solo(t) => self.toggle_flag(t, TrackFlag::Solo),
             Hit::Arm(t) => self.toggle_flag(t, TrackFlag::Arm),
+            Hit::Monitor(t, monitor) => {
+                if self.history.doc().tracks[&t].monitor != monitor {
+                    self.input_failed = false;
+                    self.edit("monitor", vec![Op::SetMonitor { id: t, monitor }]);
+                }
+            }
             Hit::Fader(t) => {
                 let row = layout.rows.iter().find(|r| r.track == t).copied();
                 if let Some(f) = row.and_then(|r| header_controls(&r, layout.headers).fader) {
@@ -1658,7 +1704,9 @@ impl App {
     }
 
     fn metering(&self) -> bool {
+        // a monitored input moves its meters even while stopped
         self.levels.values().any(|(l, r)| *l > 0.0 || *r > 0.0)
+            || (self.input.is_some() && monitored(self.history.doc()))
     }
 }
 
@@ -1844,6 +1892,7 @@ fn main() {
         last_click: None,
         last_frame: Instant::now(),
         input: None,
+        input_failed: false,
         rec: None,
         quit: false,
     };

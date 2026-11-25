@@ -52,6 +52,8 @@ pub enum Param {
     InputGain(u16),
     /// A synth parameter.
     Synth(SynthParam),
+    /// A monitor's input channels (0 stereo, 1 first, 2 second).
+    InputChannel,
     /// Parameter `index` of module `slot` of an instrument.
     Module {
         /// Module slot in the patch (0 for the drum synth).
@@ -199,6 +201,8 @@ pub enum NodeKind {
     Fx(Box<crate::Fx>),
     /// A track's audio clips.
     Audio(Box<crate::AudioPlayer>),
+    /// A track's live input.
+    Monitor(Box<crate::Monitor>),
 }
 
 /// A node in the schedule.
@@ -385,6 +389,7 @@ impl Schedule {
             (NodeKind::Synth(s), Param::Synth(sp)) => s.set_param(sp, v),
             (NodeKind::Instrument(s), Param::Module { slot, index }) => return s.set_param(slot, index, v),
             (NodeKind::Fx(s), Param::Module { slot, index }) => return s.set_param(slot, index, v),
+            (NodeKind::Monitor(s), Param::InputChannel) => s.channel = crate::InputChannel::from_index(v),
             _ => return false,
         }
         true
@@ -405,6 +410,7 @@ impl Schedule {
                         (NodeKind::Synth(n), NodeKind::Synth(o)) => n.adopt(o),
                         (NodeKind::Instrument(n), NodeKind::Instrument(o)) => n.adopt(o),
                         (NodeKind::Fx(n), NodeKind::Fx(o)) => n.adopt(o),
+                        (NodeKind::Monitor(n), NodeKind::Monitor(o)) => n.adopt(o),
                         (NodeKind::Strip(n), NodeKind::Strip(o)) => n.gains = o.gains,
                         _ => {}
                     }
@@ -456,8 +462,9 @@ impl Schedule {
     }
 
     /// Runs every node for `len` frames written at `off` in the buffers.
-    /// `pos` is the timeline sample at `off` when playing.
-    pub(crate) fn run(&mut self, off: usize, len: usize, pos: Option<i64>) {
+    /// `pos` is the timeline sample at `off` when playing; `input` holds the
+    /// device input at the same offsets.
+    pub(crate) fn run(&mut self, off: usize, len: usize, pos: Option<i64>, input: &Buf, recording: bool) {
         debug_assert!(off + len <= self.max_block);
         for i in 0..self.nodes.len() {
             let (before, rest) = self.bufs.split_at_mut(i);
@@ -481,6 +488,7 @@ impl Schedule {
                 NodeKind::Instrument(s) => s.process(out, off, len, pos, self.sample_rate),
                 NodeKind::Fx(s) => s.process(out, off, len),
                 NodeKind::Audio(s) => s.process(out, off, len, pos, self.sample_rate),
+                NodeKind::Monitor(s) => s.process(out, input, off, len, pos.is_some(), recording),
             }
         }
     }

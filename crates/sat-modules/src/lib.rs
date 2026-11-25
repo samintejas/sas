@@ -30,6 +30,19 @@ pub const DRUM_SEQ: &str = "drum_seq";
 /// Module kind of the euclidean generator.
 pub const EUCLID: &str = "euclid";
 
+/// Module kind of the recorder: the track's audio input, feeding the clips
+/// recorded through it.
+pub const RECORDER: &str = "recorder";
+
+/// The recorder's input choices (its `input` parameter).
+pub const INPUTS: &[&str] = &["in 1+2", "in 1", "in 2"];
+
+/// The recorder's parameters.
+pub const RECORDER_PARAMS: [ParamSpec; 1] = [spec::p("input", "input", 0.0, 2.0, 0.0, Unit::Choice(INPUTS))];
+
+/// The audio output of the recorder.
+pub const AUDIO_OUT: PortSpec = PortSpec { key: "audio", kind: PortKind::Audio, input: false };
+
 /// The parameter that marks a generator as baked into a fixed pattern.
 pub const FIXED: &str = "fixed";
 
@@ -62,6 +75,7 @@ pub const NOTES_OUT: PortSpec = PortSpec { key: "notes", kind: PortKind::Notes, 
 pub fn ports(kind: &str) -> &'static [PortSpec] {
     match kind {
         PIANO_ROLL | DRUM_SEQ | EUCLID => &[NOTES_OUT],
+        RECORDER => &[AUDIO_OUT],
         k if fx::is_fx(k) => fx::ports(k),
         _ => instrument::ports(kind),
     }
@@ -71,6 +85,7 @@ pub fn ports(kind: &str) -> &'static [PortSpec] {
 pub fn params_of(kind: &str) -> &'static [ParamSpec] {
     match kind {
         EUCLID => &euclid::PARAMS,
+        RECORDER => &RECORDER_PARAMS,
         k if fx::is_fx(k) => fx::params(k),
         _ => instrument::params(kind),
     }
@@ -91,7 +106,14 @@ pub fn catalogue(kind: GridKind) -> &'static [(&'static str, &'static str)] {
 }
 
 /// Source modules that can be added to a source grid: kind and label.
-pub const SOURCES: [(&str, &str); 3] = [(PIANO_ROLL, "piano roll"), (DRUM_SEQ, "drum seq"), (EUCLID, "euclid")];
+pub const SOURCES: [(&str, &str); 4] =
+    [(PIANO_ROLL, "piano roll"), (DRUM_SEQ, "drum seq"), (EUCLID, "euclid"), (RECORDER, "recorder")];
+
+/// The recorder on a track's source grid, if it has one.
+pub fn recorder(doc: &Document, track: TrackId) -> Option<&Module> {
+    let g = doc.tracks.get(&track)?.source_grid?;
+    doc.modules_on(g).find(|m| m.kind == RECORDER)
+}
 
 /// The label of a module kind.
 pub fn label_of(kind: &str) -> &str {
