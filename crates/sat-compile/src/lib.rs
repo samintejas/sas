@@ -186,13 +186,18 @@ pub struct TimelineNote {
 pub fn placement_notes(doc: &Document, p: &Placement) -> Vec<TimelineNote> {
     let Some(clip) = doc.clips.get(&p.clip) else { return Vec::new() };
     let Some(feed) = doc.inlet_cable(clip.id) else { return Vec::new() };
-    let notes = sat_modules::effective_notes(doc, feed.from.module, clip.id);
+    let module = feed.from.module;
+    let reseeds = sat_modules::reseeds(doc, module);
+    let mut notes = sat_modules::effective_notes(doc, module, clip.id);
     let len = clip.length.0;
     let (win_start, win_end) = (p.offset.0, p.offset.0 + p.length.0);
     let cycles = if clip.looped { ((win_end + len - 1) / len).max(1) } else { 1 };
     let clip_salt = (clip.id.0.as_u128() as u64) ^ clip.seed ^ doc.seed;
     let mut out = Vec::new();
     for k in 0..cycles {
+        if reseeds && k > 0 {
+            notes = sat_modules::effective_notes_at(doc, module, clip.id, k as u64);
+        }
         for (i, n) in notes.iter().enumerate() {
             if n.start.0 >= len {
                 continue;

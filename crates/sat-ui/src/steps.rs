@@ -1,10 +1,10 @@
 //! Step editors for the bottom panel: the drum sequencer (a row of steps per
-//! drum) and the euclid (generator knobs over one row of trigs, with hand
-//! edits marked).
+//! drum) and the generators (euclid, turing: knobs over one row of trigs,
+//! each showing its pitch, with hand edits marked).
 
 use sat_doc::sat_time::{PPQ, Ticks};
 use sat_doc::*;
-use sat_modules::euclid::{self, PARAMS, Params};
+use sat_modules::spec::note_name;
 use sat_modules::{Editor, drum};
 use sat_theme::{Rgba, Theme};
 use vello::kurbo::{Point, Rect};
@@ -19,7 +19,7 @@ use crate::piano_roll::{TOOLS_H, clip_bar, clip_playhead};
 pub const PAGE: usize = 16;
 /// Width of the drum pads column.
 pub const PAD_W: f64 = 104.0;
-/// Width of the euclid's generator card.
+/// Width of a generator's card.
 pub const GEN_W: f64 = 300.0;
 /// Step length of the drum sequencer.
 pub const DRUM_RATE: Ticks = Ticks(PPQ / 4);
@@ -73,7 +73,7 @@ pub struct StepGeom {
     pub clip: ClipId,
     /// The source module edited.
     pub module: ModuleId,
-    /// Drums or euclid.
+    /// Drums or a generator.
     pub editor: Editor,
     /// Step length.
     pub rate: Ticks,
@@ -154,7 +154,7 @@ pub fn geometry(doc: &Document, clip: Option<ClipId>, r: Rect, view: &StepView) 
     let clip = doc.clips.get(&clip?)?;
     let (m, editor) = source(doc, clip.id)?;
     let rate = match editor {
-        Editor::Euclid => Params::of(&sat_modules::macros::resolved(doc, m)).rate,
+        Editor::Euclid | Editor::Turing => sat_modules::gen_steps(doc, m.id, clip.id)?.rate,
         Editor::Drums => DRUM_RATE,
         Editor::PianoRoll => return None,
     };
@@ -204,12 +204,14 @@ pub fn geometry(doc: &Document, clip: Option<ClipId>, r: Rect, view: &StepView) 
                 }
             }
         }
-        Editor::Euclid => {
+        Editor::Euclid | Editor::Turing => {
             let card = Rect::new(body.x0 + 8.0, body.y0 + 8.0, body.x0 + GEN_W, body.y1 - 8.0);
-            let kw = (card.width() - 16.0) / 4.0;
+            let params = sat_modules::params_of(&m.kind);
+            let cols = params.len().div_ceil(2).max(1);
+            let kw = (card.width() - 16.0) / cols as f64;
             let kh = ((card.height() - 64.0) / 2.0).clamp(40.0, 64.0);
-            for (i, p) in PARAMS.iter().enumerate() {
-                let (col, row) = ((i % 4) as f64, (i / 4) as f64);
+            for (i, p) in params.iter().enumerate() {
+                let (col, row) = ((i % cols) as f64, (i / cols) as f64);
                 let x = card.x0 + 8.0 + col * kw;
                 let y = card.y0 + 30.0 + row * kh;
                 g.knobs.push((p.key, Rect::new(x, y, x + kw, y + kh)));
@@ -218,12 +220,13 @@ pub fn geometry(doc: &Document, clip: Option<ClipId>, r: Rect, view: &StepView) 
             g.clear = Some(Rect::new(card.x1 - 104.0, ey - 11.0, card.x1 - 60.0, ey + 11.0));
             g.bake = Some(Rect::new(card.x1 - 54.0, ey - 11.0, card.x1 - 8.0, ey + 11.0));
             g.mode = Some(Rect::new(r.x0 + 12.0, ty - 12.0, r.x0 + 180.0, ty + 12.0));
-            let note = Params::of(&sat_modules::macros::resolved(doc, m)).note;
+            let pitches = sat_modules::gen_steps(doc, m.id, clip.id).map(|s| s.pitches).unwrap_or_default();
             let xs = cell_xs(card.x1 + 64.0, body.x1 - 16.0, PAGE);
             let y0 = body.y0 + 12.0;
             let h = (body.height() * 0.42).clamp(32.0, 64.0);
             for (i, (a, b)) in xs.iter().take(n).enumerate() {
-                g.cells.push(Cell { step: first + i, pitch: note, rect: Rect::new(*a, y0, *b, y0 + h) });
+                let pitch = pitches.get(first + i).copied().unwrap_or(60);
+                g.cells.push(Cell { step: first + i, pitch, rect: Rect::new(*a, y0, *b, y0 + h) });
             }
         }
         Editor::PianoRoll => {}
@@ -315,7 +318,7 @@ pub fn draw(
                 }
             }
         }
-        Editor::Euclid => {
+        Editor::Euclid | Editor::Turing => {
             let generating = sat_modules::generating(m);
             let mode = g.mode.unwrap();
             let half = Rect::new(mode.x0, mode.y0, mode.center().x, mode.y1);
@@ -333,7 +336,7 @@ pub fn draw(
             p.text(card.x1 - 12.0, card.y0 + 16.0, sub, &TextStyle::mono(11.0, c.text_secondary), Align::Right);
             let col = th.track(clip_ref.color.0);
             for (key, kr) in &g.knobs {
-                let spec = euclid::spec(key).unwrap();
+                let spec = sat_modules::spec(&m.kind, key).unwrap();
                 let v = sat_modules::macros::value(doc, m.id, key).unwrap_or(spec.default);
                 let kc = if generating { col } else { c.text_secondary };
                 p.text(kr.center().x, kr.y0 + 6.0, spec.label, &TextStyle::mono(10.5, c.text_secondary), Align::Center);
@@ -361,13 +364,20 @@ pub fn draw(
                 let y = first.rect.center().y;
                 p.text(card.x1 + 16.0, y, "trigs", &TextStyle::mono(11.0, c.text_secondary), Align::Left);
                 let ny = first.rect.y1 + 16.0;
-                let name = euclid::note_name(first.pitch);
                 p.text(card.x1 + 16.0, ny, "note", &TextStyle::mono(11.0, c.text_secondary), Align::Left);
+                // the turing's steps each have a pitch: a tick shows how high
+                let (lo, hi) = g.cells.iter().fold((127u8, 0u8), |(a, b), c| (a.min(c.pitch), b.max(c.pitch)));
                 for cell in &g.cells {
                     let l = look(cell.step, cell.pitch);
                     step_cell(p, th, cell, l, col, cur == Some(cell.step));
+                    if g.editor == Editor::Turing && hi > lo {
+                        let k = (cell.pitch - lo) as f64 / (hi - lo) as f64;
+                        let y = cell.rect.y1 - 6.0 - k * (cell.rect.height() - 12.0);
+                        let tick = if l.on { c.text_max.alpha(0.85) } else { c.text_secondary.alpha(0.45) };
+                        p.rect(Rect::new(cell.rect.x0 + 5.0, y - 1.0, cell.rect.x1 - 5.0, y + 1.0), tick);
+                    }
                     let st = TextStyle::mono(10.5, if l.on { c.text_strong } else { c.text_secondary.alpha(0.5) });
-                    p.text(cell.rect.center().x, ny, &name, &st, Align::Center);
+                    p.text(cell.rect.center().x, ny, &note_name(cell.pitch), &st, Align::Center);
                 }
                 // legend
                 let ly = r.y1 - 18.0;
