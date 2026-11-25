@@ -41,7 +41,7 @@ impl Sample {
         self.l.len().min(self.r.len())
     }
 
-    fn at(&self, pos: f64) -> (f32, f32) {
+    pub(crate) fn at(&self, pos: f64) -> (f32, f32) {
         let n = self.frames();
         if pos < 0.0 || n == 0 {
             return (0.0, 0.0);

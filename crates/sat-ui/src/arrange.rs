@@ -99,6 +99,48 @@ pub struct ClipBox {
     pub clip: ClipId,
     /// Where it is drawn.
     pub rect: Rect,
+    /// An audio clip's fade handles (fade in, fade out), at the top of the clip.
+    pub fades: Option<(Point, Point)>,
+}
+
+/// One take lane of an audio clip placement on screen.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TakeBox {
+    /// The placement.
+    pub placement: PlacementId,
+    /// Its clip.
+    pub clip: ClipId,
+    /// Index of the take.
+    pub take: u16,
+    /// Where it is drawn.
+    pub rect: Rect,
+    /// The timeline tick of the clip's start.
+    pub origin: Ticks,
+}
+
+/// Height of a take lane under an audio clip.
+pub const TAKE_H: f64 = 12.0;
+/// Most take lanes shown under a track.
+pub const MAX_TAKE_LANES: usize = 4;
+
+/// How many take lanes a track shows: the most takes of its audio clips,
+/// when any clip has more than one.
+pub fn take_lanes(doc: &Document, t: TrackId) -> usize {
+    let n = doc.clips_on(t).filter_map(|c| c.audio.as_ref()).map(|a| a.takes.len()).max().unwrap_or(0);
+    if n > 1 { n.min(MAX_TAKE_LANES) } else { 0 }
+}
+
+/// Seconds of clip time `ct` of placement `p` after the clip's start, on the
+/// timeline (audio plays at its own speed, whatever the tempo).
+pub fn clip_secs(tempo: &sat_doc::sat_time::TempoMap, p: &Placement, ct: f64) -> f64 {
+    let origin = (p.start.0 - p.offset.0) as f64;
+    tempo.tick_to_secs(origin + ct) - tempo.tick_to_secs(origin)
+}
+
+/// Clip time (fractional ticks) heard `secs` after an audio clip's start.
+pub fn clip_tick_at(tempo: &sat_doc::sat_time::TempoMap, p: &Placement, secs: f64) -> f64 {
+    let origin = (p.start.0 - p.offset.0) as f64;
+    tempo.secs_to_tick(tempo.tick_to_secs(origin) + secs) - origin
 }
 
 /// What is under a point.
@@ -121,6 +163,26 @@ pub enum Hit {
     Arm(TrackId),
     /// A header's fader.
     Fader(TrackId),
+    /// A take lane of an audio clip, at a clip time.
+    Take {
+        /// The placement.
+        placement: PlacementId,
+        /// Its clip.
+        clip: ClipId,
+        /// Index of the take.
+        take: u16,
+        /// Clip time under the point.
+        at: Ticks,
+    },
+    /// An audio clip's fade handle.
+    Fade {
+        /// The placement.
+        placement: PlacementId,
+        /// Its clip.
+        clip: ClipId,
+        /// The fade out (else the fade in).
+        out: bool,
+    },
     /// Empty timeline on a row, at a tick.
     Lane(TrackId, Ticks),
     /// The ruler, at a tick.
@@ -145,13 +207,18 @@ pub struct ArrangeLayout {
     pub rows: Vec<Row>,
     /// Visible clip placements.
     pub clips: Vec<ClipBox>,
+    /// Take lanes of visible audio clip placements.
+    pub takes: Vec<TakeBox>,
     origin: Ticks,
     px_per_tick: f64,
 }
 
+/// Height of the clip part of a track row.
+const TRACK_H: f64 = 52.0;
+
 fn row_height(kind: RowKind) -> f64 {
     match kind {
-        RowKind::Track => 52.0,
+        RowKind::Track => TRACK_H,
         RowKind::Group => 42.0,
         RowKind::Return | RowKind::Master => 30.0,
         RowKind::Lane(_) => 30.0,
@@ -200,7 +267,8 @@ impl ArrangeLayout {
                 TrackKind::Return => RowKind::Return,
                 TrackKind::Master => RowKind::Master,
             };
-            let h = row_height(kind);
+            let lanes = if kind == RowKind::Track { take_lanes(doc, t) } else { 0 };
+            let h = row_height(kind) + if lanes > 0 { lanes as f64 * TAKE_H + 4.0 } else { 0.0 };
             rows.push(Row { track: t, kind, y, h, depth: depth(t) });
             y += h;
             if kind == RowKind::Track {
@@ -211,9 +279,19 @@ impl ArrangeLayout {
                 }
             }
         }
-        let mut layout =
-            ArrangeLayout { bounds, headers, ruler, timeline, rows, clips: Vec::new(), origin: st.origin, px_per_tick };
+        let mut layout = ArrangeLayout {
+            bounds,
+            headers,
+            ruler,
+            timeline,
+            rows,
+            clips: Vec::new(),
+            takes: Vec::new(),
+            origin: st.origin,
+            px_per_tick,
+        };
         let mut clips = Vec::new();
+        let mut takes = Vec::new();
         for p in doc.placements.values() {
             let Some(c) = doc.clips.get(&p.clip) else { continue };
             let Some(row) = layout.rows.iter().find(|r| r.track == c.track && r.kind == RowKind::Track) else {
@@ -224,20 +302,48 @@ impl ArrangeLayout {
             if x1 <= timeline.x0 || x0 >= timeline.x1 {
                 continue;
             }
-            clips.push(ClipBox {
-                placement: p.id,
-                clip: c.id,
-                rect: Rect::new(x0 + 1.0, row.y + 4.0, x1 - 1.0, row.y + row.h - 4.0),
+            let lanes = take_lanes(doc, c.track);
+            let bottom = if lanes > 0 { row.y + TRACK_H - 3.0 } else { row.y + row.h - 4.0 };
+            let rect = Rect::new(x0 + 1.0, row.y + 4.0, x1 - 1.0, bottom);
+            let fades = c.audio.as_ref().map(|a| {
+                // a fade ends where its length in clip time falls on the timeline
+                let fin = layout.x_of(p.start + a.fade_in - p.offset).clamp(rect.x0, rect.x1);
+                let fout = layout.x_of(p.start + (c.length - a.fade_out) - p.offset).clamp(rect.x0, rect.x1);
+                (Point::new(fin, rect.y0 + 3.0), Point::new(fout, rect.y0 + 3.0))
             });
+            clips.push(ClipBox { placement: p.id, clip: c.id, rect, fades });
+            if let Some(a) = &c.audio {
+                for (i, _) in a.takes.iter().enumerate().take(lanes) {
+                    let y = row.y + TRACK_H + i as f64 * TAKE_H;
+                    takes.push(TakeBox {
+                        placement: p.id,
+                        clip: c.id,
+                        take: i as u16,
+                        rect: Rect::new(rect.x0, y, rect.x1, y + TAKE_H - 1.0),
+                        origin: p.start - p.offset,
+                    });
+                }
+            }
         }
         clips.sort_by(|a, b| a.rect.x0.total_cmp(&b.rect.x0));
         layout.clips = clips;
+        layout.takes = takes;
         layout
     }
 
     /// Screen x of a tick.
     pub fn x_of(&self, t: Ticks) -> f64 {
         self.timeline.x0 + (t.0 - self.origin.0) as f64 * self.px_per_tick
+    }
+
+    /// Fractional tick at a screen x.
+    pub fn tick_at_f(&self, x: f64) -> f64 {
+        self.origin.0 as f64 + (x - self.timeline.x0) / self.px_per_tick
+    }
+
+    /// Screen x of a fractional tick.
+    pub fn x_of_f(&self, t: f64) -> f64 {
+        self.timeline.x0 + (t - self.origin.0 as f64) * self.px_per_tick
     }
 
     /// Tick at a screen x.
@@ -250,8 +356,23 @@ impl ArrangeLayout {
         if self.ruler.contains(pt) {
             return Hit::Ruler(self.tick_at(pt.x));
         }
+        for c in self.clips.iter().rev() {
+            if let Some((fin, fout)) = c.fades {
+                let near = |h: Point| (pt.x - h.x).abs() <= 6.0 && (pt.y - h.y).abs() <= 6.0;
+                // the fade out wins when both handles sit together at a short clip's end
+                if near(fout) {
+                    return Hit::Fade { placement: c.placement, clip: c.clip, out: true };
+                }
+                if near(fin) {
+                    return Hit::Fade { placement: c.placement, clip: c.clip, out: false };
+                }
+            }
+        }
         if let Some(c) = self.clips.iter().rev().find(|c| c.rect.contains(pt)) {
             return Hit::Clip { placement: c.placement, clip: c.clip };
+        }
+        if let Some(k) = self.takes.iter().rev().find(|k| k.rect.contains(pt)) {
+            return Hit::Take { placement: k.placement, clip: k.clip, take: k.take, at: self.tick_at(pt.x) - k.origin };
         }
         let Some(row) = self.rows.iter().find(|r| pt.y >= r.y && pt.y < r.y + r.h) else { return Hit::Nothing };
         if self.headers.contains(pt) {
@@ -339,8 +460,8 @@ pub fn header_controls(row: &Row, headers: Rect) -> HeaderControls {
                 mute: button(x1 - 98.0, cy),
                 solo: button(x1 - 72.0, cy),
                 arm: button(x1 - 46.0, cy),
-                fader: Some(HFader { x0: x1 - 98.0, x1: x1 - 30.0, y: y1 - 13.0 }),
-                meter: Some(Rect::new(x1 - 16.0, y0 + 10.0, x1 - 9.0, y1 - 6.0)),
+                fader: Some(HFader { x0: x1 - 98.0, x1: x1 - 30.0, y: y0 + TRACK_H - 13.0 }),
+                meter: Some(Rect::new(x1 - 16.0, y0 + 10.0, x1 - 9.0, y0 + TRACK_H - 6.0)),
             }
         }
         RowKind::Return | RowKind::Master => {
@@ -398,6 +519,7 @@ fn meter(p: &mut Painter<'_>, th: &Theme, r: Rect, (l, rr): (f32, f32)) {
 }
 
 /// Draws the arrange view.
+#[allow(clippy::too_many_arguments)]
 pub fn draw(
     p: &mut Painter<'_>,
     th: &Theme,
@@ -405,6 +527,7 @@ pub fn draw(
     st: &ArrangeState,
     tr: &TransportView,
     levels: &Levels,
+    sounds: &sat_disk::Pool,
     l: &ArrangeLayout,
 ) {
     let c = &th.c;
@@ -502,8 +625,17 @@ pub fn draw(
             }
             draw_row(p, th, doc, st, levels, l, row);
         }
+        let tempo = doc.tempo_map().ok();
         for cb in &l.clips {
-            draw_clip(p, th, doc, st, l, cb);
+            match (&doc.clips.get(&cb.clip).and_then(|c| c.audio.as_ref()), &tempo) {
+                (Some(a), Some(tempo)) => draw_audio_clip(p, th, doc, st, l, cb, a, tempo, sounds),
+                _ => draw_clip(p, th, doc, st, l, cb),
+            }
+        }
+        if let Some(tempo) = &tempo {
+            for k in &l.takes {
+                draw_take(p, th, doc, l, k, tempo, sounds);
+            }
         }
         // playhead
         let x = l.x_of(tr.playhead);
@@ -595,7 +727,7 @@ fn draw_row(
                 p.text_fit(hr.x0 + indent, cy, &t.name, &TextStyle::sans(13.0, c.text_strong).medium(), 80.0);
                 p.text_fit(
                     hr.x0 + indent,
-                    hr.y1 - 13.0,
+                    hr.y0 + TRACK_H - 13.0,
                     &track_label(doc, t),
                     &TextStyle::sans(11.5, c.text_secondary),
                     hr.width() - indent - 112.0,
@@ -614,6 +746,7 @@ fn draw_row(
                     fader(p, th, f, t.mixer.gain_db);
                     meter(p, th, m, level);
                 }
+                draw_take_names(p, th, doc, st, row, hr);
             }
             if selected {
                 p.rrect_stroke(hr.inset(-1.0), 0.0, 1.0, c.accent_primary_border);
@@ -780,5 +913,189 @@ fn draw_clip(p: &mut Painter<'_>, th: &Theme, doc: &Document, st: &ArrangeState,
     p.rrect_stroke(r.inset(-0.5), 4.0, 1.0, col.alpha(0.7));
     if st.selected_clip == Some(clip.id) {
         p.rrect_stroke(r.inset(1.0), 5.0, 2.0, c.accent_primary);
+    }
+}
+
+/// The audio clip whose takes a track's header lists: the selected clip if
+/// it is on the track, else the track's first audio clip with takes.
+fn takes_clip<'a>(doc: &'a Document, st: &ArrangeState, t: TrackId) -> Option<&'a Clip> {
+    let sel = st.selected_clip.and_then(|c| doc.clips.get(&c)).filter(|c| c.track == t && c.audio.is_some());
+    sel.or_else(|| doc.clips_on(t).find(|c| c.audio.as_ref().is_some_and(|a| a.takes.len() > 1)))
+}
+
+fn draw_take_names(p: &mut Painter<'_>, th: &Theme, doc: &Document, st: &ArrangeState, row: &Row, hr: Rect) {
+    let lanes = take_lanes(doc, row.track);
+    let Some(a) = takes_clip(doc, st, row.track).and_then(|c| c.audio.as_ref()).filter(|_| lanes > 0) else {
+        return;
+    };
+    let c = &th.c;
+    for (i, take) in a.takes.iter().enumerate().take(lanes) {
+        let y = row.y + TRACK_H + i as f64 * TAKE_H;
+        let lane = Rect::new(hr.x0 + 14.0, y, hr.x1 - 12.0, y + TAKE_H - 1.0);
+        let used = a.comp.iter().any(|s| s.take as usize == i);
+        if used {
+            p.rect(lane, th.track(doc.tracks[&row.track].color.0).alpha(0.16));
+        }
+        let col = if used { c.text_strong } else { c.text_secondary };
+        p.text(lane.x0 + 6.0, lane.center().y, &take.name, &TextStyle::sans(10.5, col), Align::Left);
+        if let Some(f) = doc.audio.get(&take.audio) {
+            let secs = (f.frames as f64 / f.rate.max(1) as f64).round() as u64;
+            let len = format!("{}:{:02}", secs / 60, secs % 60);
+            p.text(lane.x1 - 6.0, lane.center().y, &len, &TextStyle::mono(10.0, c.text_secondary), Align::Right);
+        }
+    }
+}
+
+/// Min and max of take `take` over clip time `ct0..ct1` of placement `pl`,
+/// or nothing when its sound is not loaded.
+fn take_peak(
+    tempo: &sat_doc::sat_time::TempoMap,
+    pl: &Placement,
+    take: &Take,
+    sounds: &sat_disk::Pool,
+    ct0: f64,
+    ct1: f64,
+) -> Option<(f32, f32)> {
+    let ov = sounds.overview(take.audio)?;
+    let rate = sounds.get(take.audio)?.rate as f64;
+    let f = |ct: f64| take.offset as f64 + clip_secs(tempo, pl, ct) * rate;
+    Some(sat_disk::overview_range(ov, f(ct0), f(ct1)))
+}
+
+/// Visible pixel columns of a clip box, with the clip time at each edge.
+fn columns<'a>(l: &'a ArrangeLayout, pl: &Placement, r: Rect, step: f64) -> impl Iterator<Item = (f64, f64, f64)> + 'a {
+    let origin = (pl.start.0 - pl.offset.0) as f64;
+    let (x0, x1) = (r.x0.max(l.timeline.x0).floor(), r.x1.min(l.timeline.x1));
+    (0..((x1 - x0) / step).ceil().max(0.0) as usize).map(move |k| {
+        let x = x0 + k as f64 * step;
+        (x, l.tick_at_f(x) - origin, l.tick_at_f(x + step) - origin)
+    })
+}
+
+/// Equal-power fade curve from `a` (silent) to `b` (full).
+fn fade_curve(a: Point, b: Point) -> Vec<Point> {
+    (0..=16)
+        .map(|k| {
+            let u = k as f64 / 16.0;
+            let g = (u * core::f64::consts::FRAC_PI_2).sin();
+            Point::new(a.x + (b.x - a.x) * u, a.y + (b.y - a.y) * g)
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_audio_clip(
+    p: &mut Painter<'_>,
+    th: &Theme,
+    doc: &Document,
+    st: &ArrangeState,
+    l: &ArrangeLayout,
+    cb: &ClipBox,
+    a: &AudioClip,
+    tempo: &sat_doc::sat_time::TempoMap,
+    sounds: &sat_disk::Pool,
+) {
+    let c = &th.c;
+    let Some(clip) = doc.clips.get(&cb.clip) else { return };
+    let Some(pl) = doc.placements.get(&cb.placement) else { return };
+    let col = th.track(clip.color.0);
+    let col = if doc.tracks[&clip.track].mixer.mute { col.mix(Rgba::hex(0x333333), 0.45) } else { col };
+    let r = cb.rect;
+    let origin = (pl.start.0 - pl.offset.0) as f64;
+    let gain = 10f32.powf(a.gain_db / 20.0);
+    p.rrect(r, 3.0, col.mix(Rgba::hex(0x111111), 0.38));
+    p.clip(r, |p| {
+        // the comp's waveform, take by take
+        let (cy, half) = (r.center().y + 2.0, (r.height() - 8.0) / 2.0);
+        for (x, ct0, ct1) in columns(l, pl, r, 1.0) {
+            let Some(take) = a.take_at(Ticks(ct0.floor() as i64)).and_then(|i| a.takes.get(i as usize)) else {
+                continue;
+            };
+            let Some((lo, hi)) = take_peak(tempo, pl, take, sounds, ct0, ct1) else { continue };
+            let (lo, hi) = ((lo * gain).max(-1.0) as f64, (hi * gain).min(1.0) as f64);
+            let (y0, y1) = (cy - hi * half, cy - lo * half);
+            p.rect(Rect::new(x, y0.min(cy - 0.5), x + 1.0, y1.max(cy + 0.5)), col.alpha(0.9));
+        }
+        // comp boundaries: a crossfade, and the take that starts there
+        let xf = a.xfade_ms as f64 / 1000.0 / 2.0;
+        for (k, seg) in a.comp.iter().enumerate() {
+            let b = seg.start.0 as f64;
+            let x = l.x_of_f(origin + b);
+            if k > 0 {
+                let bs = clip_secs(tempo, pl, b);
+                let w = 5.0f64;
+                let xl = l.x_of_f(origin + clip_tick_at(tempo, pl, bs - xf)).min(x - w);
+                let xr = l.x_of_f(origin + clip_tick_at(tempo, pl, bs + xf)).max(x + w);
+                let (top, bot) = (r.y0 + 3.0, r.y1 - 1.0);
+                let white = c.text_max.alpha(0.85);
+                p.polyline(&fade_curve(Point::new(xr, bot), Point::new(xl, top)), 1.2, white);
+                p.polyline(&fade_curve(Point::new(xl, bot), Point::new(xr, top)), 1.2, white);
+            }
+            if let Some(t) = a.takes.get(seg.take as usize) {
+                let next = a.comp.get(k + 1).map_or(clip.length.0 as f64, |n| n.start.0 as f64);
+                let w = l.x_of_f(origin + next) - x - 14.0;
+                if w > 14.0 {
+                    p.text_fit(x.max(r.x0) + 6.0, r.y0 + 9.0, &t.name, &TextStyle::sans(10.5, c.text_max), w);
+                }
+            }
+        }
+        // fades, with their handles
+        if let Some((fin, fout)) = cb.fades {
+            let white = c.text_max.alpha(0.9);
+            let start = l.x_of(pl.start - pl.offset).max(r.x0);
+            let end = l.x_of(pl.start + clip.length - pl.offset).min(r.x1);
+            if a.fade_in.0 > 0 {
+                p.polyline(&fade_curve(Point::new(start, r.y1), fin), 1.2, white);
+            }
+            if a.fade_out.0 > 0 {
+                p.polyline(&fade_curve(Point::new(end, r.y1), fout), 1.2, white);
+            }
+            for h in [fin, fout] {
+                let sq = Rect::new(h.x - 3.0, h.y - 3.0, h.x + 3.0, h.y + 3.0);
+                p.rect(sq, c.text_max);
+                p.rrect_stroke(sq, 0.0, 1.0, Rgba::hex(0x111111));
+            }
+        }
+    });
+    p.rrect_stroke(r.inset(-0.5), 3.0, 1.0, col.alpha(0.7));
+    if st.selected_clip == Some(clip.id) {
+        p.rrect_stroke(r.inset(1.0), 4.0, 2.0, c.accent_primary);
+    }
+}
+
+fn draw_take(
+    p: &mut Painter<'_>,
+    th: &Theme,
+    doc: &Document,
+    l: &ArrangeLayout,
+    k: &TakeBox,
+    tempo: &sat_doc::sat_time::TempoMap,
+    sounds: &sat_disk::Pool,
+) {
+    let Some(clip) = doc.clips.get(&k.clip) else { return };
+    let Some(a) = &clip.audio else { return };
+    let Some(pl) = doc.placements.get(&k.placement) else { return };
+    let Some(take) = a.takes.get(k.take as usize) else { return };
+    let col = th.track(clip.color.0);
+    let r = k.rect;
+    let origin = (pl.start.0 - pl.offset.0) as f64;
+    p.rect(r, col.mix(Rgba::hex(0x111111), 0.16));
+    // the stretches of the comp this take plays
+    let mut segs = a.comp.iter().enumerate().filter(|(_, s)| s.take == k.take).peekable();
+    if segs.peek().is_some() {
+        for (i, s) in segs {
+            let end = a.comp.get(i + 1).map_or(clip.length.0, |n| n.start.0);
+            let (x0, x1) = (l.x_of_f(origin + s.start.0 as f64).max(r.x0), l.x_of_f(origin + end as f64).min(r.x1));
+            if x1 > x0 {
+                p.rect(Rect::new(x0, r.y0, x1, r.y1), col.mix(Rgba::hex(0x111111), 0.42));
+            }
+        }
+    }
+    let (cy, half) = (r.center().y, r.height() / 2.0 - 1.0);
+    for (x, ct0, ct1) in columns(l, pl, r, 2.0) {
+        let Some((lo, hi)) = take_peak(tempo, pl, take, sounds, ct0, ct1) else { continue };
+        let on = a.take_at(Ticks(ct0.floor() as i64)) == Some(k.take);
+        let (y0, y1) = (cy - hi.min(1.0) as f64 * half, cy - lo.max(-1.0) as f64 * half);
+        p.rect(Rect::new(x, y0.min(cy - 0.5), x + 1.0, y1.max(cy + 0.5)), col.alpha(if on { 0.95 } else { 0.35 }));
     }
 }

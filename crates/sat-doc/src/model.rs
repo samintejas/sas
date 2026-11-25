@@ -341,6 +341,89 @@ pub struct Clip {
     pub snapshot: OrdMap<ParamTarget, f32>,
     /// Seed for generators in this clip.
     pub seed: u64,
+    /// Recorded or imported audio: an audio clip plays this instead of notes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<AudioClip>,
+}
+
+/// The audio of a clip: takes of the same passage, and a comp that picks
+/// which take plays where.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AudioClip {
+    /// Takes, oldest first.
+    pub takes: Vector<Take>,
+    /// Comp segments sorted by start, the first at the clip start: each
+    /// plays its take until the next one starts.
+    pub comp: Vector<CompSegment>,
+    /// Gain in dB.
+    pub gain_db: f32,
+    /// Fade in at the clip start.
+    pub fade_in: Ticks,
+    /// Fade out at the clip end.
+    pub fade_out: Ticks,
+    /// Crossfade at each comp boundary, in milliseconds.
+    pub xfade_ms: f32,
+}
+
+impl AudioClip {
+    /// A clip of one take, played whole.
+    pub fn single(take: Take) -> AudioClip {
+        AudioClip {
+            takes: Vector::unit(take),
+            comp: Vector::unit(CompSegment { start: Ticks::ZERO, take: 0 }),
+            gain_db: 0.0,
+            fade_in: Ticks(0),
+            fade_out: Ticks(0),
+            xfade_ms: 20.0,
+        }
+    }
+
+    /// The take playing at clip time `t`.
+    pub fn take_at(&self, t: Ticks) -> Option<u16> {
+        let i = self.comp.iter().take_while(|s| s.start <= t).count();
+        self.comp.get(i.checked_sub(1)?).map(|s| s.take)
+    }
+
+    /// The comp with take `take` playing over clip time `from..to` of a
+    /// clip `len` long, and the takes around it unchanged. Neighbouring
+    /// segments of one take merge.
+    pub fn comped(&self, from: Ticks, to: Ticks, take: u16, len: Ticks) -> AudioClip {
+        let (from, to) = (from.min(to).max(Ticks::ZERO), from.max(to).min(len));
+        let mut out = self.clone();
+        if to <= from || take as usize >= self.takes.len() {
+            return out;
+        }
+        let after = self.take_at(to).filter(|_| to < len);
+        let mut segs: Vec<CompSegment> = self.comp.iter().filter(|s| s.start < from || s.start > to).copied().collect();
+        segs.push(CompSegment { start: from, take });
+        if let Some(a) = after {
+            segs.push(CompSegment { start: to, take: a });
+        }
+        segs.sort_by_key(|s| s.start);
+        segs.dedup_by(|b, a| a.take == b.take || a.start == b.start);
+        out.comp = segs.into_iter().collect();
+        out
+    }
+}
+
+/// One recording of a clip's passage.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Take {
+    /// The sound, from the audio pool.
+    pub audio: AudioId,
+    /// Display name, such as `take 2`.
+    pub name: String,
+    /// The frame of the sound heard at the clip start.
+    pub offset: u64,
+}
+
+/// Where a take starts playing in a comp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompSegment {
+    /// Clip time it starts at.
+    pub start: Ticks,
+    /// Index into the takes.
+    pub take: u16,
 }
 
 /// A clip placed on the arrangement.

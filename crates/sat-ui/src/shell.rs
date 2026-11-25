@@ -290,7 +290,7 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
             });
         }
         MainView::Arrange => {
-            p.clip(sl.arrange, |p| arrange::draw(p, th, f.doc, f.arrange, &f.transport, f.levels, &al));
+            p.clip(sl.arrange, |p| arrange::draw(p, th, f.doc, f.arrange, &f.transport, f.levels, f.sounds, &al));
             if !f.session.following.is_empty() {
                 crate::session::draw_back(&mut p, th, sl.arrange);
             }

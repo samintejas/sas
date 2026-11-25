@@ -233,6 +233,30 @@ enum GridDrag {
     Pan { from: Point, start: Vec2 },
 }
 
+/// A drag on an audio clip in the arrange view.
+#[derive(Debug, Clone)]
+enum AudioDrag {
+    /// Swiping a take lane: the take plays over the swiped range (or, for
+    /// a click, over the comp segment under the press).
+    Comp { clip: ClipId, take: u16, origin: Ticks, from: Ticks, start: sat_doc::AudioClip },
+    /// Moving a fade handle.
+    Fade { clip: ClipId, origin: Ticks, out: bool },
+}
+
+/// The comp with `take` over the segment of `a` holding clip time `at`.
+fn comp_segment(a: &sat_doc::AudioClip, at: Ticks, take: u16, len: Ticks) -> sat_doc::AudioClip {
+    let i = a.comp.iter().take_while(|s| s.start <= at).count().saturating_sub(1);
+    let start = a.comp.get(i).map_or(Ticks::ZERO, |s| s.start);
+    let end = a.comp.get(i + 1).map_or(len, |s| s.start);
+    a.comped(start, end, take, len)
+}
+
+/// Clip time snapped to the sixteenth it falls in.
+fn snap16(t: Ticks) -> Ticks {
+    let s = Ticks::sixteenths(1).0;
+    Ticks(t.0.div_euclid(s) * s)
+}
+
 /// A parameter's position (0–1) on its control.
 fn position_of(doc: &Document, target: &ParamTarget) -> f64 {
     match target {
@@ -312,6 +336,7 @@ struct App {
     learn: bool,
     macro_layout: Option<sat_ui::macros::MacroLayout>,
     grid_drag: Option<GridDrag>,
+    audio_drag: Option<AudioDrag>,
     /// Length of the last drawn or resized note.
     note_len: sat_doc::sat_time::Ticks,
     last_click: Option<(Instant, Point)>,
@@ -367,6 +392,7 @@ impl App {
         self.view = MainView::Arrange;
         self.grid = GridView::default();
         self.grid_drag = None;
+        self.audio_drag = None;
         self.playback.recompile(&doc);
         self.history = History::new(doc, 500);
         self.playback.locate(Ticks::ZERO);
@@ -668,6 +694,9 @@ impl App {
         if let Some(d) = self.grid_drag.take() {
             self.end_grid_drag(d);
         }
+        if self.audio_drag.take().is_some() {
+            self.history.end_gesture();
+        }
     }
 
     fn press_session(&mut self, pt: Point) {
@@ -948,6 +977,26 @@ impl App {
         let Some(layout) = &self.layout else { return };
         match layout.hit(pt) {
             Hit::Clip { clip, .. } => self.select_clip(clip),
+            Hit::Take { placement, clip, take, at } => {
+                self.select_clip(clip);
+                let doc = self.history.doc();
+                let (Some(c), Some(p)) = (doc.clips.get(&clip), doc.placements.get(&placement)) else { return };
+                let Some(a) = c.audio.clone() else { return };
+                let after = comp_segment(&a, at, take, c.length);
+                let origin = p.start - p.offset;
+                self.history.begin_gesture("comp");
+                if after != a {
+                    self.edit("comp", vec![Op::SetClipAudio { clip, audio: Some(after) }]);
+                }
+                self.audio_drag = Some(AudioDrag::Comp { clip, take, origin, from: snap16(at), start: a });
+            }
+            Hit::Fade { placement, clip, out } => {
+                self.select_clip(clip);
+                let Some(p) = self.history.doc().placements.get(&placement) else { return };
+                let origin = p.start - p.offset;
+                self.history.begin_gesture("fade");
+                self.audio_drag = Some(AudioDrag::Fade { clip, origin, out });
+            }
             Hit::Mute(t) => self.toggle_flag(t, TrackFlag::Mute),
             Hit::Solo(t) => self.toggle_flag(t, TrackFlag::Solo),
             Hit::Arm(t) => self.toggle_flag(t, TrackFlag::Arm),
@@ -1224,6 +1273,41 @@ impl App {
         }
     }
 
+    fn audio_drag_to(&mut self) {
+        let (Some(d), Some(l)) = (self.audio_drag.clone(), self.layout.as_ref()) else { return };
+        let doc = self.history.doc();
+        match d {
+            AudioDrag::Comp { clip, take, origin, from, start } => {
+                let Some(c) = doc.clips.get(&clip) else { return };
+                let at = l.tick_at(self.cursor.x) - origin;
+                let to = snap16(at);
+                // under a sixteenth of travel it is still a click on one segment
+                let after = if to == from {
+                    comp_segment(&start, at, take, c.length)
+                } else {
+                    start.comped(from, to, take, c.length)
+                };
+                if c.audio.as_ref() != Some(&after) {
+                    self.edit("comp", vec![Op::SetClipAudio { clip, audio: Some(after) }]);
+                }
+            }
+            AudioDrag::Fade { clip, origin, out } => {
+                let Some(c) = doc.clips.get(&clip) else { return };
+                let Some(mut a) = c.audio.clone() else { return };
+                let at = (l.tick_at(self.cursor.x) - origin).0;
+                let len = c.length.0;
+                if out {
+                    a.fade_out = Ticks((len - at).clamp(0, len - a.fade_in.0));
+                } else {
+                    a.fade_in = Ticks(at.clamp(0, len - a.fade_out.0));
+                }
+                if c.audio.as_ref() != Some(&a) {
+                    self.edit("fade", vec![Op::SetClipAudio { clip, audio: Some(a) }]);
+                }
+            }
+        }
+    }
+
     fn grid_drag_to(&mut self) {
         let Some(d) = self.grid_drag.clone() else { return };
         let pt = self.cursor;
@@ -1483,8 +1567,12 @@ impl ApplicationHandler for App {
             WindowEvent::CursorMoved { position, .. } => {
                 let scale = self.gfx.as_ref().map(|g| g.window.scale_factor()).unwrap_or(1.0);
                 self.cursor = Point::new(position.x / scale, position.y / scale);
-                dirty = self.drag.is_some() || self.roll_drag.is_some() || self.grid_drag.is_some();
+                dirty = self.drag.is_some()
+                    || self.roll_drag.is_some()
+                    || self.grid_drag.is_some()
+                    || self.audio_drag.is_some();
                 self.drag_to();
+                self.audio_drag_to();
                 self.roll_drag_to();
                 self.grid_drag_to();
             }
@@ -1609,6 +1697,7 @@ fn main() {
         learn: false,
         macro_layout: None,
         grid_drag: None,
+        audio_drag: None,
         note_len: Ticks::sixteenths(1),
         last_click: None,
         last_frame: Instant::now(),

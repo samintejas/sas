@@ -404,3 +404,86 @@ fn session_clips_launch_over_the_arrangement() {
     assert_eq!(back, play(vec![], 96_000));
     assert!(c.launch(s.ret, Some(clip), 0).is_none(), "returns launch nothing");
 }
+
+#[test]
+fn audio_clips_play_their_comp_with_fades_and_crossfades() {
+    use std::sync::Arc;
+    let mut h = History::new(Document::new(1), 10);
+    let (t, op) = Op::add_track("vox", None, 0);
+    let clip = ClipId::new();
+    let (a, b) = (AudioId::new(), AudioId::new());
+    let file = |id, n: &str| AudioFile {
+        id,
+        name: n.into(),
+        file: format!("{n}.wav"),
+        rate: 48_000,
+        channels: 1,
+        frames: 96_000,
+    };
+    h.apply(
+        "clip",
+        [
+            op,
+            Op::AddClip {
+                id: clip,
+                track: t,
+                name: "vox".into(),
+                color: Color(4),
+                length: Ticks::quarters(4),
+                looped: false,
+                seed: 1,
+            },
+            Op::AddAudio { file: file(a, "a") },
+            Op::AddAudio { file: file(b, "b") },
+            Op::AddPlacement {
+                id: PlacementId::new(),
+                clip,
+                start: Ticks::quarters(1),
+                offset: Ticks::ZERO,
+                length: Ticks::quarters(4),
+            },
+        ],
+    )
+    .unwrap();
+    let take = |audio, n: u32| Take { audio, name: format!("take {n}"), offset: 0 };
+    let mut ac = AudioClip::single(take(a, 1));
+    ac.takes.push_back(take(b, 2));
+    // take 2 over beats 2–3 of the clip (timeline beats 3–4)
+    let ac = ac.comped(Ticks::quarters(2), Ticks::quarters(3), 1, Ticks::quarters(4));
+    h.apply("comp", [Op::SetClipAudio { clip, audio: Some(ac) }]).unwrap();
+    let mut sounds = sat_compile::Sounds::new();
+    sounds.insert(a, Arc::new(sat_engine::Sample { rate: 48_000.0, l: vec![0.2; 96_000], r: vec![0.2; 96_000] }));
+    sounds.insert(b, Arc::new(sat_engine::Sample { rate: 48_000.0, l: vec![0.4; 96_000], r: vec![0.4; 96_000] }));
+    let c = sat_compile::compile_with(h.doc(), SR, BLOCK, &sounds).unwrap();
+    let (l, _) = sat_engine::render(c.schedule, 0, 6 * 24_000, BLOCK);
+    let at = |beat: f64| l[(beat * 24_000.0) as usize];
+    assert_eq!(rms(&l[..24_000]), 0.0, "silent before the placement");
+    let (lo, hi) = (at(1.5), at(3.5));
+    assert!(lo > 0.0 && (hi / lo - 2.0).abs() < 1e-3, "take 2 plays twice as loud: {lo} {hi}");
+    assert!((at(4.5) - lo).abs() < 1e-6, "and take 1 again after it");
+    // the 20 ms crossfades never dip below the quieter take
+    let xf = 480;
+    for (i, v) in l.iter().enumerate().take(3 * 24_000 + xf).skip(3 * 24_000 - xf) {
+        assert!(*v >= lo * 0.999 && *v <= hi * 1.42, "{i}: {v}");
+    }
+    assert_eq!(rms(&l[5 * 24_000 + 10..]), 0.0, "silent after the clip");
+    // a placement trimmed into the clip starts the sound at its offset, declicked
+    let p = h.doc().placements.keys().next().copied().unwrap();
+    h.apply(
+        "trim",
+        [Op::UpdatePlacement {
+            id: p,
+            start: Ticks::quarters(1),
+            offset: Ticks::quarters(2),
+            length: Ticks::quarters(2),
+        }],
+    )
+    .unwrap();
+    let segs = sat_compile::audio_segments(h.doc(), t, &h.doc().tempo_map().unwrap(), SR, &sounds);
+    assert_eq!(segs[0].at, 24_000);
+    assert_eq!(segs[0].src, 48_000.0, "plays from two beats in");
+    assert_eq!(segs[0].fade_in, 96, "a 2 ms declick at the cut");
+    // without its sound a take is silent
+    let c = sat_compile::compile_with(h.doc(), SR, BLOCK, &sat_compile::Sounds::new()).unwrap();
+    assert_eq!(rms(&sat_engine::render(c.schedule, 0, 4 * 24_000, BLOCK).0), 0.0);
+}

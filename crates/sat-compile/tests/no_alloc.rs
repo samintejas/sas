@@ -8,6 +8,7 @@ mod common;
 
 use assert_no_alloc::{AllocDisabler, assert_no_alloc};
 use common::*;
+use sat_doc::sat_time::Ticks;
 use sat_doc::*;
 use sat_engine::{Command, engine};
 
@@ -101,6 +102,35 @@ fn instrument_patches_drums_and_samplers_do_not_allocate() {
     let tone: Vec<f32> = (0..4410).map(|i| (i as f32 * 0.05).sin()).collect();
     let mut sounds = sat_compile::Sounds::new();
     sounds.insert(audio, std::sync::Arc::new(sat_engine::Sample::from_interleaved(44_100.0, 1, &tone)));
+    // an audio clip of two comped takes on the lead
+    let clip = ClipId::new();
+    let take = |n: u32| Take { audio, name: format!("take {n}"), offset: 0 };
+    let mut ac = AudioClip::single(take(1));
+    ac.takes.push_back(take(2));
+    let ac = ac.comped(Ticks::sixteenths(2), Ticks::sixteenths(5), 1, Ticks::quarters(2));
+    s.h.apply(
+        "audio clip",
+        [
+            Op::AddClip {
+                id: clip,
+                track: s.lead,
+                name: "vox".into(),
+                color: Color(4),
+                length: Ticks::quarters(2),
+                looped: false,
+                seed: 1,
+            },
+            Op::SetClipAudio { clip, audio: Some(ac) },
+            Op::AddPlacement {
+                id: PlacementId::new(),
+                clip,
+                start: Ticks::ZERO,
+                offset: Ticks::ZERO,
+                length: Ticks::quarters(2),
+            },
+        ],
+    )
+    .unwrap();
     // and a full fx chain on the bass
     let fx_grid = s.h.doc().tracks[&s.bass].fx_grids[0];
     use sat_modules::fx;

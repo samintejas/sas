@@ -470,3 +470,29 @@ mod macros {
         assert!(grids_for(&d.doc, None, None).is_empty());
     }
 }
+
+#[test]
+fn audio_clips_show_take_lanes_and_fade_handles() {
+    let (d, l) = layout();
+    let vox = d.doc.tracks.values().find(|t| t.name == "vox").unwrap().id;
+    assert_eq!(sat_ui::arrange::take_lanes(&d.doc, vox), 3);
+    let row = l.rows.iter().find(|r| r.track == vox).unwrap();
+    assert_eq!(row.h, 52.0 + 3.0 * sat_ui::arrange::TAKE_H + 4.0, "taller, for its take lanes");
+    let verse = l.takes.iter().find(|k| k.take == 1 && k.origin == bars(4)).unwrap();
+    // a point a bar into the clip on take 2's lane
+    let x = l.x_of(bars(5));
+    match l.hit(Point::new(x, verse.rect.center().y)) {
+        Hit::Take { take, at, .. } => {
+            assert_eq!(take, 1);
+            assert!((at.0 - bars(1).0).abs() <= 20, "{at:?}");
+        }
+        h => panic!("{h:?}"),
+    }
+    let cb = l.clips.iter().find(|c| c.placement == verse.placement).unwrap();
+    let (fin, fout) = cb.fades.unwrap();
+    assert!(matches!(l.hit(fin), Hit::Fade { out: false, .. }));
+    assert!(matches!(l.hit(fout), Hit::Fade { out: true, .. }));
+    assert!(cb.rect.y1 <= verse.rect.y0, "lanes sit under the clip");
+    // note clips have no fades
+    assert!(l.clips.iter().filter(|c| d.doc.clips[&c.clip].audio.is_none()).all(|c| c.fades.is_none()));
+}
