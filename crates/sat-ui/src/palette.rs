@@ -91,6 +91,7 @@ pub fn entries(doc: &Document) -> Vec<Entry> {
         Entry { label: "clip editor".into(), hint: "tab", action: Action::Panel(PanelView::Clip) },
         Entry { label: "mixer".into(), hint: "tab", action: Action::Panel(PanelView::Mixer) },
         Entry { label: "macros".into(), hint: "tab", action: Action::Panel(PanelView::Macros) },
+        Entry { label: "clip bank".into(), hint: "tab", action: Action::Panel(PanelView::Bank) },
         Entry { label: "play / stop".into(), hint: "space", action: Action::PlayStop },
         Entry { label: "loop on / off".into(), hint: "l", action: Action::Loop },
         Entry { label: "undo".into(), hint: "ctrl z", action: Action::Undo },

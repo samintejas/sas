@@ -50,6 +50,7 @@ use sat_modules::{Editor, PortKind, drum};
 use sat_ui::arrange::{ArrangeLayout, ArrangeState, Hit, RowKind, TransportView, header_controls};
 use sat_ui::arrange_edit::{self, Span};
 use sat_ui::automation;
+use sat_ui::bank::{BankHit, BankLayout, BankView};
 use sat_ui::controls::{self, SILENT_DB};
 use sat_ui::grid::{self, GridHit, GridLayout, GridView};
 use sat_ui::mixer::{Knob, Levels, MixHit, MixerLayout};
@@ -264,6 +265,15 @@ enum AudioDrag {
     Field { clip: ClipId, field: sat_ui::audio_edit::AudioField, from: f64, start: f64 },
 }
 
+/// What dropping a clip from the bank does.
+#[derive(Debug, Clone, Copy)]
+enum Drop {
+    /// Place it in the arrangement at this tick.
+    Arrange(Ticks),
+    /// Put it in this session slot.
+    Slot(sat_doc::SceneId, TrackId),
+}
+
 /// A drag on a clip placement in the arrange view. Each keeps the span the
 /// placement had when the drag began, so every move recomputes from it.
 #[derive(Debug, Clone)]
@@ -378,6 +388,11 @@ struct App {
     /// What the session is playing and queued.
     session: SessionView,
     session_layout: Option<SessionLayout>,
+    /// The clip bank's scroll and selection.
+    bank: BankView,
+    bank_layout: Option<BankLayout>,
+    /// A clip being dragged out of the bank, and where the press was.
+    bank_drag: Option<(ClipId, Point)>,
     /// Macro learn mode: the next touched parameter maps to a free macro.
     learn: bool,
     macro_layout: Option<sat_ui::macros::MacroLayout>,
@@ -600,6 +615,11 @@ impl App {
         if self.input.is_none() && !self.input_failed && monitored(self.history.doc()) {
             self.ensure_input();
         }
+        // a clip dragged out of the bank, once it has moved, and where it would land
+        let drag_clip = self
+            .bank_drag
+            .filter(|(_, from)| (self.cursor - *from).hypot() > 4.0)
+            .map(|(c, _)| (c, self.cursor, self.drop_target(c).map(|(r, ok, _)| (r, ok))));
         let Some(g) = &mut self.gfx else { return };
         let size = g.window.inner_size();
         if size.width == 0 || size.height == 0 {
@@ -632,6 +652,8 @@ impl App {
             sounds: &self.playback.pool,
             session: &self.session,
             palette: self.palette.as_ref(),
+            bank: &self.bank,
+            drag_clip,
         };
         let mut scene = Scene::new();
         let drawn = shell::draw(&mut scene, &mut self.fonts, &self.theme, &frame, w, h);
@@ -658,6 +680,10 @@ impl App {
         self.macro_layout = drawn.macros;
         self.session_layout = drawn.session;
         self.palette_layout = drawn.palette;
+        if let Some(b) = &drawn.bank {
+            self.bank.scroll = self.bank.scroll.min(b.max_scroll);
+        }
+        self.bank_layout = drawn.bank;
         self.scene.reset();
         self.scene.append(&scene, Some(vello::kurbo::Affine::scale(scale)));
         let dev = &self.ctx.devices[g.surface.dev_id];
@@ -1415,28 +1441,126 @@ impl App {
     /// Double-click on an empty lane: a new looping clip there, a bar (or one
     /// snap step, if longer) long, fed by the track's first source module.
     fn draw_clip(&mut self, track: TrackId, at: Ticks) {
-        let doc = self.history.doc();
-        let Some(tr) = doc.tracks.get(&track).filter(|t| t.kind == TrackKind::Track) else { return };
         let bar = Ticks::quarters(4);
         let step = self.arrange.snap.unwrap_or(Ticks::sixteenths(1)).0.max(1);
         let start = Ticks(at.0 - at.0.rem_euclid(step));
         let length = bar.max(self.arrange.snap.unwrap_or(bar));
-        let feed = tr.source_grid.and_then(|g| {
-            doc.modules_on(g).find(|m| sat_modules::ports(&m.kind).iter().any(|p| p.key == "notes" && !p.input))
-        });
-        let (id, pid) = (ClipId::new(), PlacementId::new());
-        let n = doc.clips_on(track).count();
-        let mut ops = vec![
-            Op::AddClip { id, track, name: format!("clip {}", n + 1), color: tr.color, length, looped: true, seed: 1 },
-            Op::AddPlacement { id: pid, clip: id, start, offset: Ticks::ZERO, length },
-        ];
-        if let Some(m) = feed {
-            ops.push(Op::Connect { id: CableId::new(), from: PortRef::new(m.id, "notes"), to: Endpoint::Inlet(id) });
-        }
+        let Some((id, mut ops)) = self.new_clip_ops(track, length) else { return };
+        let pid = PlacementId::new();
+        ops.push(Op::AddPlacement { id: pid, clip: id, start, offset: Ticks::ZERO, length });
         self.edit("draw clip", ops);
         self.select_clip(id);
         self.arrange.selected_placement = Some(pid);
         self.panel = PanelView::Clip;
+    }
+
+    /// Ops for a new looping clip on `track`, `length` long, fed by the
+    /// track's first source module; its id and the ops.
+    fn new_clip_ops(&self, track: TrackId, length: Ticks) -> Option<(ClipId, Vec<Op>)> {
+        let doc = self.history.doc();
+        let tr = doc.tracks.get(&track).filter(|t| t.kind == TrackKind::Track)?;
+        let feed = tr.source_grid.and_then(|g| {
+            doc.modules_on(g).find(|m| sat_modules::ports(&m.kind).iter().any(|p| p.key == "notes" && !p.input))
+        });
+        let id = ClipId::new();
+        let n = doc.clips_on(track).count();
+        let mut ops = vec![Op::AddClip {
+            id,
+            track,
+            name: format!("clip {}", n + 1),
+            color: tr.color,
+            length,
+            looped: true,
+            seed: 1,
+        }];
+        if let Some(m) = feed {
+            ops.push(Op::Connect { id: CableId::new(), from: PortRef::new(m.id, "notes"), to: Endpoint::Inlet(id) });
+        }
+        Some((id, ops))
+    }
+
+    fn press_bank(&mut self, pt: Point, double: bool) {
+        let Some(l) = self.bank_layout.clone() else { return };
+        match l.hit(pt) {
+            BankHit::Card(c) => {
+                self.bank.selected = Some(c);
+                self.select_clip(c);
+                self.arrange.selected_placement = None;
+                if double {
+                    // at the playhead, on the clip's own track
+                    let at = self.playback.playhead();
+                    let step = self.arrange.snap.unwrap_or(Ticks::sixteenths(1)).0.max(1);
+                    self.place_clip(c, Ticks(at.0 - at.0.rem_euclid(step)));
+                } else {
+                    self.bank_drag = Some((c, pt));
+                }
+            }
+            BankHit::Delete(c) => {
+                self.edit("delete clip", vec![Op::RemoveClip { id: c }]);
+                self.bank.selected = None;
+            }
+            BankHit::Add(t) => {
+                if let Some((id, ops)) = self.new_clip_ops(t, Ticks::quarters(4)) {
+                    self.edit("new clip", ops);
+                    self.select_clip(id);
+                    self.bank.selected = Some(id);
+                }
+            }
+            BankHit::Nothing => self.bank.selected = None,
+        }
+    }
+
+    /// Places `clip` in the arrangement at `start`, whole, and selects it.
+    fn place_clip(&mut self, clip: ClipId, start: Ticks) {
+        let Some(length) = self.history.doc().clips.get(&clip).map(|c| c.length) else { return };
+        let id = PlacementId::new();
+        self.edit(
+            "place clip",
+            vec![Op::AddPlacement { id, clip, start: start.max(Ticks::ZERO), offset: Ticks::ZERO, length }],
+        );
+        self.select_clip(clip);
+        self.arrange.selected_placement = Some(id);
+    }
+
+    /// Where a clip dragged out of the bank would land under the pointer:
+    /// its outline, whether it may land there (only on its own track), and
+    /// what dropping does.
+    fn drop_target(&self, clip: ClipId) -> Option<(Rect, bool, Drop)> {
+        let doc = self.history.doc();
+        let c = doc.clips.get(&clip)?;
+        let pt = self.cursor;
+        match self.view {
+            MainView::Arrange => {
+                let l = self.layout.as_ref()?;
+                if !l.timeline.contains(pt) {
+                    return None;
+                }
+                let row = l.row_at(pt.y).filter(|r| r.kind == RowKind::Track)?;
+                // the card is held 20 px in from its left edge
+                let start = arrange_edit::snap_round(l.tick_at(pt.x - 20.0), self.arrange.snap).max(Ticks::ZERO);
+                let r = Rect::new(l.x_of(start), row.y + 4.0, l.x_of(start + c.length), row.y + row.h - 4.0);
+                Some((r, row.track == c.track, Drop::Arrange(start)))
+            }
+            MainView::Session => {
+                let l = self.session_layout.as_ref()?;
+                let col = l.cols.iter().find(|k| !k.group && (k.head.x0..k.head.x1).contains(&pt.x))?;
+                let (scene, row) = l.scenes.iter().find(|(_, r)| (r.y0..r.y1).contains(&pt.y))?;
+                Some((l.cell(col, *row), col.track == c.track, Drop::Slot(*scene, col.track)))
+            }
+            MainView::Grid(_) => None,
+        }
+    }
+
+    /// Drops a clip dragged out of the bank.
+    fn drop_clip(&mut self, clip: ClipId) {
+        match self.drop_target(clip) {
+            Some((_, true, Drop::Arrange(start))) => self.place_clip(clip, start),
+            Some((_, true, Drop::Slot(scene, track))) => {
+                self.edit("slot clip", vec![Op::SetSlot { scene, track, clip: Some(clip) }]);
+                self.select_clip(clip);
+            }
+            _ => {}
+        }
     }
 
     /// Keys for the selected placement while the main view has focus:
@@ -1522,6 +1646,7 @@ impl App {
             Some(Tab::Clip) => return self.panel = PanelView::Clip,
             Some(Tab::Mixer) => return self.panel = PanelView::Mixer,
             Some(Tab::Macros) => return self.panel = PanelView::Macros,
+            Some(Tab::Bank) => return self.panel = PanelView::Bank,
             None => {}
         }
         if self.panel == PanelView::Clip {
@@ -1548,6 +1673,9 @@ impl App {
                 return self.press_steps(pt, double);
             }
             return self.press_roll(pt, double);
+        }
+        if self.panel == PanelView::Bank {
+            return self.press_bank(pt, double);
         }
         if self.panel == PanelView::Macros {
             return self.press_macros(pt, double);
@@ -2092,6 +2220,14 @@ impl App {
         if self.grid_key(key) {
             return self.update_title();
         }
+        if self.panel_focus
+            && self.panel == PanelView::Bank
+            && matches!(key, Key::Named(NamedKey::Delete | NamedKey::Backspace))
+            && let Some(c) = self.bank.selected.take()
+        {
+            self.edit("delete clip", vec![Op::RemoveClip { id: c }]);
+            return self.update_title();
+        }
         if self.arrange_key(key) {
             return self.update_title();
         }
@@ -2105,9 +2241,9 @@ impl App {
             Key::Named(NamedKey::Home) => self.playback.locate(Ticks::ZERO),
             Key::Named(NamedKey::Tab) => {
                 // clip, mixer, macros (shift goes back)
-                let order = [PanelView::Clip, PanelView::Mixer, PanelView::Macros];
+                let order = [PanelView::Clip, PanelView::Mixer, PanelView::Macros, PanelView::Bank];
                 let i = order.iter().position(|p| *p == self.panel).unwrap_or(0);
-                self.panel = order[(i + if shift { 2 } else { 1 }) % 3];
+                self.panel = order[(i + if shift { 3 } else { 1 }) % 4];
             }
             Key::Character(c) if ctrl && matches!(c.as_str(), "1" | "2" | "3" | "4" | "5") => match c.as_str() {
                 "1" => self.view = MainView::Session,
@@ -2152,7 +2288,10 @@ impl App {
         if let Some(sl) = self.shell
             && sl.panel.contains(self.cursor)
         {
-            if self.panel == PanelView::Mixer {
+            if self.panel == PanelView::Bank {
+                let max = self.bank_layout.as_ref().map_or(0.0, |b| b.max_scroll);
+                self.bank.scroll = (self.bank.scroll - dy).clamp(0.0, max);
+            } else if self.panel == PanelView::Mixer {
                 let d = if dx.abs() > dy.abs() { dx } else { dy };
                 let max = self.mixer.as_ref().map(|m| m.max_scroll).unwrap_or(0.0);
                 self.mixer_scroll = (self.mixer_scroll - d).clamp(0.0, max);
@@ -2241,7 +2380,8 @@ impl ApplicationHandler for App {
                     || self.grid_drag.is_some()
                     || self.audio_drag.is_some()
                     || self.clip_drag.is_some()
-                    || self.auto_drag.is_some();
+                    || self.auto_drag.is_some()
+                    || self.bank_drag.is_some();
                 self.drag_to();
                 self.clip_drag_to();
                 self.auto_drag_to();
@@ -2253,6 +2393,11 @@ impl ApplicationHandler for App {
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => match state {
                 ElementState::Pressed => self.press(),
                 ElementState::Released => {
+                    if let Some((clip, from)) = self.bank_drag.take()
+                        && (self.cursor - from).hypot() > 4.0
+                    {
+                        self.drop_clip(clip);
+                    }
                     self.end_drag();
                     self.update_title();
                 }
@@ -2422,6 +2567,9 @@ fn main() {
         grid_layout: None,
         session: SessionView::default(),
         session_layout: None,
+        bank: BankView::default(),
+        bank_layout: None,
+        bank_drag: None,
         learn: false,
         macro_layout: None,
         grid_drag: None,

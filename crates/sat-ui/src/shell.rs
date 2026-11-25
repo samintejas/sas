@@ -84,6 +84,10 @@ pub fn view_buttons(topbar: Rect) -> [(ViewButton, Rect); 5] {
     })
 }
 
+/// A clip dragged out of the bank: the clip, the pointer, and where it
+/// would land (and whether it can).
+pub type DragClip = (sat_doc::ClipId, vello::kurbo::Point, Option<(Rect, bool)>);
+
 /// The top bar's search box, which opens the command palette.
 pub fn search_box(topbar: Rect) -> Rect {
     let rx = topbar.x1 - 12.0 - 3.0 * 34.0;
@@ -127,6 +131,11 @@ pub struct Frame<'a> {
     pub session: &'a crate::session::SessionView,
     /// The command palette, when open.
     pub palette: Option<&'a crate::palette::PaletteView>,
+    /// The clip bank's scroll and selection.
+    pub bank: &'a crate::bank::BankView,
+    /// A clip dragged out of the bank: the clip, the pointer, and where it
+    /// would land (and whether it can).
+    pub drag_clip: Option<DragClip>,
 }
 
 /// Layouts of everything drawn, for hit testing.
@@ -152,6 +161,8 @@ pub struct Drawn {
     pub session: Option<crate::session::SessionLayout>,
     /// The command palette, when open.
     pub palette: Option<crate::palette::PaletteLayout>,
+    /// The clip bank, when the panel shows it.
+    pub bank: Option<crate::bank::BankLayout>,
 }
 
 /// Rectangles of the shell's regions.
@@ -346,6 +357,7 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
     let mut ae = None;
     let mut sg = None;
     let mut mc = None;
+    let mut bk = None;
     let on_screen = match f.view {
         MainView::Grid(g) => Some(g),
         MainView::Arrange | MainView::Session => None,
@@ -372,8 +384,19 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
                 let track = f.arrange.selected_track;
                 mc = Some(crate::macros::draw(p, th, f.doc, track, on_screen, f.learn, sl.panel))
             }
+            PanelView::Bank => bk = Some(crate::bank::draw(p, th, f.doc, f.bank, sl.panel)),
         });
         p.rrect_stroke(sl.panel.inset(0.5), 0.0, 1.0, th.c.border_default);
+    }
+    if let Some((clip, at, target)) = f.drag_clip {
+        if let Some((r, ok)) = target {
+            let col = if ok { th.c.accent_primary } else { th.c.accent_danger };
+            p.rrect(r, 4.0, col.alpha(0.14));
+            p.rrect_stroke(r.inset(-0.5), 4.0, 1.5, col);
+        }
+        let ghost =
+            Rect::new(at.x - 20.0, at.y - 12.0, at.x - 20.0 + crate::bank::CARD_W, at.y - 12.0 + crate::bank::CARD_H);
+        crate::bank::draw_card(&mut p, th, f.doc, clip, ghost, true);
     }
     let pl = f.palette.map(|v| crate::palette::draw(&mut p, th, f.doc, v, Rect::new(0.0, 0.0, w, h)));
     Drawn {
@@ -387,5 +410,6 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
         macros: mc,
         session: ssl,
         palette: pl,
+        bank: bk,
     }
 }
