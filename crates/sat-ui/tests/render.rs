@@ -63,6 +63,7 @@ fn renders_the_arrange_view() {
         learn: false,
         sounds: &d.sounds,
         session: &sat_ui::session::SessionView::default(),
+        palette: None,
     };
     let (w, h) = (1280u32, 800u32);
     let mut scene = vello::Scene::new();
@@ -120,6 +121,7 @@ fn renders_the_mixer() {
         learn: false,
         sounds: &d.sounds,
         session: &sat_ui::session::SessionView::default(),
+        palette: None,
     };
     let (w, h) = (1280u32, 800u32);
     let mut scene = vello::Scene::new();

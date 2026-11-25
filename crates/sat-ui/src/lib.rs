@@ -8,7 +8,9 @@
 #![warn(missing_docs)]
 
 pub mod arrange;
+pub mod arrange_edit;
 pub mod audio_edit;
+pub mod automation;
 pub mod controls;
 pub mod demo;
 pub mod gfx;
@@ -17,6 +19,7 @@ pub mod icons;
 pub mod macros;
 pub mod mixer;
 pub mod paint;
+pub mod palette;
 pub mod panel;
 pub mod piano_roll;
 pub mod record;
