@@ -200,6 +200,9 @@ pub struct Module {
     /// The sound a module plays (a sampler's sample), from the audio pool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio: Option<AudioId>,
+    /// The plugin a plugin module hosts: a `.clap` file's path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<String>,
 }
 
 /// A sound file in the project's audio pool. The samples live in the

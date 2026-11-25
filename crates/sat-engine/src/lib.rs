@@ -28,7 +28,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 
 pub use automation::{AutoCurve, AutoPoint, Automation};
-pub use fx::{FX_PARAMS, Fx, FxKind, FxModule, MAX_FX, MAX_FX_REGS};
+pub use fx::{External, FX_PARAMS, Fx, FxKind, FxModule, MAX_FX, MAX_FX_REGS};
 pub use instrument::{Instrument, MAX_MODS, MAX_PARAMS, MAX_REGS, MAX_VOICES, NONE, Patch, VKind, VModule};
 pub use monitor::{InputChannel, Monitor, MonitorMode};
 pub use player::{AudioPlayer, AudioSeg};

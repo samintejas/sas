@@ -410,6 +410,7 @@ fn fx_kind(kind: &str) -> Option<FxKind> {
         f::FX_FILTER => FxKind::Filter,
         f::SPLIT => FxKind::Split,
         f::MERGE => FxKind::Merge,
+        f::PLUGIN => FxKind::External,
         _ => return None,
     })
 }
@@ -644,7 +645,7 @@ pub fn render_track(
     if let Some(t) = live.tracks.get_mut(&track) {
         t.frozen = None;
     }
-    let c = compile_inner(&live, sample_rate, RENDER_BLOCK, sounds, Some(track))?;
+    let c = compile_inner(&live, sample_rate, RENDER_BLOCK, sounds, &NoPlugins, Some(track))?;
     Ok(render_compiled(c, sample_rate, Ticks::ZERO, song_end(&live), true))
 }
 
@@ -694,7 +695,33 @@ pub fn compile_with(
     max_block: usize,
     sounds: &Sounds,
 ) -> Result<Compiled, CompileError> {
-    compile_inner(doc, sample_rate, max_block, sounds, None)
+    compile_inner(doc, sample_rate, max_block, sounds, &NoPlugins, None)
+}
+
+/// Where plugin modules get their processors: the app's plugin hosts.
+pub trait Plugins {
+    /// A processor for the plugin module `module`, if its host is running.
+    fn processor(&self, module: ModuleId) -> Option<Box<dyn sat_engine::External>>;
+}
+
+/// No plugins: plugin modules pass audio through untouched.
+pub struct NoPlugins;
+
+impl Plugins for NoPlugins {
+    fn processor(&self, _module: ModuleId) -> Option<Box<dyn sat_engine::External>> {
+        None
+    }
+}
+
+/// Like [`compile_with`], with plugin modules running through `plugins`.
+pub fn compile_with_plugins(
+    doc: &Document,
+    sample_rate: f64,
+    max_block: usize,
+    sounds: &Sounds,
+    plugins: &dyn Plugins,
+) -> Result<Compiled, CompileError> {
+    compile_inner(doc, sample_rate, max_block, sounds, plugins, None)
 }
 
 /// [`compile_with`], with the output taken from `tap`'s pre-strip node
@@ -704,6 +731,7 @@ fn compile_inner(
     sample_rate: f64,
     max_block: usize,
     sounds: &Sounds,
+    plugins: &dyn Plugins,
     tap: Option<TrackId>,
 ) -> Result<Compiled, CompileError> {
     let tempo = doc.tempo_map().map_err(CompileError::Tempo)?;
@@ -803,7 +831,15 @@ fn compile_inner(
                 for (target, param) in module_targets(doc, &slots) {
                     params.insert(target, (id, param, Conv::Same));
                 }
-                b.node(id, NodeKind::Fx(Box::new(Fx::new(chain, sample_rate, max_block))), vec![(src, 1.0)]);
+                let mut fx = Fx::new(chain, sample_rate, max_block);
+                for (slot, m) in slots.iter().enumerate() {
+                    if doc.modules[m].kind == sat_modules::fx::PLUGIN
+                        && let Some(p) = plugins.processor(*m)
+                    {
+                        fx.set_external(slot, p);
+                    }
+                }
+                b.node(id, NodeKind::Fx(Box::new(fx)), vec![(src, 1.0)]);
                 Some(id)
             }
             (pre, _) => pre,
