@@ -47,6 +47,32 @@ pub enum ViewButton {
     Fx,
 }
 
+/// A transport button in the top bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportButton {
+    /// Stop (and back to the start when stopped).
+    Stop,
+    /// Play or pause.
+    Play,
+    /// Record onto the armed tracks.
+    Record,
+    /// Loop on or off.
+    Loop,
+}
+
+/// Where the top bar's transport buttons are.
+pub fn transport_buttons(topbar: Rect) -> [(TransportButton, Rect); 4] {
+    use TransportButton::*;
+    let cy = topbar.center().y;
+    let x0 = topbar.x0 + topbar.width() / 2.0 - 260.0;
+    let mut k = 0.0;
+    [Stop, Play, Record, Loop].map(|b| {
+        let x = x0 + 33.0 * k;
+        k += 1.0;
+        (b, Rect::new(x + 4.0, cy - 12.0, x + 30.0, cy + 12.0))
+    })
+}
+
 /// Where the top bar's view buttons are.
 pub fn view_buttons(topbar: Rect) -> [(ViewButton, Rect); 5] {
     use ViewButton::*;
@@ -105,6 +131,8 @@ pub struct Drawn {
     pub mixer: Option<MixerLayout>,
     /// The clip panel, when it shows a clip.
     pub roll: Option<RollGeom>,
+    /// The audio clip editor, when the selected clip is an audio clip.
+    pub audio: Option<crate::audio_edit::AudioEditLayout>,
     /// The step editor, when the clip's source is a drum seq or euclid.
     pub steps: Option<StepGeom>,
     /// The source grid, when shown.
@@ -218,8 +246,7 @@ fn topbar(p: &mut Painter<'_>, th: &Theme, f: &Frame<'_>, r: Rect) {
         (Icon::Record, t.recording.then_some(c.accent_danger)),
         (Icon::Loop, f.doc.loop_range.enabled.then_some(Rgba::hex(0xc8c8c8))),
     ];
-    for (ic, state) in buttons {
-        let br = Rect::new(x + 4.0, cy - 12.0, x + 30.0, cy + 12.0);
+    for ((ic, state), (_, br)) in buttons.into_iter().zip(transport_buttons(r)) {
         match (ic, state) {
             (Icon::Record, s) => {
                 p.rrect(br, 5.0, if s.is_some() { c.accent_danger.alpha(0.18) } else { Rgba::new(0, 0, 0, 0) });
@@ -299,6 +326,7 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
     p.rrect_stroke(sl.arrange.inset(0.5), 0.0, 1.0, th.c.border_default);
     let mut ml = None;
     let mut rl = None;
+    let mut ae = None;
     let mut sg = None;
     let mut mc = None;
     let on_screen = match f.view {
@@ -309,7 +337,11 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
         p.clip(sl.panel, |p| match f.panel {
             PanelView::Clip => {
                 let clip = f.arrange.selected_clip;
+                let audio = clip.filter(|c| f.doc.clips.get(c).is_some_and(|c| c.audio.is_some()));
                 match clip.and_then(|c| steps::source(f.doc, c)).map(|(_, e)| e) {
+                    _ if audio.is_some() => {
+                        ae = audio.and_then(|c| crate::audio_edit::draw(p, th, f.doc, c, f.sounds, sl.panel))
+                    }
                     Some(sat_modules::Editor::Drums | sat_modules::Editor::Euclid) => {
                         sg = steps::draw(p, th, f.doc, clip, f.steps, &f.transport, sl.panel)
                     }
@@ -326,5 +358,5 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
         });
         p.rrect_stroke(sl.panel.inset(0.5), 0.0, 1.0, th.c.border_default);
     }
-    Drawn { shell: sl, arrange: al, mixer: ml, roll: rl, steps: sg, grid: gl, macros: mc, session: ssl }
+    Drawn { shell: sl, arrange: al, mixer: ml, roll: rl, audio: ae, steps: sg, grid: gl, macros: mc, session: ssl }
 }
