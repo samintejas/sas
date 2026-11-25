@@ -47,6 +47,7 @@ use sat_ui::controls::{self, SILENT_DB};
 use sat_ui::grid::{self, GridHit, GridLayout, GridView};
 use sat_ui::mixer::{Knob, Levels, MixHit, MixerLayout};
 use sat_ui::paint::{Fonts, color};
+use sat_ui::palette::{self, Action, PaletteLayout, PaletteView};
 use sat_ui::panel::{self, PanelView, Tab};
 use sat_ui::piano_roll::{self, RollGeom, RollHit, RollView, Tool, clip_notes, next_snap};
 use sat_ui::roll_edit::{self, Edited};
@@ -327,6 +328,11 @@ struct App {
     steps: StepView,
     step_geom: Option<StepGeom>,
     view: MainView,
+    /// The view a grid's back button returns to.
+    prev_view: MainView,
+    /// The command palette, while open.
+    palette: Option<PaletteView>,
+    palette_layout: Option<PaletteLayout>,
     grid: GridView,
     grid_layout: Option<GridLayout>,
     /// What the session is playing and queued.
@@ -544,6 +550,7 @@ impl App {
             learn: self.learn,
             sounds: &self.playback.pool,
             session: &self.session,
+            palette: self.palette.as_ref(),
         };
         let mut scene = Scene::new();
         let drawn = shell::draw(&mut scene, &mut self.fonts, &self.theme, &frame, w, h);
@@ -568,6 +575,7 @@ impl App {
         self.grid_layout = drawn.grid;
         self.macro_layout = drawn.macros;
         self.session_layout = drawn.session;
+        self.palette_layout = drawn.palette;
         self.scene.reset();
         self.scene.append(&scene, Some(vello::kurbo::Affine::scale(scale)));
         let dev = &self.ctx.devices[g.surface.dev_id];
@@ -699,7 +707,7 @@ impl App {
         }
     }
 
-    fn press_session(&mut self, pt: Point) {
+    fn press_session(&mut self, pt: Point, double: bool) {
         let Some(l) = &self.session_layout else { return };
         let doc = self.history.doc();
         let hit = l.hit(doc, &self.session, pt);
@@ -721,6 +729,9 @@ impl App {
             }
             SessionHit::Track(t) => {
                 self.arrange.selected_track = Some(t);
+                if double {
+                    self.open_track(t);
+                }
                 return;
             }
             SessionHit::BackToArrangement => return self.back_to_arrangement(),
@@ -907,7 +918,7 @@ impl App {
 
     /// Keys for the piano roll; returns whether the key was used.
     fn roll_key(&mut self, key: &Key) -> bool {
-        if self.panel != PanelView::Clip || self.roll_drag.is_some() {
+        if self.panel != PanelView::Clip || self.roll_drag.is_some() || self.mods.alt_key() {
             return false;
         }
         let Some((_, _, notes, len)) = self.roll_target() else { return false };
@@ -944,6 +955,14 @@ impl App {
         let double =
             self.last_click.is_some_and(|(t, p)| now.duration_since(t) < DOUBLE_CLICK && (p - pt).hypot() < 4.0);
         self.last_click = Some((now, pt));
+        if self.palette.is_some() {
+            let hit = self.palette_layout.as_ref().and_then(|l| l.hit(pt)).map(|e| e.action);
+            self.palette = None;
+            if let Some(a) = hit {
+                self.run(a);
+            }
+            return;
+        }
         if let Some(sl) = self.shell
             && sl.panel.contains(pt)
         {
@@ -958,6 +977,7 @@ impl App {
                 Some(ViewButton::SourceGrid) => self.open_grid(self.arrange.selected_track, GridKind::Source),
                 Some(ViewButton::Instrument) => self.open_grid(self.arrange.selected_track, GridKind::Instrument),
                 Some(ViewButton::Fx) => self.open_grid(self.arrange.selected_track, GridKind::Fx),
+                _ if shell::search_box(sl.topbar).contains(pt) => self.palette = Some(PaletteView::default()),
                 _ => {}
             }
             return;
@@ -972,7 +992,7 @@ impl App {
             return self.back_to_arrangement();
         }
         if self.view == MainView::Session {
-            return self.press_session(pt);
+            return self.press_session(pt, double);
         }
         let Some(layout) = &self.layout else { return };
         match layout.hit(pt) {
@@ -1006,6 +1026,7 @@ impl App {
                     self.begin_drag(ParamTarget::Gain(t), Axis::Horizontal { travel: f.x1 - f.x0 }, double);
                 }
             }
+            Hit::Header(t) if double && !self.on_group_chevron(t, pt) => self.open_track(t),
             Hit::Header(t) => {
                 self.arrange.selected_track = Some(t);
                 let row = layout.rows.iter().find(|r| r.track == t);
@@ -1024,6 +1045,18 @@ impl App {
             }
             Hit::Lane(..) | Hit::Nothing => {}
         }
+    }
+
+    /// Whether `pt` is on group `t`'s fold chevron in the arrange headers.
+    fn on_group_chevron(&self, t: TrackId, pt: Point) -> bool {
+        let Some(layout) = &self.layout else { return false };
+        let is_group = self.history.doc().tracks.get(&t).is_some_and(|t| t.kind == TrackKind::Group);
+        is_group
+            && layout
+                .rows
+                .iter()
+                .find(|r| r.track == t)
+                .is_some_and(|r| pt.x < layout.headers.x0 + 40.0 && pt.y < r.y + 28.0)
     }
 
     fn press_panel(&mut self, sl: ShellLayout, pt: Point, double: bool) {
@@ -1061,7 +1094,9 @@ impl App {
             }
             MixHit::Mute(t) => self.toggle_flag(t, TrackFlag::Mute),
             MixHit::Solo(t) => self.toggle_flag(t, TrackFlag::Solo),
-            MixHit::Strip(t) => self.arrange.selected_track = Some(t),
+            MixHit::Grid(t, kind) => self.open_grid(Some(t), kind),
+            MixHit::Strip(t) if double => self.open_track(t),
+            MixHit::Strip(t) => self.select_track(t),
             MixHit::Nothing => {}
         }
     }
@@ -1082,12 +1117,7 @@ impl App {
                     self.begin_drag(ParamTarget::Macro { grid, index }, Axis::Vertical { travel: KNOB_TRAVEL }, double);
                 }
             }
-            MacroHit::Open(grid) => {
-                if self.view != MainView::Grid(grid) {
-                    self.grid = GridView::default();
-                }
-                self.view = MainView::Grid(grid);
-            }
+            MacroHit::Open(grid) => self.show_grid(grid),
             MacroHit::Fader(t) => {
                 self.begin_drag(ParamTarget::Gain(t), Axis::Vertical { travel: l.fader.height() }, double)
             }
@@ -1162,25 +1192,80 @@ impl App {
         }
     }
 
-    /// Shows `track`'s source or instrument grid.
+    /// Shows `track`'s grid of `kind`, if it has one.
     fn open_grid(&mut self, track: Option<TrackId>, kind: GridKind) {
-        let doc = self.history.doc();
-        let Some((t, g)) = track.and_then(|t| {
-            let tr = doc.tracks.get(&t)?;
-            let g = match kind {
-                GridKind::Source => tr.source_grid,
-                GridKind::Instrument => tr.instrument_grid,
-                GridKind::Fx => tr.fx_grids.front().copied(),
-            };
-            Some((t, g?))
-        }) else {
+        let Some(t) = track else { return };
+        let Some((_, g)) = grid::grid_kinds(self.history.doc(), t).into_iter().find(|(k, _)| *k == kind) else {
             return;
         };
+        self.show_grid(g);
+        self.arrange.selected_track = Some(t);
+    }
+
+    /// Shows grid `g`, remembering the view to go back to.
+    fn show_grid(&mut self, g: sat_doc::GridId) {
+        if !matches!(self.view, MainView::Grid(_)) {
+            self.prev_view = self.view;
+        }
         if self.view != MainView::Grid(g) {
             self.grid = GridView::default();
         }
+        self.grid.back_label = if self.prev_view == MainView::Session { "session" } else { "arrange" };
         self.view = MainView::Grid(g);
+    }
+
+    /// Leaves a grid for the view it was opened from.
+    fn leave_grid(&mut self) {
+        self.view = self.prev_view;
+    }
+
+    /// The kind of grid on screen, if one is.
+    fn grid_kind(&self) -> Option<GridKind> {
+        let MainView::Grid(g) = self.view else { return None };
+        self.history.doc().grids.get(&g).map(|g| g.kind)
+    }
+
+    /// Selects `t`; a grid on screen follows to `t`'s grid of the same kind.
+    fn select_track(&mut self, t: TrackId) {
         self.arrange.selected_track = Some(t);
+        if let Some(kind) = self.grid_kind() {
+            self.open_grid(Some(t), kind);
+        }
+    }
+
+    /// Steps the selected track up or down. In a grid, it steps to the
+    /// nearest track that has a grid of the same kind and shows that.
+    fn step_track(&mut self, down: bool) {
+        let doc = self.history.doc();
+        let kind = self.grid_kind();
+        let order: Vec<TrackId> = doc
+            .tracks_in_order()
+            .into_iter()
+            .filter(|t| match kind {
+                Some(k) => grid::grid_kinds(doc, *t).iter().any(|(gk, _)| *gk == k),
+                None => doc.tracks[t].kind != TrackKind::Master,
+            })
+            .collect();
+        if order.is_empty() {
+            return;
+        }
+        let here = self.arrange.selected_track.and_then(|t| order.iter().position(|x| *x == t));
+        let n = order.len();
+        let next = match here {
+            Some(i) if down => (i + 1) % n,
+            Some(i) => (i + n - 1) % n,
+            None => 0,
+        };
+        self.select_track(order[next]);
+    }
+
+    /// The grid a double-click on a track opens: a track's instrument, a bus's fx.
+    fn open_track(&mut self, t: TrackId) {
+        let kind = match self.history.doc().tracks.get(&t).map(|t| t.kind) {
+            Some(TrackKind::Track) => GridKind::Instrument,
+            _ => GridKind::Fx,
+        };
+        self.open_grid(Some(t), kind);
     }
 
     fn press_grid(&mut self, pt: Point, double: bool) {
@@ -1190,7 +1275,10 @@ impl App {
             self.grid.menu = false;
         }
         match hit {
-            GridHit::Back => self.view = MainView::Arrange,
+            GridHit::Back => self.leave_grid(),
+            GridHit::PrevTrack => self.step_track(false),
+            GridHit::NextTrack => self.step_track(true),
+            GridHit::Kind(kind) => self.open_grid(Some(l.track), kind),
             GridHit::AddModule => self.grid.menu = !self.grid.menu,
             GridHit::MenuItem(kind) => {
                 let doc = self.history.doc();
@@ -1422,11 +1510,91 @@ impl App {
                 self.grid.selected = None;
                 true
             }
+            Key::Named(NamedKey::Escape) => {
+                self.leave_grid();
+                true
+            }
             _ => false,
         }
     }
 
+    /// Keys while the palette is open: type to filter, arrows to move,
+    /// enter to run, escape to close.
+    fn palette_key(&mut self, key: &Key) {
+        let Some(v) = &mut self.palette else { return };
+        let n = palette::matches(self.history.doc(), &v.query).len();
+        match key {
+            Key::Named(NamedKey::Escape) => self.palette = None,
+            Key::Named(NamedKey::Enter) => {
+                let i = v.index.min(n.saturating_sub(1));
+                let a = palette::matches(self.history.doc(), &v.query).get(i).map(|e| e.action);
+                self.palette = None;
+                if let Some(a) = a {
+                    self.run(a);
+                }
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                v.index = (v.index.min(n.saturating_sub(1)) + 1).min(n.saturating_sub(1))
+            }
+            Key::Named(NamedKey::ArrowUp) => v.index = v.index.min(n.saturating_sub(1)).saturating_sub(1),
+            Key::Named(NamedKey::Backspace) => {
+                v.query.pop();
+                v.index = 0;
+            }
+            Key::Named(NamedKey::Space) => {
+                v.query.push(' ');
+                v.index = 0;
+            }
+            Key::Character(c) if !(self.mods.control_key() || self.mods.super_key()) => {
+                v.query.push_str(c);
+                v.index = 0;
+            }
+            Key::Character(c) if c.eq_ignore_ascii_case("k") => self.palette = None,
+            _ => {}
+        }
+    }
+
+    /// Runs a palette entry.
+    fn run(&mut self, a: Action) {
+        match a {
+            Action::Session => self.view = MainView::Session,
+            Action::Arrange => self.view = MainView::Arrange,
+            Action::Grid(t, kind) => self.open_grid(Some(t), kind),
+            Action::Select(t) => self.select_track(t),
+            Action::Panel(p) => self.panel = p,
+            Action::PlayStop => self.playback.toggle(),
+            Action::Loop => self.toggle_loop(),
+            Action::Undo | Action::Redo => self.undo(a == Action::Redo),
+            Action::Save => self.save(false),
+        }
+        self.update_title();
+    }
+
+    fn toggle_loop(&mut self) {
+        let mut r = self.history.doc().loop_range;
+        r.enabled = !r.enabled;
+        self.edit("loop", vec![Op::SetLoop { range: r }]);
+    }
+
+    fn undo(&mut self, redo: bool) {
+        self.end_drag();
+        let did = if redo { self.history.redo() } else { self.history.undo() };
+        if did.is_some() {
+            self.roll.selected.clear();
+            self.playback.recompile(self.history.doc());
+        }
+    }
+
     fn key(&mut self, key: &Key) {
+        if self.palette.is_some() {
+            return self.palette_key(key);
+        }
+        if (self.mods.control_key() || self.mods.super_key())
+            && matches!(key, Key::Character(c) if c.eq_ignore_ascii_case("k"))
+        {
+            self.palette = Some(PaletteView::default());
+            return;
+        }
         if self.learn && matches!(key, Key::Named(NamedKey::Escape)) {
             self.learn = false;
             return self.update_title();
@@ -1443,25 +1611,28 @@ impl App {
             Key::Named(NamedKey::Space) => self.playback.toggle(),
             Key::Named(NamedKey::Home) => self.playback.locate(Ticks::ZERO),
             Key::Named(NamedKey::Tab) => {
-                self.panel = if self.panel == PanelView::Mixer { PanelView::Clip } else { PanelView::Mixer };
+                // clip, mixer, macros (shift goes back)
+                let order = [PanelView::Clip, PanelView::Mixer, PanelView::Macros];
+                let i = order.iter().position(|p| *p == self.panel).unwrap_or(0);
+                self.panel = order[(i + if shift { 2 } else { 1 }) % 3];
             }
-            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("z") => {
-                self.end_drag();
-                let did = if shift { self.history.redo() } else { self.history.undo() };
-                if did.is_some() {
-                    self.roll.selected.clear();
-                    self.playback.recompile(self.history.doc());
-                }
+            Key::Character(c) if ctrl && matches!(c.as_str(), "1" | "2" | "3" | "4" | "5") => match c.as_str() {
+                "1" => self.view = MainView::Session,
+                "2" => self.view = MainView::Arrange,
+                "3" => self.open_grid(self.arrange.selected_track, GridKind::Source),
+                "4" => self.open_grid(self.arrange.selected_track, GridKind::Instrument),
+                _ => self.open_grid(self.arrange.selected_track, GridKind::Fx),
+            },
+            Key::Character(c) if !ctrl && (c == "[" || c == "]") => self.step_track(c == "]"),
+            Key::Named(NamedKey::ArrowUp | NamedKey::ArrowDown) if self.mods.alt_key() => {
+                self.step_track(matches!(key, Key::Named(NamedKey::ArrowDown)));
             }
+            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("z") => self.undo(shift),
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("s") => self.save(shift),
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("o") => self.open(),
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("n") => self.new_project(),
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("q") => self.quit = true,
-            Key::Character(c) if !ctrl && c == "l" => {
-                let mut r = self.history.doc().loop_range;
-                r.enabled = !r.enabled;
-                self.edit("loop", vec![Op::SetLoop { range: r }]);
-            }
+            Key::Character(c) if !ctrl && c == "l" => self.toggle_loop(),
             Key::Character(c) if !ctrl && (c == "m" || c == "s") => {
                 if let Some(t) = self.arrange.selected_track {
                     let kind = self.history.doc().tracks[&t].kind;
@@ -1690,6 +1861,9 @@ fn main() {
         steps: StepView::default(),
         step_geom: None,
         view: MainView::Arrange,
+        prev_view: MainView::Arrange,
+        palette: None,
+        palette_layout: None,
         grid: GridView::default(),
         grid_layout: None,
         session: SessionView::default(),

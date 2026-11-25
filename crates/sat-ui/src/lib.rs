@@ -16,6 +16,7 @@ pub mod icons;
 pub mod macros;
 pub mod mixer;
 pub mod paint;
+pub mod palette;
 pub mod panel;
 pub mod piano_roll;
 pub mod roll_edit;

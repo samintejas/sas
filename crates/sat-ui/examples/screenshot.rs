@@ -4,6 +4,7 @@
 //!
 //! A clip name selects that clip and shows it in the bottom panel. A fourth
 //! argument `grid` shows the selected clip's source grid instead of the arrangement.
+//! `SAT_PALETTE=<query>` draws the command palette open with that query.
 
 use sat_doc::sat_time::Ticks;
 use sat_ui::arrange::{ArrangeState, TransportView};
@@ -61,6 +62,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             session.queued.insert(*t, (Some(*c), sat_ui::demo::bars(8)));
         }
     }
+    // SAT_PALETTE=<query> draws the command palette open with that query
+    let palette = std::env::var("SAT_PALETTE").ok().map(|query| sat_ui::palette::PaletteView { query, index: 0 });
     let (w, h) = (1440.0, 900.0);
     let levels = sat_ui::demo::levels(&demo.doc);
     let frame = Frame {
@@ -80,6 +83,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         learn: false,
         sounds: &demo.sounds,
         session: &session,
+        palette: palette.as_ref(),
     };
     let t = std::time::Instant::now();
     shell::draw(&mut scene, &mut fonts, &theme, &frame, w, h);

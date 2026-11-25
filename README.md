@@ -100,7 +100,14 @@ cargo run --release -p sat-app -- my.sat  # opens a project bundle
 | Keys and mouse | Does |
 |---|---|
 | Space, Home, `l` | play / stop, back to the start, loop on / off |
-| Tab, or the panel tabs | switch the bottom panel between the clip and the mixer |
+| Ctrl+K (Cmd+K), or the search box | the command palette: type part of a track's name and what to open (`bass fx`, `vox ins`, `mixer`), arrows and Enter to run |
+| Ctrl+1 to Ctrl+5 | session, arrangement, and the selected track's source, instrument or fx grid |
+| `[` / `]`, Alt+Up / Alt+Down | select the previous / next track; in a grid, show the previous / next track's grid of the same kind |
+| a grid's ‹ › buttons and source / instrument / fx tabs | step to a neighbouring track's grid, or switch to another of this track's grids |
+| a mixer strip's src / ins / fx buttons, double-click a strip, a track header or a session column header | open that track's grid (double-click opens a track's instrument, a bus's fx) |
+| click a mixer strip while a grid is shown | the grid follows to that track |
+| Esc in a grid with nothing selected, or its back button | back to the arrangement or session it was opened from |
+| Tab, Shift+Tab, or the panel tabs | cycle the bottom panel through clip, mixer and macros |
 | drag a fader or knob | set level, pan or a send (Shift for fine steps, double-click to reset); one drag is one undo step |
 | `m` / `s` buttons, or the keys | mute / solo (the keys act on the selected track); the round button arms recording |
 | Ctrl+Z, Ctrl+Shift+Z | undo, redo |

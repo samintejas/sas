@@ -47,6 +47,8 @@ pub struct GridView {
     pub menu: bool,
     /// A cable being dragged: from (an output) to (the pointer), and what it carries.
     pub wire: Option<(Point, Point, PortKind)>,
+    /// What the back button returns to ("arrange" when empty).
+    pub back_label: &'static str,
 }
 
 /// A module card's geometry.
@@ -97,8 +99,14 @@ pub struct Wire {
 /// What is under a point in the grid view.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GridHit {
-    /// Back to the arrange view.
+    /// Back to the view the grid was opened from.
     Back,
+    /// The previous track's grid of the same kind.
+    PrevTrack,
+    /// The next track's grid of the same kind.
+    NextTrack,
+    /// Another of the same track's grids.
+    Kind(GridKind),
     /// The add-module button.
     AddModule,
     /// An item of the add-module menu, by kind.
@@ -142,6 +150,12 @@ pub struct GridLayout {
     pub bar: Rect,
     /// Back button.
     pub back: Rect,
+    /// Previous-track button.
+    pub prev: Rect,
+    /// Next-track button.
+    pub next: Rect,
+    /// Tabs for the track's grids: source, instrument, fx (those it has).
+    pub kinds: Vec<(GridKind, Rect)>,
     /// Add-module button.
     pub add_module: Rect,
     /// Add-module menu items, when open.
@@ -183,6 +197,19 @@ fn rows_of(m: &Module) -> Vec<Option<&'static str>> {
 fn port_rows(ports: &[PortSpec]) -> usize {
     let ins = ports.iter().filter(|p| p.input).count();
     ins.max(ports.len() - ins).max(1)
+}
+
+/// The grids `track` has, in tab order: source, instrument, fx.
+pub fn grid_kinds(doc: &Document, track: TrackId) -> Vec<(GridKind, GridId)> {
+    let Some(t) = doc.tracks.get(&track) else { return Vec::new() };
+    [
+        (GridKind::Source, t.source_grid),
+        (GridKind::Instrument, t.instrument_grid),
+        (GridKind::Fx, t.fx_grids.front().copied()),
+    ]
+    .into_iter()
+    .filter_map(|(k, g)| Some((k, g?)))
+    .collect()
 }
 
 /// Where module position `pos` is on screen.
@@ -262,6 +289,22 @@ pub fn layout(doc: &Document, grid: GridId, r: Rect, view: &GridView) -> Option<
     let bar = Rect::new(r.x0, r.y0, r.x1, r.y0 + BAR_H);
     let cy = bar.center().y;
     let back = Rect::new(r.x0 + 12.0, cy - 13.0, r.x0 + 104.0, cy + 13.0);
+    let prev = Rect::new(back.x1 + 10.0, cy - 13.0, back.x1 + 34.0, cy + 13.0);
+    let next = Rect::new(prev.x1 + 138.0, cy - 13.0, prev.x1 + 162.0, cy + 13.0);
+    let mut kx = next.x1 + 14.0;
+    let kinds = grid_kinds(doc, track)
+        .into_iter()
+        .map(|(k, _)| {
+            let w = match k {
+                GridKind::Source => 72.0,
+                GridKind::Instrument => 100.0,
+                GridKind::Fx => 44.0,
+            };
+            let r = Rect::new(kx, cy - 13.0, kx + w, cy + 13.0);
+            kx += w;
+            (k, r)
+        })
+        .collect();
     let add_module = Rect::new(r.x1 - 96.0, cy - 13.0, r.x1 - 12.0, cy + 13.0);
     let menu = if view.menu {
         sat_modules::catalogue(kind)
@@ -315,7 +358,24 @@ pub fn layout(doc: &Document, grid: GridId, r: Rect, view: &GridView) -> Option<
             Some(Wire { cable: k.id, from, to, kind })
         })
         .collect();
-    Some(GridLayout { track, grid, kind, bar, back, add_module, menu, canvas, dock, add_clip, cards, rows, wires })
+    Some(GridLayout {
+        track,
+        grid,
+        kind,
+        bar,
+        back,
+        prev,
+        next,
+        kinds,
+        add_module,
+        menu,
+        canvas,
+        dock,
+        add_clip,
+        cards,
+        rows,
+        wires,
+    })
 }
 
 impl GridLayout {
@@ -326,6 +386,15 @@ impl GridLayout {
         }
         if self.back.contains(pt) {
             return GridHit::Back;
+        }
+        if self.prev.contains(pt) {
+            return GridHit::PrevTrack;
+        }
+        if self.next.contains(pt) {
+            return GridHit::NextTrack;
+        }
+        if let Some((k, _)) = self.kinds.iter().find(|(_, r)| r.contains(pt)) {
+            return GridHit::Kind(*k);
         }
         if self.add_module.contains(pt) {
             return GridHit::AddModule;
@@ -735,18 +804,37 @@ pub fn draw(
     p.rect(l.bar, c.bg_base);
     p.hline(l.bar.x0, l.bar.x1, l.bar.y1 - 1.0, c.border_default);
     let cy = l.bar.center().y;
-    chip(p, th, l.back, "arrange", Some(Icon::ChevronLeft));
-    let mut x = l.back.x1 + 16.0;
+    let back = if view.back_label.is_empty() { "arrange" } else { view.back_label };
+    chip(p, th, l.back, back, Some(Icon::ChevronLeft));
+    // the track, with buttons to step to its neighbours' grids of the same kind
+    for (r, ic) in [(l.prev, Icon::ChevronLeft), (l.next, Icon::ChevronRight)] {
+        p.rrect(r, 5.0, c.bg_control);
+        p.rrect_stroke(r.inset(-0.5), 5.0, 1.0, c.border_default);
+        icons::draw(p, ic, Rect::new(r.center().x - 6.0, cy - 6.0, r.center().x + 6.0, cy + 6.0), c.text_primary);
+    }
+    let x = l.prev.x1 + 10.0;
     p.rrect(Rect::new(x, cy - 5.0, x + 10.0, cy + 5.0), 2.0, tcol);
-    x += 18.0;
-    x += p.text(x, cy, &tr.name, &TextStyle::mono(12.0, c.text_strong), Align::Left) + 8.0;
-    x += p.text(x, cy, "/", &TextStyle::mono(12.0, c.text_secondary), Align::Left) + 8.0;
-    let title = match l.kind {
-        GridKind::Source => "source grid",
-        GridKind::Instrument => "instrument",
-        GridKind::Fx => "fx",
-    };
-    x += p.text(x, cy, title, &TextStyle::mono(12.0, c.text_max).medium(), Align::Left) + 16.0;
+    p.text_fit(x + 16.0, cy, &tr.name, &TextStyle::mono(12.0, c.text_strong), l.next.x0 - x - 24.0);
+    // the track's grids as tabs
+    if let (Some((_, first)), Some((_, last))) = (l.kinds.first(), l.kinds.last()) {
+        let all = Rect::new(first.x0, first.y0, last.x1, last.y1);
+        p.rrect(all, 5.0, c.bg_control);
+        p.rrect_stroke(all.inset(-0.5), 5.0, 1.0, c.border_default);
+    }
+    for (k, r) in &l.kinds {
+        let on = *k == l.kind;
+        if on {
+            p.rrect(r.inset(-2.0), 4.0, c.bg_raised);
+        }
+        let title = match k {
+            GridKind::Source => "source",
+            GridKind::Instrument => "instrument",
+            GridKind::Fx => "fx",
+        };
+        let col = if on { c.text_max } else { c.text_secondary };
+        p.text(r.center().x, cy, title, &TextStyle::mono(12.0, col), Align::Center);
+    }
+    let x = l.kinds.last().map_or(l.next.x1, |(_, r)| r.x1) + 16.0;
     if let Some(clip) = selected_clip.and_then(|id| doc.clips.get(&id)).filter(|cl| cl.track == l.track && source) {
         let label = format!("clip · {}", clip.name);
         let w = p.fonts.measure(&label, &TextStyle::mono(12.0, c.text_strong)) as f64;

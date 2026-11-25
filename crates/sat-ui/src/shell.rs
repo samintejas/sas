@@ -58,6 +58,13 @@ pub fn view_buttons(topbar: Rect) -> [(ViewButton, Rect); 5] {
     })
 }
 
+/// The top bar's search box, which opens the command palette.
+pub fn search_box(topbar: Rect) -> Rect {
+    let rx = topbar.x1 - 12.0 - 3.0 * 34.0;
+    let cy = topbar.center().y;
+    Rect::new(rx - 78.0, cy - 13.0, rx - 6.0, cy + 13.0)
+}
+
 /// Everything the shell needs to draw a frame.
 pub struct Frame<'a> {
     /// The project.
@@ -92,6 +99,8 @@ pub struct Frame<'a> {
     pub sounds: &'a sat_disk::Pool,
     /// What the session is playing.
     pub session: &'a crate::session::SessionView,
+    /// The command palette, when open.
+    pub palette: Option<&'a crate::palette::PaletteView>,
 }
 
 /// Layouts of everything drawn, for hit testing.
@@ -113,6 +122,8 @@ pub struct Drawn {
     pub macros: Option<crate::macros::MacroLayout>,
     /// The session view, when shown.
     pub session: Option<crate::session::SessionLayout>,
+    /// The command palette, when open.
+    pub palette: Option<crate::palette::PaletteLayout>,
 }
 
 /// Rectangles of the shell's regions.
@@ -254,11 +265,17 @@ fn topbar(p: &mut Painter<'_>, th: &Theme, f: &Frame<'_>, r: Rect) {
         icons::draw(p, ic, Rect::new(rx - 22.0, cy - 8.0, rx - 6.0, cy + 8.0), c.text_secondary);
         rx -= 34.0;
     }
-    let search = Rect::new(rx - 78.0, cy - 13.0, rx - 6.0, cy + 13.0);
+    let search = search_box(r);
     p.rrect(search, 5.0, c.bg_control);
     p.rrect_stroke(search.inset(-0.5), 5.0, 1.0, c.border_default);
     icons::draw(p, Icon::Search, Rect::new(search.x0 + 8.0, cy - 6.0, search.x0 + 20.0, cy + 6.0), c.text_secondary);
-    p.text(search.x1 - 8.0, cy, "cmd k", &TextStyle::mono(10.5, c.text_secondary), Align::Right);
+    p.text(
+        search.x1 - 8.0,
+        cy,
+        if cfg!(target_os = "macos") { "cmd k" } else { "ctrl k" },
+        &TextStyle::mono(10.5, c.text_secondary),
+        Align::Right,
+    );
 }
 
 /// Draws a whole frame of `w`×`h` logical pixels into `scene`.
@@ -326,5 +343,6 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
         });
         p.rrect_stroke(sl.panel.inset(0.5), 0.0, 1.0, th.c.border_default);
     }
-    Drawn { shell: sl, arrange: al, mixer: ml, roll: rl, steps: sg, grid: gl, macros: mc, session: ssl }
+    let pl = f.palette.map(|v| crate::palette::draw(&mut p, th, f.doc, v, Rect::new(0.0, 0.0, w, h)));
+    Drawn { shell: sl, arrange: al, mixer: ml, roll: rl, steps: sg, grid: gl, macros: mc, session: ssl, palette: pl }
 }
