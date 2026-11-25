@@ -684,7 +684,8 @@ fn track_label(doc: &Document, t: &Track) -> String {
     match t.kind {
         TrackKind::Track => {
             let ins = t.instrument_grid.and_then(|g| sat_modules::instrument::label(doc, g));
-            ins.unwrap_or_else(|| "empty".into())
+            let ins = ins.unwrap_or_else(|| "empty".into());
+            if t.frozen.is_some() { format!("frozen · {ins}") } else { ins }
         }
         _ => String::new(),
     }
@@ -1135,7 +1136,10 @@ fn draw_clip(p: &mut Painter<'_>, th: &Theme, doc: &Document, st: &ArrangeState,
     let Some(pl) = doc.placements.get(&cb.placement) else { return };
     let col = th.track(clip.color.0);
     let muted = doc.tracks[&clip.track].mixer.mute;
+    let frozen = doc.tracks[&clip.track].frozen.is_some();
     let col = if muted { col.mix(Rgba::hex(0x333333), 0.45) } else { col };
+    // a frozen track's clips turn icy: they play a render, not their notes
+    let col = if frozen { col.mix(Rgba::hex(0xa9c7d8), 0.45) } else { col };
     let r = cb.rect;
     let header_h = 17.0;
     p.rrect(r, 4.0, col.mix(Rgba::hex(0x111111), 0.16));
@@ -1159,13 +1163,18 @@ fn draw_clip(p: &mut Painter<'_>, th: &Theme, doc: &Document, st: &ArrangeState,
         // note thumbnail
         let body = Rect::new(r.x0 + 2.0, r.y0 + header_h + 3.0, r.x1 - 2.0, r.y1 - 3.0);
         let feed = doc.inlet_cable(clip.id).map(|k| k.from.module);
-        let notes = feed.map(|m| sat_modules::effective_notes(doc, m, clip.id)).unwrap_or_default();
+        let mut notes = feed.map(|m| sat_modules::effective_notes(doc, m, clip.id)).unwrap_or_default();
+        let reseeds = feed.is_some_and(|m| sat_modules::reseeds(doc, m));
         if !notes.is_empty() {
             let (lo, hi) = notes.iter().fold((127u8, 0u8), |(a, b), n| (a.min(n.pitch), b.max(n.pitch)));
             let span = (hi - lo).max(6) as f64;
             let nh = (body.height() / (span + 1.0)).clamp(1.5, 3.0);
             let mut k = 0;
             while k * len < pl.offset.0 + pl.length.0 {
+                // a reseeding generator plays a new phrase each time round
+                if reseeds && k > 0 {
+                    notes = sat_modules::effective_notes_at(doc, feed.unwrap(), clip.id, k as u64);
+                }
                 for n in notes.iter() {
                     let ct = k * len + n.start.0;
                     if ct < pl.offset.0 || ct >= pl.offset.0 + pl.length.0 || n.start.0 >= len {

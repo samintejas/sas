@@ -7,9 +7,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use sat_engine::Engine;
 
-/// Input queued past this many blocks is skipped, so monitoring stays close
-/// to live when the input and output clocks drift.
-const MAX_QUEUED_BLOCKS: usize = 3;
+use crate::cushion::Cushion;
+
+/// Largest callback the input cushion reads in one go; bigger callbacks
+/// play without input.
+const MAX_CALLBACK: usize = 8192;
 
 /// A running output stream. Dropping it stops audio.
 pub struct Output {
@@ -55,7 +57,7 @@ pub fn start(mut engine: Engine, max_block: usize) -> Result<Output, String> {
     // scratch buffers, allocated here so the callback never allocates
     let mut left = vec![0.0f32; max_block];
     let mut right = vec![0.0f32; max_block];
-    let (mut in_l, mut in_r) = (vec![0.0f32; max_block], vec![0.0f32; max_block]);
+    let mut cushion = Cushion::new(MAX_CALLBACK);
     let (monitor, mut monitor_rx) = rtrb::RingBuffer::<rtrb::Consumer<f32>>::new(1);
     let mut input: Option<rtrb::Consumer<f32>> = None;
     let latency_us = Arc::new(AtomicU32::new(0));
@@ -72,27 +74,18 @@ pub fn start(mut engine: Engine, max_block: usize) -> Result<Output, String> {
                 let ts = info.timestamp();
                 lat.store(ts.playback.duration_since(ts.callback).as_micros() as u32, Ordering::Relaxed);
                 let frames = data.len() / channels.max(1);
+                // the whole callback's input at once, so it has no gaps mid-callback
+                let got = match &mut input {
+                    Some(i) if frames <= MAX_CALLBACK => cushion.fill(i, frames),
+                    _ => 0,
+                };
                 let mut done = 0;
                 while done < frames {
                     let n = (frames - done).min(max_block);
-                    let mut got = 0;
-                    if let Some(i) = &mut input {
-                        let excess = i.slots().saturating_sub(max_block * 2 * MAX_QUEUED_BLOCKS) / 2 * 2;
-                        if excess > 0
-                            && let Ok(c) = i.read_chunk(excess)
-                        {
-                            c.commit_all();
-                        }
-                        got = (i.slots() / 2).min(n);
-                        if let Ok(c) = i.read_chunk(got * 2) {
-                            let (a, b) = c.as_slices();
-                            for (k, v) in a.iter().chain(b.iter()).enumerate() {
-                                if k % 2 == 0 { in_l[k / 2] = *v } else { in_r[k / 2] = *v }
-                            }
-                            c.commit_all();
-                        }
-                    }
-                    engine.process_with_input(&in_l[..got], &in_r[..got], &mut left[..n], &mut right[..n]);
+                    let k = got.saturating_sub(done).min(n);
+                    let (il, ir) =
+                        (&cushion.l[done.min(got)..done.min(got) + k], &cushion.r[done.min(got)..done.min(got) + k]);
+                    engine.process_with_input(il, ir, &mut left[..n], &mut right[..n]);
                     for k in 0..n {
                         let frame = &mut data[(done + k) * channels..(done + k + 1) * channels];
                         for (ch, s) in frame.iter_mut().enumerate() {

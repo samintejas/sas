@@ -38,6 +38,8 @@ pub enum Action {
     Redo,
     /// Save.
     Save,
+    /// Freeze a track, or unfreeze it.
+    Freeze(TrackId),
 }
 
 /// One palette entry.
@@ -86,6 +88,10 @@ pub fn entries(doc: &Document) -> Vec<Entry> {
             out.push(Entry { label: format!("{name} · {}", kind_name(k)), hint, action: Action::Grid(t, k) });
         }
         out.push(Entry { label: format!("{name} · select"), hint: "[ ]", action: Action::Select(t) });
+        if tr.kind == TrackKind::Track {
+            let what = if tr.frozen.is_some() { "unfreeze" } else { "freeze" };
+            out.push(Entry { label: format!("{name} · {what}"), hint: "ctrl f", action: Action::Freeze(t) });
+        }
     }
     out.extend([
         Entry { label: "clip editor".into(), hint: "tab", action: Action::Panel(PanelView::Clip) },

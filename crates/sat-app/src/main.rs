@@ -30,6 +30,7 @@
 //! (or the loop) to a WAV file without opening a window.
 
 mod audio;
+mod cushion;
 mod export;
 mod input;
 mod project;
@@ -572,6 +573,32 @@ impl App {
             Err(e) => eprintln!("save failed: {e}"),
         }
         self.update_title();
+    }
+
+    /// Freezes `t` (renders its sources through its fx into the pool, and
+    /// plays that instead), or unfreezes it. The patch is kept either way.
+    fn toggle_freeze(&mut self, t: TrackId) {
+        let doc = self.history.doc();
+        let Some(tr) = doc.tracks.get(&t).filter(|tr| tr.kind == TrackKind::Track) else { return };
+        if tr.frozen.is_some() {
+            return self.edit("unfreeze", vec![Op::SetFrozen { id: t, frozen: None }]);
+        }
+        let name = format!("{} freeze", tr.name);
+        let rate = self.playback.compiled.schedule.sample_rate();
+        let t0 = Instant::now();
+        match sat_compile::render_track(doc, self.playback.pool.sounds(), rate, t) {
+            Ok((l, r)) => {
+                let secs = l.len() as f64 / rate;
+                let file = self.playback.pool.add_frozen(&name, sat_disk::Sample { rate: rate as f32, l, r });
+                let audio = file.id;
+                eprintln!("froze {name}: {secs:.1} s in {:.1} s", t0.elapsed().as_secs_f64());
+                self.edit(
+                    "freeze",
+                    vec![Op::AddAudio { file }, Op::SetFrozen { id: t, frozen: Some(sat_doc::Frozen { audio }) }],
+                );
+            }
+            Err(e) => eprintln!("cannot freeze {}: {e}", tr.name),
+        }
     }
 
     fn export(&mut self, span: export::Span) {
@@ -2056,6 +2083,7 @@ impl App {
             Action::Loop => self.toggle_loop(),
             Action::Undo | Action::Redo => self.undo(a == Action::Redo),
             Action::Save => self.save(false),
+            Action::Freeze(t) => self.toggle_freeze(t),
         }
         self.update_title();
     }
@@ -2128,6 +2156,11 @@ impl App {
                 self.export(if shift { export::Span::Loop } else { export::Span::Song })
             }
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("q") => self.quit = true,
+            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("f") => {
+                if let Some(t) = self.arrange.selected_track {
+                    self.toggle_freeze(t);
+                }
+            }
             Key::Character(c) if !ctrl && c == "l" => self.toggle_loop(),
             Key::Character(c) if !ctrl && (c == "m" || c == "s") => {
                 if let Some(t) = self.arrange.selected_track {

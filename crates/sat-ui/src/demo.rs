@@ -555,7 +555,6 @@ pub fn demo() -> Demo {
         b.ops.push(Op::AddSend { track: t, target: hall, level_db: -10.0, pre_fader: false });
     }
     b.ops.push(Op::AddSend { track: vox, target: echo, level_db: -14.0, pre_fader: false });
-    b.ops.push(Op::SetTrackFlag { id: vox, flag: TrackFlag::Arm, on: true });
     b.ops.push(Op::AddSend { track: rhythm, target: hall, level_db: -24.0, pre_fader: false });
     b.ops.push(Op::AddSend { track: drums, target: hall, level_db: -18.0, pre_fader: false });
     // fader levels as in the design's mixer

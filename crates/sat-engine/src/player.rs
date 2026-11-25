@@ -33,7 +33,13 @@ pub struct AudioSeg {
 #[derive(Debug, Clone)]
 pub struct AudioPlayer {
     segs: Vec<AudioSeg>,
+    /// The timeline sample the next block would start at while playing, and
+    /// how far a stop's fade-out has got.
+    stopping: Option<(i64, usize)>,
 }
+
+/// Seconds a sound fades out over when the transport stops in it.
+const STOP_FADE_S: f64 = 0.005;
 
 /// Equal-power fade gain for `x` from 0 (silent) to 1 (full).
 fn fade(x: f64) -> f32 {
@@ -45,7 +51,7 @@ impl AudioPlayer {
     pub fn new(mut segs: Vec<AudioSeg>) -> AudioPlayer {
         segs.retain(|s| s.len > 0);
         segs.sort_by_key(|s| s.at);
-        AudioPlayer { segs }
+        AudioPlayer { segs, stopping: None }
     }
 
     /// The segments, by start.
@@ -54,7 +60,25 @@ impl AudioPlayer {
     }
 
     pub(crate) fn process(&mut self, out: &mut crate::Buf, off: usize, len: usize, pos: Option<i64>, sr: f64) {
-        let Some(t0) = pos else { return };
+        match pos {
+            Some(t0) => {
+                self.add(out, off, t0, len, sr, |_| 1.0);
+                self.stopping = Some((t0 + len as i64, 0));
+            }
+            // stopped mid-sound: let it fade rather than click
+            None => {
+                let Some((t0, done)) = self.stopping else { return };
+                let total = ((STOP_FADE_S * sr) as usize).max(1);
+                let n = len.min(total - done);
+                self.add(out, off, t0, n, sr, |k| 1.0 - (done + k) as f32 / total as f32);
+                self.stopping = (done + n < total).then_some((t0 + n as i64, done + n));
+            }
+        }
+    }
+
+    /// Adds `len` frames from timeline sample `t0`, scaled by `env` (by
+    /// frame of the block).
+    fn add(&self, out: &mut crate::Buf, off: usize, t0: i64, len: usize, sr: f64, env: impl Fn(usize) -> f32) {
         let t1 = t0 + len as i64;
         // segments starting after this block are all later in the list
         let end = self.segs.partition_point(|s| s.at < t1);
@@ -76,6 +100,7 @@ impl AudioPlayer {
                 }
                 let (l, r) = s.sound.at(s.src + rel as f64 * ratio);
                 let i = off + (t - t0) as usize;
+                let g = g * env((t - t0) as usize);
                 out.l[i] += l * g;
                 out.r[i] += r * g;
             }
@@ -143,5 +168,23 @@ mod tests {
         assert_eq!(v[0], 10.0);
         assert_eq!(v[40], 30.0);
         assert_eq!(v[100], 0.0);
+    }
+
+    #[test]
+    fn stopping_mid_sound_fades_out_instead_of_cutting() {
+        let seg = AudioSeg { at: 0, len: 48_000, sound: dc(1.0, 48_000), src: 0.0, fade_in: 0, fade_out: 0, gain: 1.0 };
+        let mut p = AudioPlayer::new(vec![seg]);
+        assert_eq!(render(&mut p, 0, 640)[639], 1.0);
+        let mut out = Vec::new();
+        let mut b = Buf { l: vec![0.0; 64], r: vec![0.0; 64] };
+        for _ in 0..8 {
+            b.l.fill(0.0);
+            p.process(&mut b, 0, 64, None, 48_000.0);
+            out.extend_from_slice(&b.l);
+        }
+        // 5 ms at 48 kHz: 240 samples down to silence, no step bigger than a ramp's
+        assert!(out[0] > 0.99);
+        assert!(out.windows(2).all(|w| (w[0] - w[1]).abs() < 0.01));
+        assert!(out[240..].iter().all(|v| *v == 0.0));
     }
 }

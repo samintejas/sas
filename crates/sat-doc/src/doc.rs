@@ -78,6 +78,7 @@ impl Document {
             fx_grids: Vector::unit(master_fx),
             armed: false,
             monitor: Monitor::Off,
+            frozen: None,
         };
         let fx = Grid::new(master_fx, master, GridKind::Fx);
         let tempo = Lane {

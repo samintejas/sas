@@ -499,10 +499,13 @@ fn audio_clips_show_take_lanes_and_fade_handles() {
 
 #[test]
 fn armed_tracks_show_a_monitor_switch() {
-    let (d, l) = layout();
+    let (mut d, l) = layout();
     let vox = d.doc.tracks.values().find(|t| t.name == "vox").unwrap().id;
+    assert!(!l.rows.iter().find(|r| r.track == vox).unwrap().monitor, "the demo arms nothing");
+    sat_doc::apply(&mut d.doc, Op::SetTrackFlag { id: vox, flag: TrackFlag::Arm, on: true }).unwrap();
+    let l = ArrangeLayout::new(&d.doc, &ArrangeState::default(), Rect::new(0.0, 0.0, 1400.0, 700.0));
     let row = l.rows.iter().find(|r| r.track == vox).unwrap();
-    assert!(row.monitor, "the demo's vox is armed");
+    assert!(row.monitor, "an armed track shows it");
     let hc = sat_ui::arrange::header_controls(row, l.headers);
     let parts = sat_ui::arrange::monitor_parts(hc.monitor.unwrap());
     assert_eq!(l.hit(parts[2].1.center()), Hit::Monitor(vox, Monitor::Off));
