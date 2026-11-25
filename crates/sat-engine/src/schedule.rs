@@ -126,6 +126,8 @@ pub struct Strip {
     pub mute: bool,
     /// Gain automation in dB; overrides the base value while it has data at the playhead.
     pub gain_lane: Option<Automation>,
+    /// Pan automation (-1 to 1); overrides the base pan while it has data at the playhead.
+    pub pan_lane: Option<Automation>,
     /// Post-fader peak meter, if anyone is watching.
     pub meter: Option<Arc<Meter>>,
     gains: (Smooth, Smooth),
@@ -134,10 +136,26 @@ pub struct Strip {
 impl Strip {
     /// A strip with these settings.
     pub fn new(gain_db: f32, pan: f32, mute: bool, gain_lane: Option<Automation>) -> Strip {
-        let mut s = Strip { gain_db, pan, mute, gain_lane, meter: None, gains: (Smooth::new(0.0), Smooth::new(0.0)) };
+        let mut s = Strip {
+            gain_db,
+            pan,
+            mute,
+            gain_lane,
+            pan_lane: None,
+            meter: None,
+            gains: (Smooth::new(0.0), Smooth::new(0.0)),
+        };
         let (l, r) = s.target_gains(None);
         s.gains = (Smooth::new(l), Smooth::new(r));
         s
+    }
+
+    /// Adds a pan automation lane.
+    pub fn with_pan_lane(mut self, lane: Option<Automation>) -> Strip {
+        self.pan_lane = lane;
+        let (l, r) = self.target_gains(None);
+        self.gains = (Smooth::new(l), Smooth::new(r));
+        self
     }
 
     /// Attaches a post-fader meter.
@@ -155,8 +173,12 @@ impl Strip {
             _ => self.gain_db,
         };
         let g = db_to_gain(db);
+        let pan = match (pos, &self.pan_lane) {
+            (Some(p), Some(lane)) => lane.value_at(p).unwrap_or(self.pan),
+            _ => self.pan,
+        };
         // equal-power pan
-        let a = (self.pan.clamp(-1.0, 1.0) + 1.0) * core::f32::consts::FRAC_PI_4;
+        let a = (pan.clamp(-1.0, 1.0) + 1.0) * core::f32::consts::FRAC_PI_4;
         (g * a.cos() * core::f32::consts::SQRT_2, g * a.sin() * core::f32::consts::SQRT_2)
     }
 
@@ -522,5 +544,18 @@ mod tests {
         s.process(&mut b, 0, 64, None);
         let (l, r) = m.take();
         assert!((l - 0.5).abs() < 1e-3 && (r - 0.5).abs() < 1e-3, "{l} {r}");
+    }
+
+    #[test]
+    fn a_pan_lane_overrides_the_pan_where_it_has_points() {
+        use crate::automation::{AutoCurve, AutoPoint};
+        let hard_left = |at| AutoPoint { at, value: -1.0, curve: AutoCurve::Linear };
+        let lane = Automation::new(vec![hard_left(0), hard_left(1000)]);
+        let s = Strip::new(0.0, 0.0, false, None).with_pan_lane(Some(lane));
+        let (l, r) = s.target_gains(Some(500));
+        assert!(l > 1.4 && r.abs() < 1e-6, "{l} {r}");
+        // past the last point the strip's own (centre) pan plays
+        let (l, r) = s.target_gains(Some(2000));
+        assert!((l - r).abs() < 1e-6, "{l} {r}");
     }
 }

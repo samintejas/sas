@@ -38,16 +38,19 @@ use std::time::{Duration, Instant};
 use sat_compile::Compiled;
 use sat_doc::sat_time::Ticks;
 use sat_doc::{
-    CableId, ClipId, Document, Endpoint, GridKind, History, ModuleId, Note, Op, ParamTarget, PortRef, TrackFlag,
-    TrackId, TrackKind,
+    Breakpoint, CableId, ClipId, Document, Endpoint, GridKind, History, LaneId, ModuleId, Note, Op, ParamTarget,
+    PlacementId, PortRef, TrackFlag, TrackId, TrackKind,
 };
 use sat_engine::{Command, EngineHandle};
 use sat_modules::{Editor, PortKind, drum, euclid};
-use sat_ui::arrange::{ArrangeLayout, ArrangeState, Hit, TransportView, header_controls};
+use sat_ui::arrange::{ArrangeLayout, ArrangeState, Hit, RowKind, TransportView, header_controls};
+use sat_ui::arrange_edit::{self, Span};
+use sat_ui::automation;
 use sat_ui::controls::{self, SILENT_DB};
 use sat_ui::grid::{self, GridHit, GridLayout, GridView};
 use sat_ui::mixer::{Knob, Levels, MixHit, MixerLayout};
 use sat_ui::paint::{Fonts, color};
+use sat_ui::palette::{self, Action, PaletteLayout, PaletteView};
 use sat_ui::panel::{self, PanelView, Tab};
 use sat_ui::piano_roll::{self, RollGeom, RollHit, RollView, Tool, clip_notes, next_snap};
 use sat_ui::roll_edit::{self, Edited};
@@ -257,6 +260,17 @@ enum AudioDrag {
     Field { clip: ClipId, field: sat_ui::audio_edit::AudioField, from: f64, start: f64 },
 }
 
+/// A drag on a clip placement in the arrange view. Each keeps the span the
+/// placement had when the drag began, so every move recomputes from it.
+#[derive(Debug, Clone)]
+enum ClipDrag {
+    /// Moving it along its track; `copy` (alt at the press) moves a copy
+    /// instead, made once the pointer has moved.
+    Move { placement: PlacementId, from: Span, x: f64, copy: bool },
+    /// Dragging its left or right edge.
+    Trim { placement: PlacementId, from: Span, x: f64, right: bool },
+}
+
 /// The comp with `take` over the segment of `a` holding clip time `at`.
 fn comp_segment(a: &sat_doc::AudioClip, at: Ticks, take: u16, len: Ticks) -> sat_doc::AudioClip {
     let i = a.comp.iter().take_while(|s| s.start <= at).count().saturating_sub(1);
@@ -350,6 +364,11 @@ struct App {
     steps: StepView,
     step_geom: Option<StepGeom>,
     view: MainView,
+    /// The view a grid's back button returns to.
+    prev_view: MainView,
+    /// The command palette, while open.
+    palette: Option<PaletteView>,
+    palette_layout: Option<PaletteLayout>,
     grid: GridView,
     grid_layout: Option<GridLayout>,
     /// What the session is playing and queued.
@@ -361,6 +380,14 @@ struct App {
     grid_drag: Option<GridDrag>,
     audio_drag: Option<AudioDrag>,
     audio_layout: Option<sat_ui::audio_edit::AudioEditLayout>,
+    clip_drag: Option<ClipDrag>,
+    /// A breakpoint being dragged: its lane, index, and the lane's points when the drag began.
+    auto_drag: Option<(LaneId, usize, Vec<Breakpoint>)>,
+    /// The last press was in the bottom panel (keys go to its editor), else
+    /// in the main view (keys edit clips there).
+    panel_focus: bool,
+    /// The pointer shape shown, so it is only set when it changes.
+    cursor_icon: winit::window::CursorIcon,
     /// Length of the last drawn or resized note.
     note_len: sat_doc::sat_time::Ticks,
     last_click: Option<(Instant, Point)>,
@@ -422,6 +449,8 @@ impl App {
         self.grid = GridView::default();
         self.grid_drag = None;
         self.audio_drag = None;
+        self.clip_drag = None;
+        self.auto_drag = None;
         self.playback.recompile(&doc);
         self.history = History::new(doc, 500);
         self.playback.locate(Ticks::ZERO);
@@ -577,6 +606,7 @@ impl App {
             learn: self.learn,
             sounds: &self.playback.pool,
             session: &self.session,
+            palette: self.palette.as_ref(),
         };
         let mut scene = Scene::new();
         let drawn = shell::draw(&mut scene, &mut self.fonts, &self.theme, &frame, w, h);
@@ -602,6 +632,7 @@ impl App {
         self.grid_layout = drawn.grid;
         self.macro_layout = drawn.macros;
         self.session_layout = drawn.session;
+        self.palette_layout = drawn.palette;
         self.scene.reset();
         self.scene.append(&scene, Some(vello::kurbo::Affine::scale(scale)));
         let dev = &self.ctx.devices[g.surface.dev_id];
@@ -832,9 +863,16 @@ impl App {
         if self.audio_drag.take().is_some() {
             self.history.end_gesture();
         }
+        if self.clip_drag.take().is_some() {
+            self.history.end_gesture();
+        }
+        if self.auto_drag.take().is_some() {
+            self.arrange.active_point = None;
+            self.history.end_gesture();
+        }
     }
 
-    fn press_session(&mut self, pt: Point) {
+    fn press_session(&mut self, pt: Point, double: bool) {
         let Some(l) = &self.session_layout else { return };
         let doc = self.history.doc();
         let hit = l.hit(doc, &self.session, pt);
@@ -856,6 +894,9 @@ impl App {
             }
             SessionHit::Track(t) => {
                 self.arrange.selected_track = Some(t);
+                if double {
+                    self.open_track(t);
+                }
                 return;
             }
             SessionHit::BackToArrangement => return self.back_to_arrangement(),
@@ -1042,7 +1083,7 @@ impl App {
 
     /// Keys for the piano roll; returns whether the key was used.
     fn roll_key(&mut self, key: &Key) -> bool {
-        if self.panel != PanelView::Clip || self.roll_drag.is_some() {
+        if self.panel != PanelView::Clip || self.roll_drag.is_some() || self.mods.alt_key() || !self.panel_focus {
             return false;
         }
         let Some((_, _, notes, len)) = self.roll_target() else { return false };
@@ -1079,6 +1120,15 @@ impl App {
         let double =
             self.last_click.is_some_and(|(t, p)| now.duration_since(t) < DOUBLE_CLICK && (p - pt).hypot() < 4.0);
         self.last_click = Some((now, pt));
+        if self.palette.is_some() {
+            let hit = self.palette_layout.as_ref().and_then(|l| l.hit(pt)).map(|e| e.action);
+            self.palette = None;
+            if let Some(a) = hit {
+                self.run(a);
+            }
+            return;
+        }
+        self.panel_focus = self.shell.is_some_and(|sl| sl.panel.contains(pt));
         if let Some(sl) = self.shell
             && sl.panel.contains(pt)
         {
@@ -1114,6 +1164,7 @@ impl App {
                 Some(ViewButton::SourceGrid) => self.open_grid(self.arrange.selected_track, GridKind::Source),
                 Some(ViewButton::Instrument) => self.open_grid(self.arrange.selected_track, GridKind::Instrument),
                 Some(ViewButton::Fx) => self.open_grid(self.arrange.selected_track, GridKind::Fx),
+                _ if shell::search_box(sl.topbar).contains(pt) => self.palette = Some(PaletteView::default()),
                 _ => {}
             }
             return;
@@ -1128,11 +1179,28 @@ impl App {
             return self.back_to_arrangement();
         }
         if self.view == MainView::Session {
-            return self.press_session(pt);
+            return self.press_session(pt, double);
         }
         let Some(layout) = &self.layout else { return };
         match layout.hit(pt) {
-            Hit::Clip { clip, .. } => self.select_clip(clip),
+            Hit::Clip { placement, clip } => {
+                self.select_clip(clip);
+                self.arrange.selected_placement = Some(placement);
+                self.begin_clip_drag(placement, None);
+            }
+            Hit::ClipEdge { placement, clip, right } => {
+                self.select_clip(clip);
+                self.arrange.selected_placement = Some(placement);
+                self.begin_clip_drag(placement, Some(right));
+            }
+            Hit::AutoToggle(t) => self.toggle_lanes(t),
+            Hit::LaneAdd(t) => self.add_lane(t),
+            Hit::LaneRemove(id) => self.edit("remove lane", vec![Op::RemoveLane { id }]),
+            hit @ (Hit::AutoPoint { .. } | Hit::AutoLane { .. }) => self.press_lane(hit, double),
+            Hit::Snap => self.arrange.snap = sat_ui::arrange::next_snap(self.arrange.snap),
+            Hit::Lane(t, at) if double && layout.row_at(pt.y).is_some_and(|r| r.kind == RowKind::Track) => {
+                self.draw_clip(t, at)
+            }
             Hit::Take { placement, clip, take, at } => {
                 self.select_clip(clip);
                 let doc = self.history.doc();
@@ -1168,6 +1236,7 @@ impl App {
                     self.begin_drag(ParamTarget::Gain(t), Axis::Horizontal { travel: f.x1 - f.x0 }, double);
                 }
             }
+            Hit::Header(t) if double && !self.on_group_chevron(t, pt) => self.open_track(t),
             Hit::Header(t) => {
                 self.arrange.selected_track = Some(t);
                 let row = layout.rows.iter().find(|r| r.track == t);
@@ -1184,8 +1253,243 @@ impl App {
                 let snapped = Ticks((t.0 / 960) * 960).max(Ticks::ZERO);
                 self.playback.locate(snapped);
             }
-            Hit::Lane(..) | Hit::Nothing => {}
+            Hit::Lane(..) | Hit::Nothing => self.arrange.selected_placement = None,
         }
+    }
+
+    /// The track's lanes: shown or hidden, or a gain lane started when it has none.
+    fn toggle_lanes(&mut self, t: TrackId) {
+        let doc = self.history.doc();
+        let has = automation::lane_targets(t).iter().any(|x| automation::lane_of(doc, x).is_some());
+        if has {
+            if !self.arrange.hidden_lanes.remove(&t) {
+                self.arrange.hidden_lanes.insert(t);
+            }
+        } else {
+            self.edit("add lane", vec![Op::AddLane { id: LaneId::new(), target: ParamTarget::Gain(t) }]);
+            self.arrange.hidden_lanes.remove(&t);
+        }
+    }
+
+    /// Adds the track's next lane that does not exist yet (gain, then pan).
+    fn add_lane(&mut self, t: TrackId) {
+        let doc = self.history.doc();
+        if let Some(target) = automation::lane_targets(t).into_iter().find(|x| automation::lane_of(doc, x).is_none()) {
+            self.edit("add lane", vec![Op::AddLane { id: LaneId::new(), target }]);
+        }
+    }
+
+    /// A press on a lane: on a point, drag it (double-click deletes it); on
+    /// empty space, add a point there (creating the lane if needed) and drag it.
+    fn press_lane(&mut self, hit: Hit, double: bool) {
+        let snap = if self.mods.alt_key() { None } else { Some(Ticks::sixteenths(1)) };
+        match hit {
+            Hit::AutoPoint { lane, index } => {
+                let Some(l) = self.history.doc().lanes.get(&lane) else { return };
+                let pts: Vec<Breakpoint> = l.points.iter().copied().collect();
+                if double {
+                    self.edit(
+                        "delete point",
+                        vec![Op::SetLanePoints { id: lane, points: automation::remove(&pts, index).into() }],
+                    );
+                    self.arrange.active_point = None;
+                    return;
+                }
+                self.history.begin_gesture("move point");
+                self.arrange.active_point = Some((lane, index));
+                self.auto_drag = Some((lane, index, pts));
+            }
+            Hit::AutoLane { track, lane, tick, pos } => {
+                let doc = self.history.doc();
+                let mut ops = Vec::new();
+                let (id, target, pts) = match lane.and_then(|id| doc.lanes.get(&id)) {
+                    Some(l) => (l.id, l.target.clone(), l.points.iter().copied().collect::<Vec<_>>()),
+                    None => {
+                        let id = LaneId::new();
+                        ops.push(Op::AddLane { id, target: ParamTarget::Gain(track) });
+                        (id, ParamTarget::Gain(track), Vec::new())
+                    }
+                };
+                let tick = arrange_edit::snap_round(tick, snap).max(Ticks::ZERO);
+                let (after, index) = automation::insert(&pts, tick, automation::value_at(doc, &target, pos));
+                ops.push(Op::SetLanePoints { id, points: after.clone().into() });
+                self.history.begin_gesture("add point");
+                self.edit("add point", ops);
+                self.arrange.active_point = Some((id, index));
+                self.auto_drag = Some((id, index, after));
+            }
+            _ => {}
+        }
+    }
+
+    fn auto_drag_to(&mut self) {
+        let (Some((lane, index, pts)), Some(l)) = (self.auto_drag.clone(), self.layout.as_ref()) else { return };
+        let doc = self.history.doc();
+        let Some(target) = doc.lanes.get(&lane).map(|x| x.target.clone()) else { return };
+        let Some(a) = l.autos.iter().find(|a| a.lane == Some(lane)) else { return };
+        let snap = if self.mods.alt_key() { None } else { Some(Ticks::sixteenths(1)) };
+        let tick = arrange_edit::snap_round(l.tick_at(self.cursor.x), snap).max(Ticks::ZERO);
+        let value = automation::value_at(doc, &target, automation::pos_at(a.rect, self.cursor.y));
+        let after = automation::move_point(&pts, index, tick, value);
+        if doc.lanes.get(&lane).is_some_and(|x| x.points.iter().ne(after.iter())) {
+            self.edit("move point", vec![Op::SetLanePoints { id: lane, points: after.into() }]);
+        }
+    }
+
+    /// Starts moving a placement or, given an edge (`Some(right)`), trimming
+    /// it. Alt-dragging a clip's body drags a copy and leaves the original.
+    fn begin_clip_drag(&mut self, placement: PlacementId, edge: Option<bool>) {
+        let Some(p) = self.history.doc().placements.get(&placement).cloned() else { return };
+        let from = Span::of(&p);
+        let x = self.cursor.x;
+        if let Some(right) = edge {
+            self.history.begin_gesture("trim clip");
+            self.clip_drag = Some(ClipDrag::Trim { placement, from, x, right });
+            return;
+        }
+        let copy = self.mods.alt_key();
+        self.history.begin_gesture(if copy { "copy clip" } else { "move clip" });
+        self.clip_drag = Some(ClipDrag::Move { placement, from, x, copy });
+    }
+
+    fn clip_drag_to(&mut self) {
+        let Some(mut d) = self.clip_drag.clone() else { return };
+        if let ClipDrag::Move { placement, from, x, copy: true } = d {
+            if (self.cursor.x - x).abs() < 3.0 {
+                return;
+            }
+            let doc = self.history.doc();
+            let Some(p) = doc.placements.get(&placement) else { return };
+            let Some((clip, pid, ops)) = arrange_edit::copy_ops(doc, p, from) else { return };
+            self.edit("copy clip", ops);
+            self.select_clip(clip);
+            self.arrange.selected_placement = Some(pid);
+            d = ClipDrag::Move { placement: pid, from, x, copy: false };
+            self.clip_drag = Some(d.clone());
+        }
+        let Some(l) = self.layout.as_ref() else { return };
+        // alt trims off the grid (alt at the press already chose a copy for moves)
+        let snap = if self.mods.alt_key() && matches!(d, ClipDrag::Trim { .. }) { None } else { self.arrange.snap };
+        let doc = self.history.doc();
+        let (placement, span) = match d {
+            ClipDrag::Move { placement, from, x, .. } => {
+                let delta = l.tick_at(self.cursor.x).0 - l.tick_at(x).0;
+                (placement, arrange_edit::moved(from, delta, snap))
+            }
+            ClipDrag::Trim { placement, from, x, right } => {
+                let Some(clip) = doc.placements.get(&placement).and_then(|p| doc.clips.get(&p.clip)) else { return };
+                let delta = l.tick_at(self.cursor.x).0 - l.tick_at(x).0;
+                (placement, arrange_edit::trimmed(from, clip, right, delta, snap))
+            }
+        };
+        if doc.placements.get(&placement).is_some_and(|p| Span::of(p) != span) {
+            self.edit("clip", vec![span.op(placement)]);
+        }
+    }
+
+    /// Double-click on an empty lane: a new looping clip there, a bar (or one
+    /// snap step, if longer) long, fed by the track's first source module.
+    fn draw_clip(&mut self, track: TrackId, at: Ticks) {
+        let doc = self.history.doc();
+        let Some(tr) = doc.tracks.get(&track).filter(|t| t.kind == TrackKind::Track) else { return };
+        let bar = Ticks::quarters(4);
+        let step = self.arrange.snap.unwrap_or(Ticks::sixteenths(1)).0.max(1);
+        let start = Ticks(at.0 - at.0.rem_euclid(step));
+        let length = bar.max(self.arrange.snap.unwrap_or(bar));
+        let feed = tr.source_grid.and_then(|g| {
+            doc.modules_on(g).find(|m| sat_modules::ports(&m.kind).iter().any(|p| p.key == "notes" && !p.input))
+        });
+        let (id, pid) = (ClipId::new(), PlacementId::new());
+        let n = doc.clips_on(track).count();
+        let mut ops = vec![
+            Op::AddClip { id, track, name: format!("clip {}", n + 1), color: tr.color, length, looped: true, seed: 1 },
+            Op::AddPlacement { id: pid, clip: id, start, offset: Ticks::ZERO, length },
+        ];
+        if let Some(m) = feed {
+            ops.push(Op::Connect { id: CableId::new(), from: PortRef::new(m.id, "notes"), to: Endpoint::Inlet(id) });
+        }
+        self.edit("draw clip", ops);
+        self.select_clip(id);
+        self.arrange.selected_placement = Some(pid);
+        self.panel = PanelView::Clip;
+    }
+
+    /// Keys for the selected placement while the main view has focus:
+    /// delete, ctrl+d (a copy right after it), left / right (nudge by the
+    /// snap), ctrl+l (loop over it), escape (deselect).
+    fn arrange_key(&mut self, key: &Key) -> bool {
+        if self.panel_focus || self.view != MainView::Arrange || self.clip_drag.is_some() {
+            return false;
+        }
+        let doc = self.history.doc();
+        let Some(p) = self.arrange.selected_placement.and_then(|p| doc.placements.get(&p)).cloned() else {
+            return false;
+        };
+        let ctrl = self.mods.control_key() || self.mods.super_key();
+        let from = Span::of(&p);
+        let step = self.arrange.snap.unwrap_or(Ticks::sixteenths(1)).0;
+        match key {
+            Key::Named(NamedKey::Delete | NamedKey::Backspace) => {
+                let ops = arrange_edit::remove_ops(doc, p.id);
+                self.edit("delete clip", ops);
+                self.arrange.selected_placement = None;
+            }
+            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("d") => {
+                let to = Span { start: from.end(), ..from };
+                let Some((clip, pid, ops)) = arrange_edit::copy_ops(doc, &p, to) else { return true };
+                self.edit("duplicate clip", ops);
+                self.select_clip(clip);
+                self.arrange.selected_placement = Some(pid);
+            }
+            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("l") => {
+                let range = sat_doc::LoopRange { start: from.start, end: from.end(), enabled: true };
+                self.edit("loop to clip", vec![Op::SetLoop { range }]);
+            }
+            Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight) if !self.mods.alt_key() => {
+                let d = if matches!(key, Key::Named(NamedKey::ArrowLeft)) { -step } else { step };
+                let to = Span { start: Ticks((from.start.0 + d).max(0)), ..from };
+                if to != from {
+                    self.edit("nudge clip", vec![to.op(p.id)]);
+                }
+            }
+            Key::Named(NamedKey::Escape) => self.arrange.selected_placement = None,
+            _ => return false,
+        }
+        true
+    }
+
+    /// The pointer shape for what is under it: a resize arrow on clip edges.
+    fn update_cursor(&mut self) {
+        use winit::window::CursorIcon;
+        let icon = match &self.clip_drag {
+            Some(ClipDrag::Trim { .. }) => CursorIcon::EwResize,
+            Some(ClipDrag::Move { .. }) => CursorIcon::Grabbing,
+            None if self.view == MainView::Arrange && self.palette.is_none() => {
+                match self.layout.as_ref().map(|l| l.hit(self.cursor)) {
+                    Some(Hit::ClipEdge { .. }) => CursorIcon::EwResize,
+                    _ => CursorIcon::Default,
+                }
+            }
+            None => CursorIcon::Default,
+        };
+        if icon != self.cursor_icon {
+            self.cursor_icon = icon;
+            if let Some(g) = &self.gfx {
+                g.window.set_cursor(icon);
+            }
+        }
+    }
+
+    /// Whether `pt` is on group `t`'s fold chevron in the arrange headers.
+    fn on_group_chevron(&self, t: TrackId, pt: Point) -> bool {
+        let Some(layout) = &self.layout else { return false };
+        let is_group = self.history.doc().tracks.get(&t).is_some_and(|t| t.kind == TrackKind::Group);
+        is_group
+            && layout
+                .rows
+                .iter()
+                .find(|r| r.track == t)
+                .is_some_and(|r| pt.x < layout.headers.x0 + 40.0 && pt.y < r.y + 28.0)
     }
 
     fn press_panel(&mut self, sl: ShellLayout, pt: Point, double: bool) {
@@ -1238,7 +1542,9 @@ impl App {
             }
             MixHit::Mute(t) => self.toggle_flag(t, TrackFlag::Mute),
             MixHit::Solo(t) => self.toggle_flag(t, TrackFlag::Solo),
-            MixHit::Strip(t) => self.arrange.selected_track = Some(t),
+            MixHit::Grid(t, kind) => self.open_grid(Some(t), kind),
+            MixHit::Strip(t) if double => self.open_track(t),
+            MixHit::Strip(t) => self.select_track(t),
             MixHit::Nothing => {}
         }
     }
@@ -1259,12 +1565,7 @@ impl App {
                     self.begin_drag(ParamTarget::Macro { grid, index }, Axis::Vertical { travel: KNOB_TRAVEL }, double);
                 }
             }
-            MacroHit::Open(grid) => {
-                if self.view != MainView::Grid(grid) {
-                    self.grid = GridView::default();
-                }
-                self.view = MainView::Grid(grid);
-            }
+            MacroHit::Open(grid) => self.show_grid(grid),
             MacroHit::Fader(t) => {
                 self.begin_drag(ParamTarget::Gain(t), Axis::Vertical { travel: l.fader.height() }, double)
             }
@@ -1339,25 +1640,80 @@ impl App {
         }
     }
 
-    /// Shows `track`'s source or instrument grid.
+    /// Shows `track`'s grid of `kind`, if it has one.
     fn open_grid(&mut self, track: Option<TrackId>, kind: GridKind) {
-        let doc = self.history.doc();
-        let Some((t, g)) = track.and_then(|t| {
-            let tr = doc.tracks.get(&t)?;
-            let g = match kind {
-                GridKind::Source => tr.source_grid,
-                GridKind::Instrument => tr.instrument_grid,
-                GridKind::Fx => tr.fx_grids.front().copied(),
-            };
-            Some((t, g?))
-        }) else {
+        let Some(t) = track else { return };
+        let Some((_, g)) = grid::grid_kinds(self.history.doc(), t).into_iter().find(|(k, _)| *k == kind) else {
             return;
         };
+        self.show_grid(g);
+        self.arrange.selected_track = Some(t);
+    }
+
+    /// Shows grid `g`, remembering the view to go back to.
+    fn show_grid(&mut self, g: sat_doc::GridId) {
+        if !matches!(self.view, MainView::Grid(_)) {
+            self.prev_view = self.view;
+        }
         if self.view != MainView::Grid(g) {
             self.grid = GridView::default();
         }
+        self.grid.back_label = if self.prev_view == MainView::Session { "session" } else { "arrange" };
         self.view = MainView::Grid(g);
+    }
+
+    /// Leaves a grid for the view it was opened from.
+    fn leave_grid(&mut self) {
+        self.view = self.prev_view;
+    }
+
+    /// The kind of grid on screen, if one is.
+    fn grid_kind(&self) -> Option<GridKind> {
+        let MainView::Grid(g) = self.view else { return None };
+        self.history.doc().grids.get(&g).map(|g| g.kind)
+    }
+
+    /// Selects `t`; a grid on screen follows to `t`'s grid of the same kind.
+    fn select_track(&mut self, t: TrackId) {
         self.arrange.selected_track = Some(t);
+        if let Some(kind) = self.grid_kind() {
+            self.open_grid(Some(t), kind);
+        }
+    }
+
+    /// Steps the selected track up or down. In a grid, it steps to the
+    /// nearest track that has a grid of the same kind and shows that.
+    fn step_track(&mut self, down: bool) {
+        let doc = self.history.doc();
+        let kind = self.grid_kind();
+        let order: Vec<TrackId> = doc
+            .tracks_in_order()
+            .into_iter()
+            .filter(|t| match kind {
+                Some(k) => grid::grid_kinds(doc, *t).iter().any(|(gk, _)| *gk == k),
+                None => doc.tracks[t].kind != TrackKind::Master,
+            })
+            .collect();
+        if order.is_empty() {
+            return;
+        }
+        let here = self.arrange.selected_track.and_then(|t| order.iter().position(|x| *x == t));
+        let n = order.len();
+        let next = match here {
+            Some(i) if down => (i + 1) % n,
+            Some(i) => (i + n - 1) % n,
+            None => 0,
+        };
+        self.select_track(order[next]);
+    }
+
+    /// The grid a double-click on a track opens: a track's instrument, a bus's fx.
+    fn open_track(&mut self, t: TrackId) {
+        let kind = match self.history.doc().tracks.get(&t).map(|t| t.kind) {
+            Some(TrackKind::Track) => GridKind::Instrument,
+            _ => GridKind::Fx,
+        };
+        self.open_grid(Some(t), kind);
     }
 
     fn press_grid(&mut self, pt: Point, double: bool) {
@@ -1367,7 +1723,17 @@ impl App {
             self.grid.menu = false;
         }
         match hit {
-            GridHit::Back => self.view = MainView::Arrange,
+            GridHit::Back => self.leave_grid(),
+            GridHit::PrevTrack => self.step_track(false),
+            GridHit::NextTrack => self.step_track(true),
+            GridHit::Kind(kind) => self.open_grid(Some(l.track), kind),
+            GridHit::Track(t) => {
+                // the same kind of grid if the track has one, else its fx
+                let has = grid::grid_kinds(self.history.doc(), t).iter().any(|(k, _)| *k == l.kind);
+                self.open_grid(Some(t), if has { l.kind } else { GridKind::Fx });
+            }
+            GridHit::TrackMute(t) => self.toggle_flag(t, TrackFlag::Mute),
+            GridHit::TrackSolo(t) => self.toggle_flag(t, TrackFlag::Solo),
             GridHit::AddModule => self.grid.menu = !self.grid.menu,
             GridHit::MenuItem(kind) => {
                 let doc = self.history.doc();
@@ -1609,16 +1975,99 @@ impl App {
                 self.grid.selected = None;
                 true
             }
+            Key::Named(NamedKey::Escape) => {
+                self.leave_grid();
+                true
+            }
             _ => false,
         }
     }
 
+    /// Keys while the palette is open: type to filter, arrows to move,
+    /// enter to run, escape to close.
+    fn palette_key(&mut self, key: &Key) {
+        let Some(v) = &mut self.palette else { return };
+        let n = palette::matches(self.history.doc(), &v.query).len();
+        match key {
+            Key::Named(NamedKey::Escape) => self.palette = None,
+            Key::Named(NamedKey::Enter) => {
+                let i = v.index.min(n.saturating_sub(1));
+                let a = palette::matches(self.history.doc(), &v.query).get(i).map(|e| e.action);
+                self.palette = None;
+                if let Some(a) = a {
+                    self.run(a);
+                }
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                v.index = (v.index.min(n.saturating_sub(1)) + 1).min(n.saturating_sub(1))
+            }
+            Key::Named(NamedKey::ArrowUp) => v.index = v.index.min(n.saturating_sub(1)).saturating_sub(1),
+            Key::Named(NamedKey::Backspace) => {
+                v.query.pop();
+                v.index = 0;
+            }
+            Key::Named(NamedKey::Space) => {
+                v.query.push(' ');
+                v.index = 0;
+            }
+            Key::Character(c) if !(self.mods.control_key() || self.mods.super_key()) => {
+                v.query.push_str(c);
+                v.index = 0;
+            }
+            Key::Character(c) if c.eq_ignore_ascii_case("k") => self.palette = None,
+            _ => {}
+        }
+    }
+
+    /// Runs a palette entry.
+    fn run(&mut self, a: Action) {
+        match a {
+            Action::Session => self.view = MainView::Session,
+            Action::Arrange => self.view = MainView::Arrange,
+            Action::Grid(t, kind) => self.open_grid(Some(t), kind),
+            Action::Select(t) => self.select_track(t),
+            Action::Panel(p) => self.panel = p,
+            Action::PlayStop => self.playback.toggle(),
+            Action::Loop => self.toggle_loop(),
+            Action::Undo | Action::Redo => self.undo(a == Action::Redo),
+            Action::Save => self.save(false),
+        }
+        self.update_title();
+    }
+
+    fn toggle_loop(&mut self) {
+        let mut r = self.history.doc().loop_range;
+        r.enabled = !r.enabled;
+        self.edit("loop", vec![Op::SetLoop { range: r }]);
+    }
+
+    fn undo(&mut self, redo: bool) {
+        self.end_drag();
+        let did = if redo { self.history.redo() } else { self.history.undo() };
+        if did.is_some() {
+            self.roll.selected.clear();
+            self.playback.recompile(self.history.doc());
+        }
+    }
+
     fn key(&mut self, key: &Key) {
+        if self.palette.is_some() {
+            return self.palette_key(key);
+        }
+        if (self.mods.control_key() || self.mods.super_key())
+            && matches!(key, Key::Character(c) if c.eq_ignore_ascii_case("k"))
+        {
+            self.palette = Some(PaletteView::default());
+            return;
+        }
         if self.learn && matches!(key, Key::Named(NamedKey::Escape)) {
             self.learn = false;
             return self.update_title();
         }
         if self.grid_key(key) {
+            return self.update_title();
+        }
+        if self.arrange_key(key) {
             return self.update_title();
         }
         if self.roll_key(key) {
@@ -1630,25 +2079,28 @@ impl App {
             Key::Named(NamedKey::Space) => self.toggle_play(),
             Key::Named(NamedKey::Home) => self.playback.locate(Ticks::ZERO),
             Key::Named(NamedKey::Tab) => {
-                self.panel = if self.panel == PanelView::Mixer { PanelView::Clip } else { PanelView::Mixer };
+                // clip, mixer, macros (shift goes back)
+                let order = [PanelView::Clip, PanelView::Mixer, PanelView::Macros];
+                let i = order.iter().position(|p| *p == self.panel).unwrap_or(0);
+                self.panel = order[(i + if shift { 2 } else { 1 }) % 3];
             }
-            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("z") => {
-                self.end_drag();
-                let did = if shift { self.history.redo() } else { self.history.undo() };
-                if did.is_some() {
-                    self.roll.selected.clear();
-                    self.playback.recompile(self.history.doc());
-                }
+            Key::Character(c) if ctrl && matches!(c.as_str(), "1" | "2" | "3" | "4" | "5") => match c.as_str() {
+                "1" => self.view = MainView::Session,
+                "2" => self.view = MainView::Arrange,
+                "3" => self.open_grid(self.arrange.selected_track, GridKind::Source),
+                "4" => self.open_grid(self.arrange.selected_track, GridKind::Instrument),
+                _ => self.open_grid(self.arrange.selected_track, GridKind::Fx),
+            },
+            Key::Character(c) if !ctrl && (c == "[" || c == "]") => self.step_track(c == "]"),
+            Key::Named(NamedKey::ArrowUp | NamedKey::ArrowDown) if self.mods.alt_key() => {
+                self.step_track(matches!(key, Key::Named(NamedKey::ArrowDown)));
             }
+            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("z") => self.undo(shift),
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("s") => self.save(shift),
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("o") => self.open(),
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("n") => self.new_project(),
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("q") => self.quit = true,
-            Key::Character(c) if !ctrl && c == "l" => {
-                let mut r = self.history.doc().loop_range;
-                r.enabled = !r.enabled;
-                self.edit("loop", vec![Op::SetLoop { range: r }]);
-            }
+            Key::Character(c) if !ctrl && c == "l" => self.toggle_loop(),
             Key::Character(c) if !ctrl && (c == "m" || c == "s") => {
                 if let Some(t) = self.arrange.selected_track {
                     let kind = self.history.doc().tracks[&t].kind;
@@ -1759,8 +2211,13 @@ impl ApplicationHandler for App {
                 dirty = self.drag.is_some()
                     || self.roll_drag.is_some()
                     || self.grid_drag.is_some()
-                    || self.audio_drag.is_some();
+                    || self.audio_drag.is_some()
+                    || self.clip_drag.is_some()
+                    || self.auto_drag.is_some();
                 self.drag_to();
+                self.clip_drag_to();
+                self.auto_drag_to();
+                self.update_cursor();
                 self.audio_drag_to();
                 self.roll_drag_to();
                 self.grid_drag_to();
@@ -1879,6 +2336,9 @@ fn main() {
         steps: StepView::default(),
         step_geom: None,
         view: MainView::Arrange,
+        prev_view: MainView::Arrange,
+        palette: None,
+        palette_layout: None,
         grid: GridView::default(),
         grid_layout: None,
         session: SessionView::default(),
@@ -1888,6 +2348,10 @@ fn main() {
         grid_drag: None,
         audio_drag: None,
         audio_layout: None,
+        clip_drag: None,
+        auto_drag: None,
+        panel_focus: false,
+        cursor_icon: winit::window::CursorIcon::Default,
         note_len: Ticks::sixteenths(1),
         last_click: None,
         last_frame: Instant::now(),

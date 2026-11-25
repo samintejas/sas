@@ -24,6 +24,8 @@ pub enum Icon {
     ChevronLeft,
     /// Plus.
     Plus,
+    /// Cross (close, remove).
+    Close,
     /// Sidebar panel.
     Panel,
     /// Grid of four squares.
@@ -80,6 +82,10 @@ pub fn draw(p: &mut Painter<'_>, icon: Icon, r: Rect, c: Rgba) {
         Icon::Plus => {
             p.line(pt(-0.5, 0.0), pt(0.5, 0.0), w, c);
             p.line(pt(0.0, -0.5), pt(0.0, 0.5), w, c);
+        }
+        Icon::Close => {
+            p.line(pt(-0.4, -0.4), pt(0.4, 0.4), w, c);
+            p.line(pt(-0.4, 0.4), pt(0.4, -0.4), w, c);
         }
         Icon::Panel => {
             p.rrect_stroke(Rect::new(cx - 0.7 * s, cy - 0.6 * s, cx + 0.7 * s, cy + 0.6 * s), 2.0, 1.0, c);

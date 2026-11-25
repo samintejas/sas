@@ -17,6 +17,10 @@ use crate::paint::{Align, Painter, TextStyle};
 pub const BAR_H: f64 = 40.0;
 /// Width of the clip dock.
 pub const DOCK_W: f64 = 320.0;
+/// Width of the track list beside a grid.
+pub const TRACKS_W: f64 = 176.0;
+/// Height of a row in the track list.
+pub const TRACK_ROW_H: f64 = 34.0;
 /// Width of a module card.
 pub const CARD_W: f64 = 172.0;
 /// Height of a card's header.
@@ -47,6 +51,8 @@ pub struct GridView {
     pub menu: bool,
     /// A cable being dragged: from (an output) to (the pointer), and what it carries.
     pub wire: Option<(Point, Point, PortKind)>,
+    /// What the back button returns to ("arrange" when empty).
+    pub back_label: &'static str,
 }
 
 /// A module card's geometry.
@@ -97,8 +103,20 @@ pub struct Wire {
 /// What is under a point in the grid view.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GridHit {
-    /// Back to the arrange view.
+    /// Back to the view the grid was opened from.
     Back,
+    /// The previous track's grid of the same kind.
+    PrevTrack,
+    /// The next track's grid of the same kind.
+    NextTrack,
+    /// Another of the same track's grids.
+    Kind(GridKind),
+    /// A track in the track list: show its grid.
+    Track(TrackId),
+    /// A track's mute button in the track list.
+    TrackMute(TrackId),
+    /// A track's solo button in the track list.
+    TrackSolo(TrackId),
     /// The add-module button.
     AddModule,
     /// An item of the add-module menu, by kind.
@@ -142,10 +160,20 @@ pub struct GridLayout {
     pub bar: Rect,
     /// Back button.
     pub back: Rect,
+    /// Previous-track button.
+    pub prev: Rect,
+    /// Next-track button.
+    pub next: Rect,
+    /// Tabs for the track's grids: source, instrument, fx (those it has).
+    pub kinds: Vec<(GridKind, Rect)>,
     /// Add-module button.
     pub add_module: Rect,
     /// Add-module menu items, when open.
     pub menu: Vec<(&'static str, Rect)>,
+    /// The track list beside the canvas.
+    pub track_list: Rect,
+    /// Its rows: the track, the row, its mute and solo buttons.
+    pub tracks: Vec<TrackRow>,
     /// Module canvas.
     pub canvas: Rect,
     /// Clip dock (empty except on source grids).
@@ -183,6 +211,43 @@ fn rows_of(m: &Module) -> Vec<Option<&'static str>> {
 fn port_rows(ports: &[PortSpec]) -> usize {
     let ins = ports.iter().filter(|p| p.input).count();
     ins.max(ports.len() - ins).max(1)
+}
+
+/// A row of the track list beside a grid.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TrackRow {
+    /// The track.
+    pub track: TrackId,
+    /// The row.
+    pub rect: Rect,
+    /// Its mute button.
+    pub mute: Rect,
+    /// Its solo button (not on master).
+    pub solo: Option<Rect>,
+    /// Nesting depth in the group tree.
+    pub depth: usize,
+}
+
+/// The tracks the list beside a grid shows, in arrange order: tracks and
+/// groups, then returns, then master.
+fn listed_tracks(doc: &Document) -> Vec<TrackId> {
+    let order = doc.tracks_in_order();
+    let main = order.iter().filter(|t| matches!(doc.tracks[t].kind, TrackKind::Track | TrackKind::Group));
+    let rets = order.iter().filter(|t| doc.tracks[t].kind == TrackKind::Return);
+    main.chain(rets).copied().chain([doc.master]).collect()
+}
+
+/// The grids `track` has, in tab order: source, instrument, fx.
+pub fn grid_kinds(doc: &Document, track: TrackId) -> Vec<(GridKind, GridId)> {
+    let Some(t) = doc.tracks.get(&track) else { return Vec::new() };
+    [
+        (GridKind::Source, t.source_grid),
+        (GridKind::Instrument, t.instrument_grid),
+        (GridKind::Fx, t.fx_grids.front().copied()),
+    ]
+    .into_iter()
+    .filter_map(|(k, g)| Some((k, g?)))
+    .collect()
 }
 
 /// Where module position `pos` is on screen.
@@ -262,6 +327,22 @@ pub fn layout(doc: &Document, grid: GridId, r: Rect, view: &GridView) -> Option<
     let bar = Rect::new(r.x0, r.y0, r.x1, r.y0 + BAR_H);
     let cy = bar.center().y;
     let back = Rect::new(r.x0 + 12.0, cy - 13.0, r.x0 + 104.0, cy + 13.0);
+    let prev = Rect::new(back.x1 + 10.0, cy - 13.0, back.x1 + 34.0, cy + 13.0);
+    let next = Rect::new(prev.x1 + 138.0, cy - 13.0, prev.x1 + 162.0, cy + 13.0);
+    let mut kx = next.x1 + 14.0;
+    let kinds = grid_kinds(doc, track)
+        .into_iter()
+        .map(|(k, _)| {
+            let w = match k {
+                GridKind::Source => 72.0,
+                GridKind::Instrument => 100.0,
+                GridKind::Fx => 44.0,
+            };
+            let r = Rect::new(kx, cy - 13.0, kx + w, cy + 13.0);
+            kx += w;
+            (k, r)
+        })
+        .collect();
     let add_module = Rect::new(r.x1 - 96.0, cy - 13.0, r.x1 - 12.0, cy + 13.0);
     let menu = if view.menu {
         sat_modules::catalogue(kind)
@@ -275,7 +356,33 @@ pub fn layout(doc: &Document, grid: GridId, r: Rect, view: &GridView) -> Option<
     } else {
         Vec::new()
     };
-    let canvas = Rect::new(r.x0, bar.y1, if source { r.x1 - DOCK_W } else { r.x1 }, r.y1);
+    let track_list = Rect::new(r.x0, bar.y1, r.x0 + TRACKS_W, r.y1);
+    let tracks = listed_tracks(doc)
+        .into_iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let y = track_list.y0 + 6.0 + i as f64 * TRACK_ROW_H;
+            let rect = Rect::new(track_list.x0 + 4.0, y, track_list.x1 - 4.0, y + TRACK_ROW_H - 2.0);
+            let cy = rect.center().y;
+            let b = |x: f64| Rect::new(x, cy - 9.0, x + 18.0, cy + 9.0);
+            let master = t == doc.master;
+            let mut depth = 0;
+            let mut p = doc.tracks[&t].parent;
+            while let Some(q) = p {
+                depth += 1;
+                p = doc.tracks[&q].parent;
+            }
+            TrackRow {
+                track: t,
+                rect,
+                mute: b(rect.x1 - (if master { 30.0 } else { 52.0 })),
+                solo: (!master).then(|| b(rect.x1 - 30.0)),
+                depth,
+            }
+        })
+        .filter(|row| row.rect.y1 <= r.y1)
+        .collect();
+    let canvas = Rect::new(track_list.x1, bar.y1, if source { r.x1 - DOCK_W } else { r.x1 }, r.y1);
     let (dock, add_clip) = if source {
         let dock = Rect::new(canvas.x1, bar.y1, r.x1, r.y1);
         (dock, Rect::new(dock.x1 - 34.0, dock.y0 + 10.0, dock.x1 - 10.0, dock.y0 + 34.0))
@@ -315,7 +422,26 @@ pub fn layout(doc: &Document, grid: GridId, r: Rect, view: &GridView) -> Option<
             Some(Wire { cable: k.id, from, to, kind })
         })
         .collect();
-    Some(GridLayout { track, grid, kind, bar, back, add_module, menu, canvas, dock, add_clip, cards, rows, wires })
+    Some(GridLayout {
+        track,
+        grid,
+        kind,
+        bar,
+        back,
+        prev,
+        next,
+        kinds,
+        track_list,
+        tracks,
+        add_module,
+        menu,
+        canvas,
+        dock,
+        add_clip,
+        cards,
+        rows,
+        wires,
+    })
 }
 
 impl GridLayout {
@@ -326,6 +452,25 @@ impl GridLayout {
         }
         if self.back.contains(pt) {
             return GridHit::Back;
+        }
+        if self.prev.contains(pt) {
+            return GridHit::PrevTrack;
+        }
+        if self.next.contains(pt) {
+            return GridHit::NextTrack;
+        }
+        if let Some((k, _)) = self.kinds.iter().find(|(_, r)| r.contains(pt)) {
+            return GridHit::Kind(*k);
+        }
+        if self.track_list.contains(pt) {
+            let Some(row) = self.tracks.iter().find(|t| t.rect.contains(pt)) else { return GridHit::Nothing };
+            if row.mute.contains(pt) {
+                return GridHit::TrackMute(row.track);
+            }
+            if row.solo.is_some_and(|r| r.contains(pt)) {
+                return GridHit::TrackSolo(row.track);
+            }
+            return GridHit::Track(row.track);
         }
         if self.add_module.contains(pt) {
             return GridHit::AddModule;
@@ -432,6 +577,44 @@ fn chip(p: &mut Painter<'_>, th: &Theme, r: Rect, label: &str, icon: Option<Icon
     p.text(x, r.center().y, label, &TextStyle::mono(12.0, c.text_strong), Align::Left);
 }
 
+/// The track list beside the canvas: the grid's track is highlighted, a
+/// click shows another track's grid of the same kind.
+fn draw_tracks(p: &mut Painter<'_>, th: &Theme, doc: &Document, l: &GridLayout, levels: &crate::mixer::Levels) {
+    let c = &th.c;
+    p.rect(l.track_list, c.bg_surface);
+    p.vline(l.track_list.x1 - 0.5, l.track_list.y0, l.track_list.y1, c.border_default);
+    for row in &l.tracks {
+        let Some(t) = doc.tracks.get(&row.track) else { continue };
+        let r = row.rect;
+        let on = row.track == l.track;
+        let has = grid_kinds(doc, row.track).iter().any(|(k, _)| *k == l.kind);
+        p.rrect(r, 4.0, if on { c.bg_raised } else { c.bg_surface });
+        if on {
+            p.rrect_stroke(r.inset(-0.5), 4.0, 1.0, c.accent_primary_border);
+        }
+        let master = row.track == doc.master;
+        let col = if master { Rgba::hex(0xdcdcdc) } else { th.track(t.color.0) };
+        p.rect(Rect::new(r.x0, r.y0 + 4.0, r.x0 + 3.0, r.y1 - 4.0), col);
+        let x = r.x0 + 10.0 + 8.0 * row.depth as f64;
+        let name = if master { "master" } else { t.name.as_str() };
+        let tc = if has { c.text_strong } else { c.text_secondary };
+        p.text_fit(x, r.center().y, name, &TextStyle::sans(12.0, tc).medium(), row.mute.x0 - x - 14.0);
+        let (lv, rv) = levels.get(&row.track).copied().unwrap_or((0.0, 0.0));
+        let m = Rect::new(row.mute.x0 - 10.0, r.y0 + 6.0, row.mute.x0 - 4.0, r.y1 - 6.0);
+        crate::controls::meter(p, m, crate::controls::meter_pos(lv), crate::controls::meter_pos(rv));
+        crate::controls::toggle(
+            p,
+            th,
+            row.mute,
+            "m",
+            t.mixer.mute.then_some(crate::controls::On::Tint(c.accent_warning)),
+        );
+        if let Some(sr) = row.solo {
+            crate::controls::toggle(p, th, sr, "s", t.mixer.solo.then_some(crate::controls::On::Tint(c.accent_info)));
+        }
+    }
+}
+
 /// The clip a card previews: the selected clip if the module feeds it,
 /// otherwise the first clip it feeds.
 fn preview_clip(doc: &Document, m: ModuleId, selected: Option<ClipId>) -> Option<ClipId> {
@@ -496,9 +679,11 @@ pub fn draw(
     view: &GridView,
     selected_clip: Option<ClipId>,
     sounds: &sat_disk::Pool,
+    levels: &crate::mixer::Levels,
     r: Rect,
 ) -> Option<GridLayout> {
     let l = layout(doc, grid, r, view)?;
+    draw_tracks(p, th, doc, &l, levels);
     let c = &th.c;
     let source = l.kind == GridKind::Source;
     let tr = &doc.tracks[&l.track];
@@ -735,18 +920,37 @@ pub fn draw(
     p.rect(l.bar, c.bg_base);
     p.hline(l.bar.x0, l.bar.x1, l.bar.y1 - 1.0, c.border_default);
     let cy = l.bar.center().y;
-    chip(p, th, l.back, "arrange", Some(Icon::ChevronLeft));
-    let mut x = l.back.x1 + 16.0;
+    let back = if view.back_label.is_empty() { "arrange" } else { view.back_label };
+    chip(p, th, l.back, back, Some(Icon::ChevronLeft));
+    // the track, with buttons to step to its neighbours' grids of the same kind
+    for (r, ic) in [(l.prev, Icon::ChevronLeft), (l.next, Icon::ChevronRight)] {
+        p.rrect(r, 5.0, c.bg_control);
+        p.rrect_stroke(r.inset(-0.5), 5.0, 1.0, c.border_default);
+        icons::draw(p, ic, Rect::new(r.center().x - 6.0, cy - 6.0, r.center().x + 6.0, cy + 6.0), c.text_primary);
+    }
+    let x = l.prev.x1 + 10.0;
     p.rrect(Rect::new(x, cy - 5.0, x + 10.0, cy + 5.0), 2.0, tcol);
-    x += 18.0;
-    x += p.text(x, cy, &tr.name, &TextStyle::mono(12.0, c.text_strong), Align::Left) + 8.0;
-    x += p.text(x, cy, "/", &TextStyle::mono(12.0, c.text_secondary), Align::Left) + 8.0;
-    let title = match l.kind {
-        GridKind::Source => "source grid",
-        GridKind::Instrument => "instrument",
-        GridKind::Fx => "fx",
-    };
-    x += p.text(x, cy, title, &TextStyle::mono(12.0, c.text_max).medium(), Align::Left) + 16.0;
+    p.text_fit(x + 16.0, cy, &tr.name, &TextStyle::mono(12.0, c.text_strong), l.next.x0 - x - 24.0);
+    // the track's grids as tabs
+    if let (Some((_, first)), Some((_, last))) = (l.kinds.first(), l.kinds.last()) {
+        let all = Rect::new(first.x0, first.y0, last.x1, last.y1);
+        p.rrect(all, 5.0, c.bg_control);
+        p.rrect_stroke(all.inset(-0.5), 5.0, 1.0, c.border_default);
+    }
+    for (k, r) in &l.kinds {
+        let on = *k == l.kind;
+        if on {
+            p.rrect(r.inset(-2.0), 4.0, c.bg_raised);
+        }
+        let title = match k {
+            GridKind::Source => "source",
+            GridKind::Instrument => "instrument",
+            GridKind::Fx => "fx",
+        };
+        let col = if on { c.text_max } else { c.text_secondary };
+        p.text(r.center().x, cy, title, &TextStyle::mono(12.0, col), Align::Center);
+    }
+    let x = l.kinds.last().map_or(l.next.x1, |(_, r)| r.x1) + 16.0;
     if let Some(clip) = selected_clip.and_then(|id| doc.clips.get(&id)).filter(|cl| cl.track == l.track && source) {
         let label = format!("clip · {}", clip.name);
         let w = p.fonts.measure(&label, &TextStyle::mono(12.0, c.text_strong)) as f64;

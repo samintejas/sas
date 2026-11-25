@@ -72,6 +72,8 @@ pub struct StripLayout {
     pub mute: Option<Rect>,
     /// Solo button (not on master).
     pub solo: Option<Rect>,
+    /// Buttons that open the track's grids (source, instrument, fx: those it has).
+    pub grids: Vec<(GridKind, Rect)>,
 }
 
 impl StripLayout {
@@ -103,6 +105,8 @@ pub enum MixHit {
     Mute(TrackId),
     /// A solo button.
     Solo(TrackId),
+    /// A button that opens one of the track's grids.
+    Grid(TrackId, GridKind),
     /// Elsewhere on a strip.
     Strip(TrackId),
     /// Nothing.
@@ -145,7 +149,22 @@ fn strip_layout(doc: &Document, t: TrackId, kind: StripKind, rect: Rect, rets: &
     }
     let buttons_y0 = inner.y1 - 24.0;
     let readout = Rect::new(inner.x0, buttons_y0 - 18.0, inner.x1, buttons_y0 - 4.0);
-    let (f0, f1) = (ky + KNOB + 22.0, readout.y0 - 4.0);
+    // a row of buttons that open the track's grids
+    let gy = ky + KNOB + 20.0;
+    let kinds = crate::grid::grid_kinds(doc, t);
+    let gw = inner.width() / 3.0;
+    let grids: Vec<(GridKind, Rect)> = kinds
+        .iter()
+        .map(|(k, _)| {
+            let i = match k {
+                GridKind::Source => 0.0,
+                GridKind::Instrument => 1.0,
+                GridKind::Fx => 2.0,
+            };
+            (*k, Rect::new(inner.x0 + gw * i + 1.0, gy, inner.x0 + gw * (i + 1.0) - 1.0, gy + 16.0))
+        })
+        .collect();
+    let (f0, f1) = (gy + 22.0, readout.y0 - 4.0);
     let cx = inner.center().x;
     // the slot and the meter sit side by side, centred as a 22 px group
     let fader = Rect::new(cx - 11.0, f0 + 5.0, cx - 5.0, f1 - 5.0);
@@ -159,7 +178,7 @@ fn strip_layout(doc: &Document, t: TrackId, kind: StripKind, rect: Rect, rets: &
             Some(Rect::new(mid + 1.5, buttons_y0, inner.x1, inner.y1)),
         )
     };
-    StripLayout { track: t, kind, rect, knobs, fader, meter, readout, mute, solo }
+    StripLayout { track: t, kind, rect, knobs, fader, meter, readout, mute, solo, grids }
 }
 
 impl MixerLayout {
@@ -235,6 +254,9 @@ impl MixerLayout {
             s.knobs.iter().find(|(r, _)| Rect::new(r.x0 - 4.0, r.y0, r.x1 + 4.0, r.y1 + 16.0).contains(pt))
         {
             return MixHit::Knob(t, *k);
+        }
+        if let Some((k, _)) = s.grids.iter().find(|(_, r)| r.contains(pt)) {
+            return MixHit::Grid(t, *k);
         }
         let grab = Rect::new(s.fader.x0 - 10.0, s.fader.y0 - 8.0, s.meter.x1, s.fader.y1 + 8.0);
         if grab.contains(pt) {
@@ -369,6 +391,18 @@ fn draw_strip(
             &TextStyle::sans(11.0, Rgba::hex(0x9a9a9a)),
             Align::Center,
         );
+    }
+
+    // grid buttons
+    for (k, gr) in &s.grids {
+        p.rrect(*gr, 3.0, c.bg_control);
+        p.rrect_stroke(gr.inset(-0.5), 3.0, 1.0, c.border_default);
+        let label = match k {
+            GridKind::Source => "src",
+            GridKind::Instrument => "ins",
+            GridKind::Fx => "fx",
+        };
+        p.text(gr.center().x, gr.center().y, label, &TextStyle::mono(10.0, c.text_primary), Align::Center);
     }
 
     // fader and meter

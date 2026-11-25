@@ -115,7 +115,14 @@ cargo run --release -p sat-app -- my.sat  # opens a project bundle
 | top bar: stop, play, record, loop | stop (again: back to the start), play / pause, record onto the armed tracks (arming the selected track if none is; starts the transport; again: stop recording, keep playing), loop on / off |
 | an armed track's in / auto / off | monitor its input always, while stopped or recording, or never |
 | audio clip panel: drag gain, fade in, fade out or xfade up / down, double-click | change it (shift for fine steps), reset it |
-| Tab, or the panel tabs | switch the bottom panel between the clip and the mixer |
+| Ctrl+K (Cmd+K), or the search box | the command palette: type part of a track's name and what to open (`bass fx`, `vox ins`, `mixer`), arrows and Enter to run |
+| Ctrl+1 to Ctrl+5 | session, arrangement, and the selected track's source, instrument or fx grid |
+| `[` / `]`, Alt+Up / Alt+Down | select the previous / next track; in a grid, show the previous / next track's grid of the same kind |
+| a grid's ‹ › buttons and source / instrument / fx tabs | step to a neighbouring track's grid, or switch to another of this track's grids |
+| a mixer strip's src / ins / fx buttons, double-click a strip, a track header or a session column header | open that track's grid (double-click opens a track's instrument, a bus's fx) |
+| click a mixer strip, or a track in the list beside a grid, while a grid is shown | the grid follows to that track (its fx grid if it has none of that kind); the list's m / s buttons mute and solo |
+| Esc in a grid with nothing selected, or its back button | back to the arrangement or session it was opened from |
+| Tab, Shift+Tab, or the panel tabs | cycle the bottom panel through clip, mixer and macros |
 | drag a fader or knob | set level, pan or a send (Shift for fine steps, double-click to reset); one drag is one undo step |
 | `m` / `s` buttons, or the keys | mute / solo (the keys act on the selected track); the round button arms recording |
 | Ctrl+Z, Ctrl+Shift+Z | undo, redo |
@@ -123,6 +130,12 @@ cargo run --release -p sat-app -- my.sat  # opens a project bundle
 | drop a `.sat` folder on the window | open it |
 | drop a `.wav` on the window | load it into the shown instrument grid's (or the selected track's) sampler, adding a sampler if there is none |
 | click a clip, the ruler, a group's chevron | edit it in the piano roll, move the playhead, fold the group |
+| arrange: drag a clip, drag its left or right edge | move it along its track, trim or extend it (a looping clip repeats, a one-shot stops at its ends); both snap to the toolbar's snap (1 bar, 1 beat, 1/16, off), Alt trims off the grid |
+| arrange: Alt-drag a clip, Ctrl+D | drag a copy (the original stays), put a copy right after it; a copy is a clip of its own playing the same notes or audio |
+| arrange: Delete, Left / Right, Ctrl+L, Esc | delete the selected clip (and the clip itself once nothing plays it), nudge it by the snap, loop over it, deselect |
+| arrange: double-click an empty lane | a new looping clip there, fed by the track's first source module |
+| arrange: a track header's automation button, a lane's + and × | start a gain lane (or show / hide the track's lanes), add its pan lane, remove the lane |
+| arrange: click an automation lane, drag a point, double-click a point | add a breakpoint (snapped to sixteenths; Alt places it freely), move it (its value shows while dragging), delete it; a return's or master's row is its gain lane |
 | piano roll: click empty space (draw tool) | draw a note; keep dragging to set its length |
 | piano roll: drag a note, its right edge, the velocity lane | move it (time and pitch), resize it, set velocity; the selection moves together |
 | piano roll: double-click a note, Delete, arrows, Ctrl+A, Esc | delete, delete the selection, nudge by the grid or transpose (Shift: octave), select all, clear |
