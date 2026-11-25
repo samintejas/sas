@@ -22,11 +22,15 @@
 //! - m / s: mute / solo the selected track; ctrl+z / ctrl+shift+z: undo / redo
 //! - ctrl+o open (or drop a .sat folder on the window), ctrl+s save, ctrl+shift+s save as,
 //!   ctrl+n new, ctrl+q quit
+//! - ctrl+e export the song to WAV (with its tail); ctrl+shift+e export the loop range
 //! - wheel: scroll; shift+wheel: scroll time; ctrl+wheel: zoom
 //!
 //! `sat [project.sat]` opens a project bundle; without one it opens a demo.
+//! `sat --export out.wav [--loop] [--rate hz] [project.sat]` renders the song
+//! (or the loop) to a WAV file without opening a window.
 
 mod audio;
+mod export;
 mod input;
 mod project;
 
@@ -539,6 +543,27 @@ impl App {
             Err(e) => eprintln!("save failed: {e}"),
         }
         self.update_title();
+    }
+
+    fn export(&mut self, span: export::Span) {
+        let what = if span == export::Span::Loop { "loop" } else { "song" };
+        let mut dialog = rfd::FileDialog::new()
+            .set_title(format!("Export the {what} as WAV"))
+            .add_filter("WAV audio", &["wav", "WAV"])
+            .set_file_name(format!(
+                "{}{}.wav",
+                self.project.name,
+                if span == export::Span::Loop { " loop" } else { "" }
+            ));
+        if let Some(dir) = self.project.path.as_ref().and_then(|p| p.parent()) {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(path) = dialog.save_file() else { return };
+        let rate = self.playback.compiled.schedule.sample_rate();
+        match export::export(self.history.doc(), self.playback.pool.sounds(), rate, span, &path) {
+            Ok(secs) => eprintln!("exported {} ({secs:.1} s)", path.display()),
+            Err(e) => eprintln!("export failed: {e}"),
+        }
     }
 
     fn redraw(&mut self) {
@@ -1643,6 +1668,9 @@ impl App {
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("s") => self.save(shift),
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("o") => self.open(),
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("n") => self.new_project(),
+            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("e") => {
+                self.export(if shift { export::Span::Loop } else { export::Span::Song })
+            }
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("q") => self.quit = true,
             Key::Character(c) if !ctrl && c == "l" => {
                 let mut r = self.history.doc().loop_range;
@@ -1830,8 +1858,47 @@ fn load_sounds(bundle: &Path, doc: &Document) -> sat_disk::Pool {
     pool
 }
 
+/// Command line: an optional project bundle, and export flags.
+#[derive(Default)]
+struct Args {
+    project: Option<PathBuf>,
+    export: Option<PathBuf>,
+    span: Option<export::Span>,
+    rate: Option<f64>,
+}
+
+fn parse_args() -> Result<Args, String> {
+    let mut a = Args::default();
+    let mut it = std::env::args_os().skip(1);
+    while let Some(arg) = it.next() {
+        match arg.to_str() {
+            Some("--export") => a.export = Some(it.next().ok_or("--export needs a file")?.into()),
+            Some("--loop") => a.span = Some(export::Span::Loop),
+            Some("--rate") => {
+                let v = it.next().ok_or("--rate needs a number")?;
+                let r: f64 = v.to_str().and_then(|v| v.parse().ok()).ok_or("--rate needs a number")?;
+                if !(8_000.0..=384_000.0).contains(&r) {
+                    return Err(format!("--rate {r} is out of range"));
+                }
+                a.rate = Some(r);
+            }
+            Some(f) if f.starts_with("--") => return Err(format!("unknown option {f}")),
+            _ if a.project.is_none() => a.project = Some(arg.into()),
+            _ => return Err("more than one project given".into()),
+        }
+    }
+    if a.export.is_none() && (a.span.is_some() || a.rate.is_some()) {
+        return Err("--loop and --rate go with --export".into());
+    }
+    Ok(a)
+}
+
 fn main() {
-    let arg = std::env::args().nth(1).map(PathBuf::from);
+    let args = parse_args().unwrap_or_else(|e| {
+        eprintln!("sat: {e}\nusage: sat [--export out.wav [--loop] [--rate hz]] [project.sat]");
+        std::process::exit(2);
+    });
+    let arg = args.project.clone();
     let (doc, project, selected, pool) = match &arg {
         Some(p) => {
             let mut project = Project::new(None, project::name_of(p), 0);
@@ -1848,6 +1915,18 @@ fn main() {
             (d.doc, Project::new(None, "demo set".into(), 0), Some(d.selected), d.sounds)
         }
     };
+    if let Some(out) = &args.export {
+        let span = args.span.unwrap_or(export::Span::Song);
+        let rate = args.rate.unwrap_or(FALLBACK_RATE);
+        match export::export(&doc, pool.sounds(), rate, span, out) {
+            Ok(secs) => eprintln!("exported {} ({secs:.1} s at {rate} Hz)", out.display()),
+            Err(e) => {
+                eprintln!("sat: export failed: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     let playback = Playback::start(&doc, pool);
     let arrange = ArrangeState {
         selected_clip: selected,

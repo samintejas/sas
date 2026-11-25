@@ -51,7 +51,13 @@ on "in", or on "auto" while it is armed and the transport is stopped or
 recording. Recording adds a recorder module to the track's source grid
 (its `input` picks both input channels or one) and wires new clips to it;
 takes are shifted by the input and output latency the device reports, so
-they line up with what was heard. The arrange view, piano roll and mixer from
+they line up with what was heard. Phase 5 is done. Phase 6 (generative +
+export) has started with export: Ctrl+E (or `sat --export`) renders the song
+offline to a WAV file, running on past the last clip until reverb and delay
+tails fall silent, and Ctrl+Shift+E renders the loop range. The render runs
+the engine exactly as playback does, so it matches what was heard sample for
+sample whatever block size the audio device asked for (automation is
+evaluated per sample, not per block). The arrange view, piano roll and mixer from
 the prototype are drawn with vello; the engine plays through the default
 audio device and feeds live per-track meters.
 
@@ -61,12 +67,12 @@ audio device and feeds live per-track meters.
 | `sat-doc` | entities, `Op` reducer, transactions, undo with gestures, project bundle with migrations | done |
 | `sat-dsp` | oscillators (polyBLEP), state-variable filter, ADSR, noise, drum voices, gain and pan laws, biquads, eq, compressor, delay, reverb, saturation, limiter | in progress |
 | `sat-engine` | flat schedule, mixer strips, test synth, patchable voice instrument, drum synth, sampler, audio clip playback with fades and crossfades, session clip launching, fx chains, automation, loop, lock-free commands, schedule swap with state carry-over, offline render | done (single-threaded) |
-| `sat-compile` | document → schedule: track tree, solo, sends, placements and looping clips, audio clip comps, instrument patches, samplers and fx chains from their grids, live parameter mapping | done |
+| `sat-compile` | document → schedule: track tree, solo, sends, placements and looping clips, audio clip comps, instrument patches, samplers and fx chains from their grids, live parameter mapping, offline render with tail | done |
 | `sat-disk` | WAV import and export (hound), the open project's pool of decoded sounds, writing sounds into the bundle, waveform peaks | in progress |
 | `sat-modules` | built-in modules and their parameter specs: source modules (which editor each opens, the euclid generator, the drum kit, the hand-edit layer), instrument and fx modules, the default voice patch, fx chains and insertion, patching rules | in progress |
 | `sat-theme` | Dots design tokens (`assets/dots/tokens.json`) generated into a Rust `Palette`, plus spacing, radius and type scales | done |
 | `sat-ui` | vello + parley painter, top bar, arrange view, source grid, piano roll, step editors, mixer, shared controls (faders, knobs, meters), hit-testing, headless GPU rendering | in progress |
-| `sat-app` | the `sat` binary: winit window, vello surface, cpal output running the engine, mixing gestures with undo, open / save / autosave | in progress |
+| `sat-app` | the `sat` binary: winit window, vello surface, cpal output running the engine, mixing gestures with undo, open / save / autosave, WAV export (also headless) | in progress |
 
 ## Phase 1 gate
 
@@ -107,7 +113,12 @@ trigger a recompile. Projects save as a `name.sat/` bundle whose
 ```sh
 cargo run --release -p sat-app            # opens the demo set
 cargo run --release -p sat-app -- my.sat  # opens a project bundle
+cargo run --release -p sat-app -- --export song.wav my.sat          # renders it without a window
+cargo run --release -p sat-app -- --export loop.wav --loop --rate 44100  # the demo's loop range
 ```
+
+Exports are 32-bit float WAV at 48 kHz unless `--rate` says otherwise (from
+the app: the device's rate).
 
 | Keys and mouse | Does |
 |---|---|
@@ -120,6 +131,7 @@ cargo run --release -p sat-app -- my.sat  # opens a project bundle
 | `m` / `s` buttons, or the keys | mute / solo (the keys act on the selected track); the round button arms recording |
 | Ctrl+Z, Ctrl+Shift+Z | undo, redo |
 | Ctrl+O, Ctrl+S, Ctrl+Shift+S, Ctrl+N, Ctrl+Q | open, save, save as, new, quit (Cmd on macOS) |
+| Ctrl+E, Ctrl+Shift+E | export the song (with its tail) or the loop range to WAV |
 | drop a `.sat` folder on the window | open it |
 | drop a `.wav` on the window | load it into the shown instrument grid's (or the selected track's) sampler, adding a sampler if there is none |
 | click a clip, the ruler, a group's chevron | edit it in the piano roll, move the playhead, fold the group |
