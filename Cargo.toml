@@ -19,6 +19,7 @@ sat-dsp = { path = "crates/sat-dsp" }
 sat-theme = { path = "crates/sat-theme" }
 sat-ui = { path = "crates/sat-ui" }
 sat-disk = { path = "crates/sat-disk" }
+sat-plug = { path = "crates/sat-plug" }
 im = { version = "15", features = ["serde"] }
 uuid = { version = "1", features = ["v7", "serde"] }
 serde = { version = "1", features = ["derive"] }

@@ -369,6 +369,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "clap-sys"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8506185e2773e968286c74ba5460a278e4c4604a224aef4d2a595383efd7d7c5"
+
+[[package]]
 name = "clap_builder"
 version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2530,6 +2536,7 @@ dependencies = [
  "sat-doc",
  "sat-engine",
  "sat-modules",
+ "sat-plug",
  "sat-theme",
  "sat-ui",
  "vello",
@@ -2594,6 +2601,30 @@ dependencies = [
  "im",
  "sat-doc",
  "sat-dsp",
+]
+
+[[package]]
+name = "sat-plug"
+version = "0.1.0"
+dependencies = [
+ "clap-sys",
+ "libloading",
+ "memmap2",
+ "sat-compile",
+ "sat-doc",
+ "sat-engine",
+ "sat-modules",
+ "sat-ui",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "sat-testplug"
+version = "0.1.0"
+dependencies = [
+ "clap-sys",
+ "sat-plug",
 ]
 
 [[package]]

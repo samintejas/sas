@@ -129,6 +129,9 @@ pub enum GridHit {
     Bypass(ModuleId),
     /// A sampler's waveform (click to load a sound).
     Sound(ModuleId),
+    /// A plugin module's status strip (click to load a plugin, or to
+    /// reload a crashed one).
+    Plugin(ModuleId),
     /// A module's output port.
     Out(ModuleId, &'static str),
     /// A module's input port.
@@ -197,6 +200,42 @@ fn is_source(kind: &str) -> bool {
 fn is_sampler(kind: &str) -> bool {
     kind == sat_modules::instrument::SAMPLER
 }
+
+fn is_plugin(kind: &str) -> bool {
+    kind == sat_modules::fx::PLUGIN
+}
+
+/// Height of a plugin module's status strip.
+pub const PLUGIN_H: f64 = 26.0;
+
+/// How a hosted plugin is doing, as its module shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PluginState {
+    /// Its host is starting.
+    Loading,
+    /// Running.
+    Running,
+    /// Its host crashed: silent until reloaded.
+    Crashed,
+    /// Its host is stuck in the plugin: silent until reloaded.
+    Hung,
+    /// It could not be loaded, and why.
+    Failed(String),
+}
+
+/// What the app knows about a plugin module's plugin.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PluginView {
+    /// The plugin's name.
+    pub name: String,
+    /// Its parameter names, in order.
+    pub params: Vec<String>,
+    /// How it is doing.
+    pub state: PluginState,
+}
+
+/// Plugin modules' plugins, by module.
+pub type PluginViews = std::collections::HashMap<ModuleId, PluginView>;
 
 /// Height of a sampler's waveform.
 pub const WAVE_H: f64 = 56.0;
@@ -270,6 +309,8 @@ pub fn card_h(m: &Module) -> f64 {
         PREVIEW_H
     } else if is_sampler(&m.kind) {
         WAVE_H
+    } else if is_plugin(&m.kind) {
+        PLUGIN_H
     } else {
         4.0
     };
@@ -302,8 +343,14 @@ fn card(m: &Module, canvas: Rect, scroll: Vec2) -> Card {
     let outs: Vec<_> =
         ports.iter().filter(|p| !p.input).enumerate().map(|(i, p)| (p.key, Point::new(rect.x1, row_y(i)))).collect();
     let mut y = header.y1 + PORT_H * port_rows(ports) as f64;
-    let preview = if is_source(&m.kind) || is_sampler(&m.kind) {
-        let h = if is_sampler(&m.kind) { WAVE_H } else { PREVIEW_H };
+    let preview = if is_source(&m.kind) || is_sampler(&m.kind) || is_plugin(&m.kind) {
+        let h = if is_sampler(&m.kind) {
+            WAVE_H
+        } else if is_plugin(&m.kind) {
+            PLUGIN_H
+        } else {
+            PREVIEW_H
+        };
         let r = Rect::new(rect.x0 + 8.0, y + 2.0, rect.x1 - 8.0, y + h - 2.0);
         y += h;
         Some(r)
@@ -522,6 +569,9 @@ impl GridLayout {
             if self.kind == GridKind::Instrument && c.preview.is_some_and(|r| r.contains(pt)) {
                 return GridHit::Sound(c.module);
             }
+            if self.kind == GridKind::Fx && c.preview.is_some_and(|r| r.contains(pt)) {
+                return GridHit::Plugin(c.module);
+            }
             return GridHit::Module(c.module);
         }
         GridHit::Canvas
@@ -698,6 +748,7 @@ pub fn draw(
     view: &GridView,
     selected_clip: Option<ClipId>,
     sounds: &sat_disk::Pool,
+    plugins: &PluginViews,
     levels: &crate::mixer::Levels,
     r: Rect,
 ) -> Option<GridLayout> {
@@ -799,6 +850,10 @@ pub fn draw(
             if let Some(pv) = card.preview.filter(|_| is_sampler(&m.kind)) {
                 draw_sound(p, th, doc, m, sounds, pv);
             }
+            // a plugin's name and state
+            if let Some(pv) = card.preview.filter(|_| is_plugin(&m.kind)) {
+                draw_plugin(p, th, m, plugins.get(&m.id), pv);
+            }
             // preview
             if let Some(pv) = card.preview.filter(|_| is_source(&m.kind)) {
                 p.rrect(pv, 3.0, Rgba::hex(0x101010));
@@ -852,10 +907,15 @@ pub fn draw(
                         let fill = Rect::new(pr.x0, pr.y0, pr.x0 + pr.width() * spec.pos(v), pr.y1);
                         let tint = if bound.is_some() { mcol.alpha(0.16) } else { Rgba::new(255, 255, 255, 14) };
                         p.rrect(fill, 3.0, tint);
+                        // a plugin module's knobs are named after the plugin's parameters
+                        let pname = plugins
+                            .get(&m.id)
+                            .filter(|_| is_plugin(&m.kind))
+                            .and_then(|v| v.params.get(key[1..].parse::<usize>().ok()?.checked_sub(1)?));
                         let lw = p.text(
                             pr.x0 + 6.0,
                             pr.center().y,
-                            spec.label,
+                            pname.map_or(spec.label, |s| s.as_str()),
                             &TextStyle::mono(11.0, c.text_secondary),
                             Align::Left,
                         );
@@ -1059,4 +1119,32 @@ fn draw_dock(p: &mut Painter<'_>, th: &Theme, doc: &Document, l: &GridLayout, se
     {
         p.text(l.dock.x0 + 18.0, hy + i as f64 * 15.0, line, &TextStyle::mono(10.5, c.text_secondary), Align::Left);
     }
+}
+
+/// A plugin module's status strip: the plugin and how it is doing.
+fn draw_plugin(p: &mut Painter<'_>, th: &Theme, m: &Module, view: Option<&PluginView>, r: Rect) {
+    let c = &th.c;
+    let (text, col, bad) = match (m.plugin.as_deref(), view) {
+        (None, _) => ("no plugin · click to load".to_string(), c.text_secondary, false),
+        (Some(path), None) => (format!("{} · loading", file_stem(path)), c.text_secondary, false),
+        (Some(path), Some(v)) => {
+            let name = if v.name.is_empty() { file_stem(path) } else { v.name.clone() };
+            match &v.state {
+                PluginState::Loading => (format!("{name} · loading"), c.text_secondary, false),
+                PluginState::Running => (name, c.text_strong, false),
+                PluginState::Crashed => ("crashed · reload".to_string(), c.accent_danger, true),
+                PluginState::Hung => ("not responding · reload".to_string(), c.accent_danger, true),
+                PluginState::Failed(e) => (format!("failed · {e}"), c.accent_danger, true),
+            }
+        }
+    };
+    p.rrect(r, 3.0, if bad { c.accent_danger.alpha(0.12) } else { c.bg_field });
+    if bad {
+        p.rrect_stroke(r.inset(-0.5), 3.0, 1.0, c.accent_danger.alpha(0.5));
+    }
+    p.text_fit(r.x0 + 8.0, r.center().y, &text, &TextStyle::mono(11.0, col), r.width() - 16.0);
+}
+
+fn file_stem(path: &str) -> String {
+    std::path::Path::new(path).file_stem().map_or_else(|| path.to_string(), |s| s.to_string_lossy().into_owned())
 }

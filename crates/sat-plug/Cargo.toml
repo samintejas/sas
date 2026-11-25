@@ -1,0 +1,33 @@
+[package]
+name = "sat-plug"
+description = "CLAP plugin hosting for sat: plugins run in host processes and swap audio with the engine through shared memory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "sat-plughost"
+path = "src/bin/sat-plughost.rs"
+
+[dependencies]
+sat-engine.workspace = true
+clap-sys = "0.6"
+memmap2 = "0.9"
+libloading = "0.8"
+serde.workspace = true
+serde_json.workspace = true
+
+# FFI to plugins and shared memory need unsafe code; it is kept to this crate.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[dev-dependencies]
+sat-doc.workspace = true
+sat-compile.workspace = true
+sat-modules.workspace = true
+sat-ui.workspace = true

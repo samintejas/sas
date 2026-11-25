@@ -269,6 +269,7 @@ mod tests {
             params,
             pos: (0.0, 0.0),
             audio: None,
+            plugin: None,
         }
     }
 

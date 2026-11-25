@@ -48,6 +48,10 @@ pub const RING_MOD: &str = "ring_mod";
 pub const SPLIT: &str = "split";
 /// Two inputs to one output.
 pub const MERGE: &str = "merge";
+/// A hosted CLAP plugin (its path is the module's `plugin`). Its seven
+/// knobs drive the plugin's first seven parameters, 0–1 across each one's
+/// range.
+pub const PLUGIN: &str = "clap";
 
 /// The parameter key of the bypass switch.
 pub const BYPASS: &str = "bypass";
@@ -55,7 +59,7 @@ pub const BYPASS: &str = "bypass";
 pub const BYPASS_INDEX: u8 = 7;
 
 /// Fx modules that can be added: kind and label.
-pub const MODULES: [(&str, &str); 19] = [
+pub const MODULES: [(&str, &str); 20] = [
     (FX_IN, "in"),
     (EQ, "eq"),
     (COMP, "comp"),
@@ -74,6 +78,7 @@ pub const MODULES: [(&str, &str); 19] = [
     (LIMITER, "limiter"),
     (SPLIT, "split"),
     (MERGE, "mix"),
+    (PLUGIN, "plugin"),
     (FX_OUT, "out"),
 ];
 
@@ -97,9 +102,8 @@ pub fn ports(kind: &str) -> &'static [PortSpec] {
     match kind {
         FX_IN => &IN_PORTS,
         FX_OUT => &OUT_PORTS,
-        EQ | DELAY | REVERB | DRIVE | LIMITER | FX_FILTER | CHORUS | FLANGER | PHASER | TREMOLO | CRUSH | UTILITY => {
-            &THROUGH
-        }
+        EQ | DELAY | REVERB | DRIVE | LIMITER | FX_FILTER | CHORUS | FLANGER | PHASER | TREMOLO | CRUSH | UTILITY
+        | PLUGIN => &THROUGH,
         COMP | GATE => &COMP_PORTS,
         RING_MOD => &RING_PORTS,
         SPLIT => &SPLIT_PORTS,
@@ -203,6 +207,15 @@ pub fn params(kind: &str) -> &'static [ParamSpec] {
         [p("freq", "freq", 1.0, 5000.0, 200.0, Unit::Hz), p("mix", "mix", 0.0, 1.0, 0.5, Unit::Percent)];
     const SPLIT_P: [ParamSpec; 1] = [p("balance", "a · b", 0.0, 1.0, 0.5, Unit::Percent)];
     const MERGE_P: [ParamSpec; 2] = [p("g1", "1", -60.0, 6.0, 0.0, Unit::Db), p("g2", "2", -60.0, 6.0, 0.0, Unit::Db)];
+    const PLUGIN_P: [ParamSpec; 7] = [
+        p("p1", "p1", 0.0, 1.0, 0.5, Unit::Percent),
+        p("p2", "p2", 0.0, 1.0, 0.5, Unit::Percent),
+        p("p3", "p3", 0.0, 1.0, 0.5, Unit::Percent),
+        p("p4", "p4", 0.0, 1.0, 0.5, Unit::Percent),
+        p("p5", "p5", 0.0, 1.0, 0.5, Unit::Percent),
+        p("p6", "p6", 0.0, 1.0, 0.5, Unit::Percent),
+        p("p7", "p7", 0.0, 1.0, 0.5, Unit::Percent),
+    ];
     match kind {
         FX_IN => &IN_P,
         FX_OUT => &OUT_P,
@@ -223,6 +236,7 @@ pub fn params(kind: &str) -> &'static [ParamSpec] {
         GATE => &GATE_P,
         UTILITY => &UTILITY_P,
         RING_MOD => &RING_P,
+        PLUGIN => &PLUGIN_P,
         _ => &[],
     }
 }
