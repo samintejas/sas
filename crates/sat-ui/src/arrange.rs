@@ -38,6 +38,10 @@ pub struct ArrangeState {
     pub selected_placement: Option<PlacementId>,
     /// The grid clip edits snap to; `None` is off.
     pub snap: Option<Ticks>,
+    /// Tracks whose automation lanes are folded away.
+    pub hidden_lanes: BTreeSet<TrackId>,
+    /// The breakpoint being dragged, shown with its value.
+    pub active_point: Option<(LaneId, usize)>,
 }
 
 /// The arrange snap settings the toolbar cycles through.
@@ -71,6 +75,8 @@ impl Default for ArrangeState {
             collapsed: BTreeSet::new(),
             selected_placement: None,
             snap: Some(Ticks(PPQ * 4)),
+            hidden_lanes: BTreeSet::new(),
+            active_point: None,
         }
     }
 }
@@ -220,6 +226,31 @@ pub enum Hit {
     },
     /// The toolbar's snap button.
     Snap,
+    /// A track header's automation button: show, hide or start its lanes.
+    AutoToggle(TrackId),
+    /// A lane header's +: add the track's next lane.
+    LaneAdd(TrackId),
+    /// A lane header's ×: remove the lane.
+    LaneRemove(LaneId),
+    /// An automation breakpoint.
+    AutoPoint {
+        /// Its lane.
+        lane: LaneId,
+        /// Its index in the lane.
+        index: usize,
+    },
+    /// Empty space in an automation lane (a return's or master's row may
+    /// have no lane yet: it drives the track's gain).
+    AutoLane {
+        /// The track.
+        track: TrackId,
+        /// The lane, if it exists.
+        lane: Option<LaneId>,
+        /// Tick under the point.
+        tick: Ticks,
+        /// Height under the point, 0–1.
+        pos: f64,
+    },
     /// Empty timeline on a row, at a tick.
     Lane(TrackId, Ticks),
     /// The ruler, at a tick.
@@ -248,9 +279,29 @@ pub struct ArrangeLayout {
     pub takes: Vec<TakeBox>,
     /// The toolbar's snap button.
     pub snap: Rect,
+    /// Visible automation lanes.
+    pub autos: Vec<AutoBox>,
     origin: Ticks,
     px_per_tick: f64,
 }
+
+/// An automation lane on screen.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AutoBox {
+    /// The track.
+    pub track: TrackId,
+    /// The lane (a return's or master's row shows one before it exists).
+    pub lane: Option<LaneId>,
+    /// What it drives.
+    pub target: ParamTarget,
+    /// The timeline part of its row.
+    pub rect: Rect,
+    /// Its breakpoints on screen.
+    pub points: Vec<Point>,
+}
+
+/// How close to a breakpoint a press grabs it, in px.
+pub const POINT_GRAB: f64 = 6.0;
 
 /// How close to a clip's edge a press trims it, in px.
 pub const EDGE_GRAB: f64 = 6.0;
@@ -320,11 +371,13 @@ impl ArrangeLayout {
             let h = row_height(kind) + if lanes > 0 { lanes as f64 * TAKE_H + 4.0 } else { 0.0 };
             rows.push(Row { track: t, kind, y, h, depth: depth(t) });
             y += h;
-            if kind == RowKind::Track {
-                for l in doc.lanes.values().filter(|l| l.target == ParamTarget::Gain(t)) {
-                    let k = RowKind::Lane(l.id);
-                    rows.push(Row { track: t, kind: k, y, h: row_height(k), depth: depth(t) });
-                    y += row_height(k);
+            if matches!(kind, RowKind::Track | RowKind::Group) && !st.hidden_lanes.contains(&t) {
+                for target in crate::automation::lane_targets(t) {
+                    if let Some(l) = crate::automation::lane_of(doc, &target) {
+                        let k = RowKind::Lane(l.id);
+                        rows.push(Row { track: t, kind: k, y, h: row_height(k), depth: depth(t) });
+                        y += row_height(k);
+                    }
                 }
             }
         }
@@ -337,6 +390,7 @@ impl ArrangeLayout {
             clips: Vec::new(),
             takes: Vec::new(),
             snap: snap_button(bounds),
+            autos: Vec::new(),
             origin: st.origin,
             px_per_tick,
         };
@@ -375,6 +429,34 @@ impl ArrangeLayout {
                 }
             }
         }
+        layout.autos = layout
+            .rows
+            .iter()
+            .filter_map(|r| {
+                let (lane, target) = match r.kind {
+                    RowKind::Lane(id) => (Some(id), doc.lanes.get(&id)?.target.clone()),
+                    RowKind::Return | RowKind::Master => {
+                        let target = ParamTarget::Gain(r.track);
+                        (crate::automation::lane_of(doc, &target).map(|l| l.id), target)
+                    }
+                    _ => return None,
+                };
+                let rect = Rect::new(timeline.x0, r.y, timeline.x1, r.y + r.h - 1.0);
+                let points = lane
+                    .and_then(|id| doc.lanes.get(&id))
+                    .map(|l| {
+                        l.points
+                            .iter()
+                            .map(|q| {
+                                let pos = crate::automation::pos_of(doc, &target, q.value);
+                                Point::new(layout.x_of(q.tick), crate::automation::y_of(rect, pos))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Some(AutoBox { track: r.track, lane, target, rect, points })
+            })
+            .collect();
         clips.sort_by(|a, b| a.rect.x0.total_cmp(&b.rect.x0));
         layout.clips = clips;
         layout.takes = takes;
@@ -440,11 +522,29 @@ impl ArrangeLayout {
         if let Some(k) = self.takes.iter().rev().find(|k| k.rect.contains(pt)) {
             return Hit::Take { placement: k.placement, clip: k.clip, take: k.take, at: self.tick_at(pt.x) - k.origin };
         }
+        if let Some(a) = self.autos.iter().find(|a| a.rect.contains(pt)) {
+            if let Some(lane) = a.lane
+                && let Some(index) = a.points.iter().position(|q| (*q - pt).hypot() <= POINT_GRAB)
+            {
+                return Hit::AutoPoint { lane, index };
+            }
+            let pos = crate::automation::pos_at(a.rect, pt.y);
+            return Hit::AutoLane { track: a.track, lane: a.lane, tick: self.tick_at(pt.x), pos };
+        }
         let Some(row) = self.rows.iter().find(|r| pt.y >= r.y && pt.y < r.y + r.h) else { return Hit::Nothing };
         if self.headers.contains(pt) {
             let hc = header_controls(row, self.headers);
             let t = row.track;
             let inside = |r: Option<Rect>| r.is_some_and(|r| r.contains(pt));
+            if inside(hc.auto) {
+                return Hit::AutoToggle(t);
+            }
+            if inside(hc.lane_add) {
+                return Hit::LaneAdd(t);
+            }
+            if let (true, RowKind::Lane(id)) = (inside(hc.lane_remove), row.kind) {
+                return Hit::LaneRemove(id);
+            }
             if inside(hc.mute) {
                 return Hit::Mute(t);
             }
@@ -502,6 +602,12 @@ pub struct HeaderControls {
     pub fader: Option<HFader>,
     /// Meter.
     pub meter: Option<Rect>,
+    /// The automation button: show, hide or start the track's lanes.
+    pub auto: Option<Rect>,
+    /// A lane header's add-lane button.
+    pub lane_add: Option<Rect>,
+    /// A lane header's remove-lane button.
+    pub lane_remove: Option<Rect>,
 }
 
 /// The header controls of `row` in the header column `headers`.
@@ -518,6 +624,8 @@ pub fn header_controls(row: &Row, headers: Rect) -> HeaderControls {
                 arm: None,
                 fader: Some(HFader { x0: headers.x0 + indent, x1: x1 - 50.0, y: y0 + 33.0 }),
                 meter: Some(Rect::new(x1 - 16.0, y0 + 12.0, x1 - 9.0, y1 - 8.0)),
+                auto: button(x1 - 46.0, cy),
+                ..Default::default()
             }
         }
         RowKind::Track => {
@@ -528,12 +636,18 @@ pub fn header_controls(row: &Row, headers: Rect) -> HeaderControls {
                 arm: button(x1 - 46.0, cy),
                 fader: Some(HFader { x0: x1 - 98.0, x1: x1 - 30.0, y: y0 + TRACK_H - 13.0 }),
                 meter: Some(Rect::new(x1 - 16.0, y0 + 10.0, x1 - 9.0, y0 + TRACK_H - 6.0)),
+                auto: button(x1 - 124.0, cy),
+                ..Default::default()
             }
         }
         RowKind::Return | RowKind::Master => {
             HeaderControls { mute: button(x1 - 32.0, (y0 + y1) / 2.0), ..Default::default() }
         }
-        RowKind::Lane(_) => HeaderControls::default(),
+        RowKind::Lane(_) => {
+            let cy = (y0 + y1) / 2.0;
+            let small = |x: f64| Some(Rect::new(x, cy - 9.0, x + 18.0, cy + 9.0));
+            HeaderControls { lane_add: small(x1 - 50.0), lane_remove: small(x1 - 28.0), ..Default::default() }
+        }
     }
 }
 
@@ -771,6 +885,7 @@ fn draw_row(
                     Align::Center,
                 );
                 draw_mute_solo(p, th, &hc, t);
+                draw_auto_button(p, th, doc, st, &hc, t);
                 if let (Some(f), Some(m)) = (hc.fader, hc.meter) {
                     fader(p, th, f, t.mixer.gain_db);
                     meter(p, th, m, level);
@@ -790,7 +905,7 @@ fn draw_row(
                 }
             } else {
                 let cy = hr.y0 + 17.0;
-                p.text_fit(hr.x0 + indent, cy, &t.name, &TextStyle::sans(13.0, c.text_strong).medium(), 80.0);
+                p.text_fit(hr.x0 + indent, cy, &t.name, &TextStyle::sans(13.0, c.text_strong).medium(), 70.0);
                 p.text_fit(
                     hr.x0 + indent,
                     hr.y0 + TRACK_H - 13.0,
@@ -799,6 +914,7 @@ fn draw_row(
                     hr.width() - indent - 112.0,
                 );
                 draw_mute_solo(p, th, &hc, t);
+                draw_auto_button(p, th, doc, st, &hc, t);
                 if let Some(ar) = hc.arm {
                     let arm = small_button(p, th, ar, "", t.armed.then_some(c.accent_danger));
                     if t.armed {
@@ -861,7 +977,19 @@ fn draw_row(
                     "level"
                 }
                 _ => {
-                    p.text(hr.x0 + indent + 10.0, cy, "gain", &TextStyle::mono(11.0, c.text_secondary), Align::Left);
+                    let name = target.as_ref().map_or("", crate::automation::target_name);
+                    p.text(hr.x0 + indent + 10.0, cy, name, &TextStyle::mono(11.0, c.text_secondary), Align::Left);
+                    // + only while the track has a lane left to add
+                    let more = crate::automation::lane_targets(row.track)
+                        .iter()
+                        .any(|x| crate::automation::lane_of(doc, x).is_none());
+                    let add = hc.lane_add.filter(|_| more);
+                    for (r, ic) in [(add, Icon::Plus), (hc.lane_remove, Icon::Close)] {
+                        if let Some(r) = r {
+                            p.rrect(r, 3.0, c.bg_control);
+                            icons::draw(p, ic, r.inset(-5.0), c.text_secondary);
+                        }
+                    }
                     ""
                 }
             };
@@ -878,14 +1006,28 @@ fn draw_row(
                 );
                 draw_mute_solo(p, th, &hc, t);
             }
-            if let Some(target) = target
-                && let Some(lane_data) = doc.lanes.values().find(|x| x.target == target)
-            {
-                draw_automation(p, th, l, lane_data, lane);
+            if let Some(a) = l.autos.iter().find(|a| (a.rect.y0 - row.y).abs() < 0.5) {
+                draw_automation(p, th, doc, st, a);
             }
             p.hline(hr.x0, lane.x1, hr.y1 - 1.0, c.border_subtle);
         }
     }
+}
+
+/// The automation button: lit while the track's lanes show.
+fn draw_auto_button(
+    p: &mut Painter<'_>,
+    th: &Theme,
+    doc: &Document,
+    st: &ArrangeState,
+    hc: &HeaderControls,
+    t: &Track,
+) {
+    let Some(r) = hc.auto else { return };
+    let has = crate::automation::lane_targets(t.id).iter().any(|x| crate::automation::lane_of(doc, x).is_some());
+    let on = has && !st.hidden_lanes.contains(&t.id);
+    small_button(p, th, r, "", on.then_some(th.c.accent_primary));
+    icons::draw(p, Icon::Pulse, r.inset(-5.0), if on { th.c.accent_primary } else { th.c.text_primary });
 }
 
 fn draw_mute_solo(p: &mut Painter<'_>, th: &Theme, hc: &HeaderControls, t: &Track) {
@@ -897,27 +1039,52 @@ fn draw_mute_solo(p: &mut Painter<'_>, th: &Theme, hc: &HeaderControls, t: &Trac
     }
 }
 
-fn draw_automation(p: &mut Painter<'_>, th: &Theme, l: &ArrangeLayout, lane: &Lane, r: Rect) {
-    if lane.points.is_empty() {
-        return;
-    }
-    let (lo, hi) = lane.points.iter().fold((f32::MAX, f32::MIN), |(a, b), q| (a.min(q.value), b.max(q.value)));
-    let (lo, hi) = if hi - lo < 1e-3 { (lo - 1.0, hi + 1.0) } else { (lo, hi) };
-    let y_of = |v: f32| r.y1 - 6.0 - (r.height() - 12.0) * ((v - lo) / (hi - lo)) as f64;
-    let mut pts = vec![Point::new(r.x0, y_of(lane.points[0].value))];
-    for (i, q) in lane.points.iter().enumerate() {
-        let x = l.x_of(q.tick);
-        if i > 0 && lane.points[i - 1].curve == Curve::Hold {
-            pts.push(Point::new(x, pts.last().unwrap().y));
+/// Draws a lane: its curve between breakpoints and, outside them, the
+/// target's own value (which plays there), dimmed.
+fn draw_automation(p: &mut Painter<'_>, th: &Theme, doc: &Document, st: &ArrangeState, a: &AutoBox) {
+    use crate::automation::{fmt_value, pos_of, y_of};
+    let c = &th.c;
+    let r = a.rect;
+    let base = doc.base_value(&a.target).map(|v| y_of(r, pos_of(doc, &a.target, v)));
+    let lane = a.lane.and_then(|id| doc.lanes.get(&id));
+    let points: Vec<&Breakpoint> = lane.map(|l| l.points.iter().collect()).unwrap_or_default();
+    let dim = c.text_secondary.alpha(0.7);
+    let (Some(first), Some(last)) = (a.points.first(), a.points.last()) else {
+        if let Some(y) = base {
+            p.polyline(&[Point::new(r.x0, y), Point::new(r.x1, y)], 1.0, dim);
         }
-        pts.push(Point::new(x, y_of(q.value)));
+        return;
+    };
+    if let Some(y) = base {
+        p.polyline(&[Point::new(r.x0, y), Point::new(first.x, y)], 1.0, dim);
+        p.polyline(&[Point::new(last.x, y), Point::new(r.x1, y)], 1.0, dim);
     }
-    pts.push(Point::new(r.x1, pts.last().unwrap().y));
-    p.polyline(&pts, 1.25, th.c.text_secondary);
-    for q in lane.points.iter() {
-        let pt = Point::new(l.x_of(q.tick), y_of(q.value));
-        p.circle(pt, 3.0, th.c.bg_base);
-        p.circle_stroke(pt, 3.0, 1.2, th.c.text_strong);
+    let mut line = vec![*first];
+    for (i, w) in a.points.windows(2).enumerate() {
+        let (q0, q1) = (w[0], w[1]);
+        match points.get(i).map(|b| b.curve) {
+            Some(Curve::Hold) => line.extend([Point::new(q1.x, q0.y), q1]),
+            Some(Curve::Bend(t)) if t != 0.0 => {
+                let k = 2f64.powf(3.0 * t as f64);
+                line.extend((1..=16).map(|j| {
+                    let x = j as f64 / 16.0;
+                    Point::new(q0.x + (q1.x - q0.x) * x, q0.y + (q1.y - q0.y) * x.powf(k))
+                }));
+            }
+            _ => line.push(q1),
+        }
+    }
+    p.polyline(&line, 1.25, c.text_strong);
+    for (i, q) in a.points.iter().enumerate() {
+        let active = st.active_point.is_some_and(|(id, k)| Some(id) == a.lane && k == i);
+        let (rad, fill) = if active { (4.0, c.accent_primary) } else { (3.0, c.bg_base) };
+        p.circle(*q, rad, fill);
+        p.circle_stroke(*q, rad, 1.2, if active { c.accent_primary } else { c.text_strong });
+        if active && let Some(b) = points.get(i) {
+            let label = fmt_value(&a.target, b.value);
+            let y = if q.y - r.y0 > 14.0 { q.y - 10.0 } else { q.y + 10.0 };
+            p.text(q.x + 8.0, y, &label, &TextStyle::mono(10.5, c.text_max), Align::Left);
+        }
     }
 }
 

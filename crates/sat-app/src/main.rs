@@ -38,13 +38,14 @@ use std::time::{Duration, Instant};
 use sat_compile::Compiled;
 use sat_doc::sat_time::Ticks;
 use sat_doc::{
-    CableId, ClipId, Document, Endpoint, GridKind, History, ModuleId, Note, Op, ParamTarget, PlacementId, PortRef,
-    TrackFlag, TrackId, TrackKind,
+    Breakpoint, CableId, ClipId, Document, Endpoint, GridKind, History, LaneId, ModuleId, Note, Op, ParamTarget,
+    PlacementId, PortRef, TrackFlag, TrackId, TrackKind,
 };
 use sat_engine::{Command, EngineHandle};
 use sat_modules::{Editor, PortKind, drum, euclid};
 use sat_ui::arrange::{ArrangeLayout, ArrangeState, Hit, RowKind, TransportView, header_controls};
 use sat_ui::arrange_edit::{self, Span};
+use sat_ui::automation;
 use sat_ui::controls::{self, SILENT_DB};
 use sat_ui::grid::{self, GridHit, GridLayout, GridView};
 use sat_ui::mixer::{Knob, Levels, MixHit, MixerLayout};
@@ -371,6 +372,8 @@ struct App {
     audio_drag: Option<AudioDrag>,
     audio_layout: Option<sat_ui::audio_edit::AudioEditLayout>,
     clip_drag: Option<ClipDrag>,
+    /// A breakpoint being dragged: its lane, index, and the lane's points when the drag began.
+    auto_drag: Option<(LaneId, usize, Vec<Breakpoint>)>,
     /// The last press was in the bottom panel (keys go to its editor), else
     /// in the main view (keys edit clips there).
     panel_focus: bool,
@@ -436,6 +439,7 @@ impl App {
         self.grid_drag = None;
         self.audio_drag = None;
         self.clip_drag = None;
+        self.auto_drag = None;
         self.playback.recompile(&doc);
         self.history = History::new(doc, 500);
         self.playback.locate(Ticks::ZERO);
@@ -822,6 +826,10 @@ impl App {
         if self.clip_drag.take().is_some() {
             self.history.end_gesture();
         }
+        if self.auto_drag.take().is_some() {
+            self.arrange.active_point = None;
+            self.history.end_gesture();
+        }
     }
 
     fn press_session(&mut self, pt: Point, double: bool) {
@@ -1145,6 +1153,10 @@ impl App {
                 self.arrange.selected_placement = Some(placement);
                 self.begin_clip_drag(placement, Some(right));
             }
+            Hit::AutoToggle(t) => self.toggle_lanes(t),
+            Hit::LaneAdd(t) => self.add_lane(t),
+            Hit::LaneRemove(id) => self.edit("remove lane", vec![Op::RemoveLane { id }]),
+            hit @ (Hit::AutoPoint { .. } | Hit::AutoLane { .. }) => self.press_lane(hit, double),
             Hit::Snap => self.arrange.snap = sat_ui::arrange::next_snap(self.arrange.snap),
             Hit::Lane(t, at) if double && layout.row_at(pt.y).is_some_and(|r| r.kind == RowKind::Track) => {
                 self.draw_clip(t, at)
@@ -1196,6 +1208,85 @@ impl App {
                 self.playback.locate(snapped);
             }
             Hit::Lane(..) | Hit::Nothing => self.arrange.selected_placement = None,
+        }
+    }
+
+    /// The track's lanes: shown or hidden, or a gain lane started when it has none.
+    fn toggle_lanes(&mut self, t: TrackId) {
+        let doc = self.history.doc();
+        let has = automation::lane_targets(t).iter().any(|x| automation::lane_of(doc, x).is_some());
+        if has {
+            if !self.arrange.hidden_lanes.remove(&t) {
+                self.arrange.hidden_lanes.insert(t);
+            }
+        } else {
+            self.edit("add lane", vec![Op::AddLane { id: LaneId::new(), target: ParamTarget::Gain(t) }]);
+            self.arrange.hidden_lanes.remove(&t);
+        }
+    }
+
+    /// Adds the track's next lane that does not exist yet (gain, then pan).
+    fn add_lane(&mut self, t: TrackId) {
+        let doc = self.history.doc();
+        if let Some(target) = automation::lane_targets(t).into_iter().find(|x| automation::lane_of(doc, x).is_none()) {
+            self.edit("add lane", vec![Op::AddLane { id: LaneId::new(), target }]);
+        }
+    }
+
+    /// A press on a lane: on a point, drag it (double-click deletes it); on
+    /// empty space, add a point there (creating the lane if needed) and drag it.
+    fn press_lane(&mut self, hit: Hit, double: bool) {
+        let snap = if self.mods.alt_key() { None } else { Some(Ticks::sixteenths(1)) };
+        match hit {
+            Hit::AutoPoint { lane, index } => {
+                let Some(l) = self.history.doc().lanes.get(&lane) else { return };
+                let pts: Vec<Breakpoint> = l.points.iter().copied().collect();
+                if double {
+                    self.edit(
+                        "delete point",
+                        vec![Op::SetLanePoints { id: lane, points: automation::remove(&pts, index).into() }],
+                    );
+                    self.arrange.active_point = None;
+                    return;
+                }
+                self.history.begin_gesture("move point");
+                self.arrange.active_point = Some((lane, index));
+                self.auto_drag = Some((lane, index, pts));
+            }
+            Hit::AutoLane { track, lane, tick, pos } => {
+                let doc = self.history.doc();
+                let mut ops = Vec::new();
+                let (id, target, pts) = match lane.and_then(|id| doc.lanes.get(&id)) {
+                    Some(l) => (l.id, l.target.clone(), l.points.iter().copied().collect::<Vec<_>>()),
+                    None => {
+                        let id = LaneId::new();
+                        ops.push(Op::AddLane { id, target: ParamTarget::Gain(track) });
+                        (id, ParamTarget::Gain(track), Vec::new())
+                    }
+                };
+                let tick = arrange_edit::snap_round(tick, snap).max(Ticks::ZERO);
+                let (after, index) = automation::insert(&pts, tick, automation::value_at(doc, &target, pos));
+                ops.push(Op::SetLanePoints { id, points: after.clone().into() });
+                self.history.begin_gesture("add point");
+                self.edit("add point", ops);
+                self.arrange.active_point = Some((id, index));
+                self.auto_drag = Some((id, index, after));
+            }
+            _ => {}
+        }
+    }
+
+    fn auto_drag_to(&mut self) {
+        let (Some((lane, index, pts)), Some(l)) = (self.auto_drag.clone(), self.layout.as_ref()) else { return };
+        let doc = self.history.doc();
+        let Some(target) = doc.lanes.get(&lane).map(|x| x.target.clone()) else { return };
+        let Some(a) = l.autos.iter().find(|a| a.lane == Some(lane)) else { return };
+        let snap = if self.mods.alt_key() { None } else { Some(Ticks::sixteenths(1)) };
+        let tick = arrange_edit::snap_round(l.tick_at(self.cursor.x), snap).max(Ticks::ZERO);
+        let value = automation::value_at(doc, &target, automation::pos_at(a.rect, self.cursor.y));
+        let after = automation::move_point(&pts, index, tick, value);
+        if doc.lanes.get(&lane).is_some_and(|x| x.points.iter().ne(after.iter())) {
+            self.edit("move point", vec![Op::SetLanePoints { id: lane, points: after.into() }]);
         }
     }
 
@@ -2066,9 +2157,11 @@ impl ApplicationHandler for App {
                     || self.roll_drag.is_some()
                     || self.grid_drag.is_some()
                     || self.audio_drag.is_some()
-                    || self.clip_drag.is_some();
+                    || self.clip_drag.is_some()
+                    || self.auto_drag.is_some();
                 self.drag_to();
                 self.clip_drag_to();
+                self.auto_drag_to();
                 self.update_cursor();
                 self.audio_drag_to();
                 self.roll_drag_to();
@@ -2201,6 +2294,7 @@ fn main() {
         audio_drag: None,
         audio_layout: None,
         clip_drag: None,
+        auto_drag: None,
         panel_focus: false,
         cursor_icon: winit::window::CursorIcon::Default,
         note_len: Ticks::sixteenths(1),

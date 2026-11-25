@@ -10,6 +10,7 @@
 pub mod arrange;
 pub mod arrange_edit;
 pub mod audio_edit;
+pub mod automation;
 pub mod controls;
 pub mod demo;
 pub mod gfx;

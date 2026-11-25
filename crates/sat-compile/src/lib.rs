@@ -665,6 +665,7 @@ pub fn compile_with(
             tr.mixer.mute || solo_muted,
             lane_automation(doc, &ParamTarget::Gain(t), &tempo, sample_rate),
         )
+        .with_pan_lane(lane_automation(doc, &ParamTarget::Pan(t), &tempo, sample_rate))
         .with_meter(meter);
         b.node(strip_id, NodeKind::Strip(Box::new(strip)), pre.map(|p| vec![(p, 1.0)]).unwrap_or_default());
         params.insert(ParamTarget::Gain(t), (strip_id, Param::GainDb, Conv::Same));

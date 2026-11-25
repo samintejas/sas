@@ -127,6 +127,8 @@ cargo run --release -p sat-app -- my.sat  # opens a project bundle
 | arrange: Alt-drag a clip, Ctrl+D | drag a copy (the original stays), put a copy right after it; a copy is a clip of its own playing the same notes or audio |
 | arrange: Delete, Left / Right, Ctrl+L, Esc | delete the selected clip (and the clip itself once nothing plays it), nudge it by the snap, loop over it, deselect |
 | arrange: double-click an empty lane | a new looping clip there, fed by the track's first source module |
+| arrange: a track header's automation button, a lane's + and × | start a gain lane (or show / hide the track's lanes), add its pan lane, remove the lane |
+| arrange: click an automation lane, drag a point, double-click a point | add a breakpoint (snapped to sixteenths; Alt places it freely), move it (its value shows while dragging), delete it; a return's or master's row is its gain lane |
 | piano roll: click empty space (draw tool) | draw a note; keep dragging to set its length |
 | piano roll: drag a note, its right edge, the velocity lane | move it (time and pitch), resize it, set velocity; the selection moves together |
 | piano roll: double-click a note, Delete, arrows, Ctrl+A, Esc | delete, delete the selection, nudge by the grid or transpose (Shift: octave), select all, clear |
