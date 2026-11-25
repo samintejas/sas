@@ -115,6 +115,10 @@ pub struct Input {
     pub(crate) gain: Smooth,
 }
 
+/// How far automated gain moves toward its target each sample (about a
+/// 2 ms glide at 48 kHz).
+const GAIN_GLIDE: f32 = 0.01;
+
 /// A mixer strip: fader, pan and mute, with an optional gain automation lane.
 #[derive(Debug, Clone)]
 pub struct Strip {
@@ -183,6 +187,28 @@ impl Strip {
     }
 
     fn process(&mut self, b: &mut Buf, off: usize, len: usize, pos: Option<i64>) {
+        // automated gain is read every sample and followed by a per-sample
+        // glide (so jumps, at a hold point or a lane's ends, do not click),
+        // which makes a render come out the same whatever the block sizes
+        if let (Some(p), true, false) = (pos, self.gain_lane.is_some(), self.mute) {
+            let (mut pl, mut pr) = (0f32, 0f32);
+            let (mut gl, mut gr) = (self.gains.0.cur, self.gains.1.cur);
+            for (k, i) in (off..off + len).enumerate() {
+                let (tl, tr) = self.target_gains(Some(p + k as i64));
+                gl += (tl - gl) * GAIN_GLIDE;
+                gr += (tr - gr) * GAIN_GLIDE;
+                b.l[i] *= gl;
+                b.r[i] *= gr;
+                pl = pl.max(b.l[i].abs());
+                pr = pr.max(b.r[i].abs());
+            }
+            self.gains.0 = Smooth::new(gl);
+            self.gains.1 = Smooth::new(gr);
+            if let Some(m) = &self.meter {
+                m.record(pl, pr);
+            }
+            return;
+        }
         let (tl, tr) = self.target_gains(pos);
         self.gains.0.set(tl);
         self.gains.1.set(tr);

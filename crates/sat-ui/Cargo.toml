@@ -20,3 +20,7 @@ png.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+sat-compile.workspace = true
+sat-engine.workspace = true

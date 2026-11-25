@@ -576,6 +576,63 @@ pub fn audio_segments(doc: &Document, track: TrackId, tempo: &TempoMap, sr: f64,
     out
 }
 
+/// The end of the arrangement: where its last placement ends.
+pub fn song_end(doc: &Document) -> Ticks {
+    doc.placements.values().map(|p| p.start + p.length).max().unwrap_or(Ticks::ZERO)
+}
+
+/// How long a render may run past its end while effects ring out.
+pub const MAX_TAIL_SECS: f64 = 10.0;
+/// A tail ends once the output stays below this level for [`TAIL_QUIET_SECS`].
+pub const TAIL_FLOOR: f32 = 1e-5;
+/// See [`TAIL_FLOOR`].
+pub const TAIL_QUIET_SECS: f64 = 0.5;
+
+/// Renders `from..to` of `doc` offline at `sample_rate`, then up to
+/// [`MAX_TAIL_SECS`] more until the output falls silent if `tail`. It runs
+/// the engine exactly as playback does (with the loop off), so the result is
+/// what was heard, sample for sample.
+pub fn render_range(
+    doc: &Document,
+    sounds: &Sounds,
+    sample_rate: f64,
+    from: Ticks,
+    to: Ticks,
+    tail: bool,
+) -> Result<(Vec<f32>, Vec<f32>), CompileError> {
+    const BLOCK: usize = 1024;
+    let c = compile_with(doc, sample_rate, BLOCK, sounds)?;
+    let (start, end) = (c.sample(from), c.sample(to).max(c.sample(from)));
+    let (mut e, mut h) = sat_engine::engine(c.schedule, 4);
+    let _ = h.send(Command::Locate(start));
+    let _ = h.send(Command::Play);
+    let body = (end - start) as usize;
+    let max = body + if tail { (MAX_TAIL_SECS * sample_rate) as usize } else { 0 };
+    let quiet_for = (TAIL_QUIET_SECS * sample_rate) as usize;
+    let (mut l, mut r) = (Vec::with_capacity(body), Vec::with_capacity(body));
+    let (mut bl, mut br) = ([0.0f32; BLOCK], [0.0f32; BLOCK]);
+    let mut quiet = 0;
+    while l.len() < max {
+        let n = BLOCK.min(max - l.len());
+        e.process(&mut bl[..n], &mut br[..n]);
+        for k in 0..n {
+            l.push(bl[k]);
+            r.push(br[k]);
+            if l.len() > body {
+                quiet = if bl[k].abs().max(br[k].abs()) < TAIL_FLOOR { quiet + 1 } else { 0 };
+            }
+        }
+        if l.len() > body && quiet >= quiet_for {
+            let keep = l.len() - quiet + quiet_for.min(quiet) / 10;
+            l.truncate(keep);
+            r.truncate(keep);
+            break;
+        }
+    }
+    h.collect_garbage();
+    Ok((l, r))
+}
+
 /// Compiles `doc` for `sample_rate`, processing at most `max_block` frames
 /// per run, with no sounds loaded (samplers are silent).
 pub fn compile(doc: &Document, sample_rate: f64, max_block: usize) -> Result<Compiled, CompileError> {
