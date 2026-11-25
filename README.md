@@ -57,7 +57,15 @@ offline to a WAV file, running on past the last clip until reverb and delay
 tails fall silent, and Ctrl+Shift+E renders the loop range. The render runs
 the engine exactly as playback does, so it matches what was heard sample for
 sample whatever block size the audio device asked for (automation is
-evaluated per sample, not per block). The arrange view, piano roll and mixer from
+evaluated per sample, not per block). The turing generator is a looping
+shift register of seeded random bits: `change` is the chance that the bit
+coming round flips (0 locks the phrase, 1 inverts it each time round), and
+the register picks pitches from a scale over a range and whether each step
+plays (`dens`). Its seed comes from the project seed and the clip, so it
+plays and exports the same every time; with `reseed` on, every time round a
+looping clip plays a fresh phrase from (clip seed, loop count). Its step
+editor shows each step's pitch, and hand edits, clear and bake work as on
+the euclid. The demo has a reseeding turing track over its second half. The arrange view, piano roll and mixer from
 the prototype are drawn with vello; the engine plays through the default
 audio device and feeds live per-track meters.
 
@@ -168,6 +176,7 @@ the app: the device's rate).
 | fx grid: + module, the power icon, dragging between ports | add an effect just before out (an empty grid gets its in and out), bypass it, reroute (split, mix, side chain) |
 | drum seq: click a step, Shift-click it, the page buttons | toggle it, cycle its velocity (normal, accent, ghost), show another bar |
 | euclid: drag a knob, click a trig | change steps, hits, rotation, accents, note, rate, gate or velocity; add or remove a hand edit over the generator |
+| turing: drag a knob, click a step | change steps, change, low, range, scale, dens, rate, gate, vel or reseed; add or remove that step's note as a hand edit |
 | euclid: clear, bake, generative / fixed | drop the hand edits, fix generator and edits into plain steps, switch between them |
 | wheel, Shift+wheel, Ctrl+wheel | scroll tracks (or the mixer), scroll time, zoom |
 

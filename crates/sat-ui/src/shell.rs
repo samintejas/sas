@@ -359,7 +359,7 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
                     _ if audio.is_some() => {
                         ae = audio.and_then(|c| crate::audio_edit::draw(p, th, f.doc, c, f.sounds, sl.panel))
                     }
-                    Some(sat_modules::Editor::Drums | sat_modules::Editor::Euclid) => {
+                    Some(sat_modules::Editor::Drums | sat_modules::Editor::Euclid | sat_modules::Editor::Turing) => {
                         sg = steps::draw(p, th, f.doc, clip, f.steps, &f.transport, sl.panel)
                     }
                     _ => rl = piano_roll::draw(p, th, f.doc, clip, f.roll, &f.transport, sl.panel),

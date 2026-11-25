@@ -121,7 +121,7 @@ mod mixer {
         let l = MixerLayout::new(&d.doc, body(), 0.0);
         let kinds: Vec<StripKind> = l.strips.iter().map(|s| s.kind).collect();
         use StripKind::*;
-        assert_eq!(kinds, vec![Group, Child, Child, Child, Group, Child, Group, Child, Return, Return, Master]);
+        assert_eq!(kinds, vec![Group, Child, Child, Child, Group, Child, Child, Group, Child, Return, Return, Master]);
         let master = l.strips.last().unwrap();
         assert_eq!(master.track, d.doc.master);
         assert!((master.rect.x1 - (body().x1 - 12.0)).abs() < 1e-9, "master is pinned right");

@@ -16,6 +16,7 @@ pub mod fx;
 pub mod instrument;
 pub mod macros;
 pub mod spec;
+pub mod turing;
 
 pub use spec::{ParamSpec, Unit};
 
@@ -29,6 +30,8 @@ pub const PIANO_ROLL: &str = "piano_roll";
 pub const DRUM_SEQ: &str = "drum_seq";
 /// Module kind of the euclidean generator.
 pub const EUCLID: &str = "euclid";
+/// Module kind of the turing (shift register) generator.
+pub const TURING: &str = "turing";
 
 /// Module kind of the recorder: the track's audio input, feeding the clips
 /// recorded through it.
@@ -74,7 +77,7 @@ pub const NOTES_OUT: PortSpec = PortSpec { key: "notes", kind: PortKind::Notes, 
 /// The ports of a module kind.
 pub fn ports(kind: &str) -> &'static [PortSpec] {
     match kind {
-        PIANO_ROLL | DRUM_SEQ | EUCLID => &[NOTES_OUT],
+        PIANO_ROLL | DRUM_SEQ | EUCLID | TURING => &[NOTES_OUT],
         RECORDER => &[AUDIO_OUT],
         k if fx::is_fx(k) => fx::ports(k),
         _ => instrument::ports(kind),
@@ -85,6 +88,7 @@ pub fn ports(kind: &str) -> &'static [PortSpec] {
 pub fn params_of(kind: &str) -> &'static [ParamSpec] {
     match kind {
         EUCLID => &euclid::PARAMS,
+        TURING => &turing::PARAMS,
         RECORDER => &RECORDER_PARAMS,
         k if fx::is_fx(k) => fx::params(k),
         _ => instrument::params(kind),
@@ -106,8 +110,13 @@ pub fn catalogue(kind: GridKind) -> &'static [(&'static str, &'static str)] {
 }
 
 /// Source modules that can be added to a source grid: kind and label.
-pub const SOURCES: [(&str, &str); 4] =
-    [(PIANO_ROLL, "piano roll"), (DRUM_SEQ, "drum seq"), (EUCLID, "euclid"), (RECORDER, "recorder")];
+pub const SOURCES: [(&str, &str); 5] = [
+    (PIANO_ROLL, "piano roll"),
+    (DRUM_SEQ, "drum seq"),
+    (EUCLID, "euclid"),
+    (TURING, "turing"),
+    (RECORDER, "recorder"),
+];
 
 /// The recorder on a track's source grid, if it has one.
 pub fn recorder(doc: &Document, track: TrackId) -> Option<&Module> {
@@ -205,6 +214,8 @@ pub enum Editor {
     Drums,
     /// Generator knobs over one row of steps.
     Euclid,
+    /// The turing's knobs over its steps, each with its own pitch.
+    Turing,
 }
 
 /// The editor for a module kind; unknown kinds open the piano roll.
@@ -212,13 +223,14 @@ pub fn editor_of(kind: &str) -> Editor {
     match kind {
         DRUM_SEQ => Editor::Drums,
         EUCLID => Editor::Euclid,
+        TURING => Editor::Turing,
         _ => Editor::PianoRoll,
     }
 }
 
 /// Does this module kind generate its notes from parameters?
 pub fn is_generator(kind: &str) -> bool {
-    kind == EUCLID
+    kind == EUCLID || kind == TURING
 }
 
 /// Is this module a generator that is currently generating (not baked)?
@@ -245,23 +257,97 @@ fn sort(v: &mut [Note]) {
     v.sort_by(|a, b| a.start.cmp(&b.start).then(a.pitch.cmp(&b.pitch)));
 }
 
+/// The seed a generator uses for a clip: from the project seed and the
+/// clip (its id and own seed), and the module, plus the loop count when it
+/// reseeds each time round.
+pub fn seed_for(doc: &Document, module: ModuleId, clip: ClipId, cycle: u64) -> u64 {
+    let c = doc.clips.get(&clip).map_or(0, |c| c.seed);
+    let ids = (clip.0.as_u128() as u64) ^ ((module.0.as_u128() >> 64) as u64).rotate_left(17);
+    turing::mix(doc.seed ^ turing::mix(c ^ ids) ^ turing::mix(cycle.wrapping_add(0x5eed)))
+}
+
+/// Does `module` play a new phrase each time round a looping clip?
+pub fn reseeds(doc: &Document, module: ModuleId) -> bool {
+    doc.modules
+        .get(&module)
+        .is_some_and(|m| generating(m) && m.kind == TURING && turing::Params::of(&macros::resolved(doc, m)).reseed)
+}
+
 /// The notes a module produces for a clip before hand edits: its generator's
 /// output when it is generating, otherwise the stored pattern.
 pub fn base_notes(doc: &Document, module: ModuleId, clip: ClipId) -> Vec<Note> {
+    base_notes_at(doc, module, clip, 0)
+}
+
+/// [`base_notes`] for the `cycle`th time round a looping clip (only a
+/// generator that [`reseeds`] differs from cycle to cycle).
+pub fn base_notes_at(doc: &Document, module: ModuleId, clip: ClipId, cycle: u64) -> Vec<Note> {
     let (Some(m), Some(c)) = (doc.modules.get(&module), doc.clips.get(&clip)) else { return Vec::new() };
     if generating(m) {
         return match m.kind.as_str() {
             EUCLID => euclid::Params::of(&macros::resolved(doc, m)).generate(c.length),
+            TURING => {
+                let p = turing::Params::of(&macros::resolved(doc, m));
+                p.generate(c.length, seed_for(doc, module, clip, if p.reseed { cycle } else { 0 }))
+            }
             _ => Vec::new(),
         };
     }
     doc.pattern(module, clip).map(|p| p.notes.iter().copied().collect()).unwrap_or_default()
 }
 
+/// What a generator's step editor shows for a clip: one pitch per step
+/// (where a click adds a note), and the length and velocity of such a note.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GenSteps {
+    /// Step length.
+    pub rate: Ticks,
+    /// The pitch of each step across the clip.
+    pub pitches: Vec<u8>,
+    /// Length of a note added by hand.
+    pub note_len: Ticks,
+    /// Velocity of a note added by hand.
+    pub velocity: f32,
+}
+
+/// The steps of a generator module for a clip (its first time round).
+pub fn gen_steps(doc: &Document, module: ModuleId, clip: ClipId) -> Option<GenSteps> {
+    let (m, c) = (doc.modules.get(&module)?, doc.clips.get(&clip)?);
+    let resolved = macros::resolved(doc, m);
+    let count = |rate: Ticks| ((c.length.0 + rate.0 - 1) / rate.0.max(1)).max(1) as usize;
+    match m.kind.as_str() {
+        EUCLID => {
+            let p = euclid::Params::of(&resolved);
+            Some(GenSteps {
+                rate: p.rate,
+                pitches: vec![p.note; count(p.rate)],
+                note_len: p.note_len(),
+                velocity: p.vel,
+            })
+        }
+        TURING => {
+            let p = turing::Params::of(&resolved);
+            let seq = p.sequence(count(p.rate), seed_for(doc, module, clip, 0));
+            Some(GenSteps {
+                rate: p.rate,
+                pitches: seq.iter().map(|s| s.pitch).collect(),
+                note_len: p.note_len(),
+                velocity: p.vel,
+            })
+        }
+        _ => None,
+    }
+}
+
 /// The notes a clip plays from `module`: [`base_notes`] minus hand-removed
 /// notes plus hand-added ones, sorted by start then pitch, one note per slot.
 pub fn effective_notes(doc: &Document, module: ModuleId, clip: ClipId) -> Vec<Note> {
-    let mut v = base_notes(doc, module, clip);
+    effective_notes_at(doc, module, clip, 0)
+}
+
+/// [`effective_notes`] for the `cycle`th time round a looping clip.
+pub fn effective_notes_at(doc: &Document, module: ModuleId, clip: ClipId, cycle: u64) -> Vec<Note> {
+    let mut v = base_notes_at(doc, module, clip, cycle);
     if let Some(p) = doc.pattern(module, clip) {
         let o = &p.overrides;
         // a hand-added note replaces a generated one in the same slot

@@ -16,6 +16,9 @@ fn n(start16: i64, len16: i64, pitch: u8, vel: f32) -> Note {
 
 struct B {
     ops: Vec<Op>,
+    /// Counts the fixed ids handed out, so clips and sources keep their ids
+    /// (and generators their seeds) from one run to the next.
+    ids: u128,
 }
 
 /// What plays a demo track.
@@ -100,6 +103,12 @@ impl B {
         self.ops.push(Op::SetValue { target: ParamTarget::Macro { grid, index }, value });
     }
 
+    /// A fixed id, the same every run.
+    fn fixed_id(&mut self) -> u128 {
+        self.ids += 1;
+        0xde70_0000_0000_0000_0000_0000_0000_0000 | self.ids
+    }
+
     /// The grid a module was added to.
     fn grid_of(&self, module: ModuleId) -> GridId {
         self.ops
@@ -125,7 +134,7 @@ impl B {
         let (src, ins) = (grids.source.unwrap(), grids.instrument.unwrap());
         self.ops.push(op);
         self.ops.push(Op::SetTrackColor { id, color: Color(color) });
-        let seq = ModuleId::new();
+        let seq = ModuleId::from_u128(self.fixed_id());
         match ins_kind {
             Ins::Patch(tweaks) => self.ops.extend(sat_modules::instrument::default_patch_ops(ins, tweaks).0),
             Ins::Drums => {
@@ -180,7 +189,7 @@ impl B {
         start_bar: i64,
         play_bars: i64,
     ) -> ClipId {
-        let id = ClipId::new();
+        let id = ClipId::from_u128(self.fixed_id());
         self.ops.extend([
             Op::AddClip {
                 id,
@@ -209,7 +218,7 @@ impl B {
 
     /// An audio clip of `len_bars`, placed whole at `start_bar`.
     fn audio_clip(&mut self, track: TrackId, name: &str, color: u8, start_bar: i64, len_bars: i64, audio: AudioClip) {
-        let id = ClipId::new();
+        let id = ClipId::from_u128(self.fixed_id());
         self.ops.extend([
             Op::AddClip {
                 id,
@@ -371,6 +380,16 @@ const BASS: &[(&str, &str, f32)] = &[
 /// A short sine blip.
 const BLIP: &[(&str, &str, f32)] =
     &[(VCO, "wave", 0.0), (FILTER, "cutoff", 3000.0), (ADSR, "d", 0.09), (ADSR, "s", 0.0), (ADSR, "r", 0.06)];
+/// A short square pluck.
+const PLUCK: &[(&str, &str, f32)] = &[
+    (VCO, "wave", 2.0),
+    (FILTER, "cutoff", 1800.0),
+    (FILTER, "amount", 0.4),
+    (ADSR, "d", 0.18),
+    (ADSR, "s", 0.0),
+    (ADSR, "r", 0.12),
+    (VOICE_OUT, "level", -14.0),
+];
 /// Soft saw pads.
 const PADS: &[(&str, &str, f32)] = &[
     (FILTER, "cutoff", 1400.0),
@@ -384,7 +403,7 @@ const PADS: &[(&str, &str, f32)] = &[
 /// Builds the demo project.
 pub fn demo() -> Demo {
     let mut doc = Document::new(42);
-    let mut b = B { ops: Vec::new() };
+    let mut b = B { ops: Vec::new(), ids: 0 };
     let rhythm = b.group("rhythm", 0, 0);
     let (drums, dseq) = b.track_with("drums", 0, Some(rhythm), Ins::Drums, sat_modules::DRUM_SEQ, "drum seq");
     let kick = |bars: i64| -> Vec<Note> {
@@ -426,7 +445,7 @@ pub fn demo() -> Demo {
     // a second source on the bass grid, not wired to a clip yet
     let (_, op) = {
         let grid = b.grid_of(bseq);
-        let id = ModuleId::new();
+        let id = ModuleId::from_u128(b.fixed_id());
         let mut params = sat_modules::default_params(sat_modules::EUCLID);
         params.insert("hits".into(), 5.0);
         params.insert("note".into(), 45.0);
@@ -459,6 +478,15 @@ pub fn demo() -> Demo {
     };
     let k_a = b.clip(keys, kseq, "pads", 6, 4, pads(57), 0, 8);
     let k_b = b.clip(keys, kseq, "pads 2", 6, 4, pads(60), 8, 8);
+
+    // a seeded turing phrase over the second half, new each time round
+    let (arp, tseq) = b.track_with("turing", 5, Some(tops), Ins::Patch(PLUCK), sat_modules::TURING, "turing 1");
+    for (k, v) in
+        [("steps", 16.0), ("change", 0.0), ("low", 57.0), ("range", 19.0), ("dens", 0.6), ("vel", 0.5), ("reseed", 1.0)]
+    {
+        b.ops.push(Op::SetValue { target: ParamTarget::Module { module: tseq, param: k.into() }, value: v });
+    }
+    let t_a = b.clip(arp, tseq, "turing", 5, 1, Vec::new(), 8, 8);
 
     let vocals = b.group("vocals", 4, 2);
     let mut sounds = sat_disk::Pool::new();
@@ -509,7 +537,7 @@ pub fn demo() -> Demo {
     let scenes: [(&str, Vec<(TrackId, ClipId)>); 3] = [
         ("intro", vec![(drums, d_intro), (bass, b_a), (keys, k_a)]),
         ("verse", vec![(drums, d_groove), (bass, selected), (perc, eclip), (keys, k_a), (vox, v_a)]),
-        ("break", vec![(drums, d_fill), (bass, b_c), (keys, k_b), (vox, v_b)]),
+        ("break", vec![(drums, d_fill), (bass, b_c), (keys, k_b), (arp, t_a), (vox, v_b)]),
     ];
     for (i, (name, slots)) in scenes.into_iter().enumerate() {
         let id = SceneId::new();

@@ -46,7 +46,7 @@ use sat_doc::{
     PlacementId, PortRef, TrackFlag, TrackId, TrackKind,
 };
 use sat_engine::{Command, EngineHandle};
-use sat_modules::{Editor, PortKind, drum, euclid};
+use sat_modules::{Editor, PortKind, drum};
 use sat_ui::arrange::{ArrangeLayout, ArrangeState, Hit, RowKind, TransportView, header_controls};
 use sat_ui::arrange_edit::{self, Span};
 use sat_ui::automation;
@@ -1608,9 +1608,9 @@ impl App {
             StepHit::Cell { step, pitch } => {
                 let start = g.tick_of(step);
                 let ops = match g.editor {
-                    Editor::Euclid => {
-                        let p = euclid::Params::of(&sat_modules::macros::resolved(doc, m));
-                        let note = sat_modules::step_note(start, p.note_len(), pitch, p.vel);
+                    Editor::Euclid | Editor::Turing => {
+                        let Some(s) = sat_modules::gen_steps(doc, module, clip) else { return };
+                        let note = sat_modules::step_note(start, s.note_len, pitch, s.velocity);
                         sat_modules::toggle_step(doc, module, clip, note)
                     }
                     _ => {
