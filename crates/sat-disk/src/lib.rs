@@ -23,6 +23,8 @@ pub type Sounds = HashMap<AudioId, Arc<Sample>>;
 
 /// The bundle subfolder sounds are kept in.
 pub const AUDIO_DIR: &str = "audio";
+/// The bundle subfolder frozen track renders are kept in.
+pub const FREEZE_DIR: &str = "freeze";
 
 /// Why a sound could not be read or written.
 #[derive(Debug, thiserror::Error)]
@@ -102,7 +104,10 @@ fn file_name(name: &str, id: AudioId) -> String {
 
 /// Where a pool file lives in a bundle.
 pub fn path_in(bundle: &Path, f: &AudioFile) -> PathBuf {
-    bundle.join(AUDIO_DIR).join(&f.file)
+    match f.file.strip_prefix(FREEZE_DIR).and_then(|r| r.strip_prefix('/')) {
+        Some(name) => bundle.join(FREEZE_DIR).join(name),
+        None => bundle.join(AUDIO_DIR).join(&f.file),
+    }
 }
 
 /// The decoded sounds of an open project.
@@ -159,6 +164,14 @@ impl Pool {
     /// [`sat_doc::Op::AddAudio`].
     pub fn add(&mut self, name: &str, sample: Sample) -> AudioFile {
         self.add_with_id(AudioId::new(), name, sample)
+    }
+
+    /// Adds a frozen track render; it is saved in the bundle's `freeze/`
+    /// folder rather than `audio/`.
+    pub fn add_frozen(&mut self, name: &str, sample: Sample) -> AudioFile {
+        let mut f = self.add(name, sample);
+        f.file = format!("{FREEZE_DIR}/{}", f.file);
+        f
     }
 
     /// Like [`Pool::add`] with a fixed id, for reproducible projects.
@@ -233,7 +246,6 @@ pub fn peaks(s: &Sample, n: usize) -> Vec<(f32, f32)> {
 /// Returns how many files were written. Sounds the pool lacks are skipped
 /// (their files are expected to be there already).
 pub fn write_sounds(bundle: &Path, doc: &Document, sounds: &Sounds) -> Result<usize, DiskError> {
-    let dir = bundle.join(AUDIO_DIR);
     let mut n = 0;
     for f in doc.audio.values() {
         let path = path_in(bundle, f);
@@ -241,7 +253,9 @@ pub fn write_sounds(bundle: &Path, doc: &Document, sounds: &Sounds) -> Result<us
             continue;
         }
         if let Some(s) = sounds.get(&f.id) {
-            fs::create_dir_all(&dir)?;
+            if let Some(dir) = path.parent() {
+                fs::create_dir_all(dir)?;
+            }
             encode(&path, s)?;
             n += 1;
         }

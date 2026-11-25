@@ -47,6 +47,8 @@ pub enum CompileError {
     Tempo(sat_time::TimeError),
     /// The schedule graph is invalid (a compiler bug).
     Schedule(sat_engine::ScheduleError),
+    /// A track to render on its own makes no sound (no sources).
+    Silent,
 }
 
 impl core::fmt::Display for CompileError {
@@ -54,6 +56,7 @@ impl core::fmt::Display for CompileError {
         match self {
             CompileError::Tempo(e) => write!(f, "tempo: {e}"),
             CompileError::Schedule(e) => write!(f, "schedule: {e}"),
+            CompileError::Silent => write!(f, "the track has nothing to play"),
         }
     }
 }
@@ -154,6 +157,7 @@ const SALT_FX: u128 = 0x5a7_0004;
 const SALT_AUDIO: u128 = 0x5a7_0005;
 const SALT_SOURCES: u128 = 0x5a7_0006;
 const SALT_MONITOR: u128 = 0x5a7_0007;
+const SALT_FROZEN: u128 = 0x5a7_0008;
 
 fn nid(t: TrackId, salt: u128) -> NodeId {
     // salts sit in the middle bits, clear of ids that differ only in their low bits
@@ -616,8 +620,36 @@ pub fn render_range(
     to: Ticks,
     tail: bool,
 ) -> Result<(Vec<f32>, Vec<f32>), CompileError> {
-    const BLOCK: usize = 1024;
-    let c = compile_with(doc, sample_rate, BLOCK, sounds)?;
+    let c = compile_with(doc, sample_rate, RENDER_BLOCK, sounds)?;
+    Ok(render_compiled(c, sample_rate, from, to, tail))
+}
+
+/// Block size of offline renders (the result does not depend on it).
+const RENDER_BLOCK: usize = 1024;
+
+/// Renders one track's sound as its strip receives it (its sources through
+/// its fx, before fader, pan and mute) from the song start to its end plus
+/// the tail: what freezing the track records. A frozen track is rendered
+/// live, as if unfrozen.
+pub fn render_track(
+    doc: &Document,
+    sounds: &Sounds,
+    sample_rate: f64,
+    track: TrackId,
+) -> Result<(Vec<f32>, Vec<f32>), CompileError> {
+    if !doc.tracks.get(&track).is_some_and(|t| t.kind.has_clips()) {
+        return Err(CompileError::Silent);
+    }
+    let mut live = doc.clone();
+    if let Some(t) = live.tracks.get_mut(&track) {
+        t.frozen = None;
+    }
+    let c = compile_inner(&live, sample_rate, RENDER_BLOCK, sounds, Some(track))?;
+    Ok(render_compiled(c, sample_rate, Ticks::ZERO, song_end(&live), true))
+}
+
+fn render_compiled(c: Compiled, sample_rate: f64, from: Ticks, to: Ticks, tail: bool) -> (Vec<f32>, Vec<f32>) {
+    const BLOCK: usize = RENDER_BLOCK;
     let (start, end) = (c.sample(from), c.sample(to).max(c.sample(from)));
     let (mut e, mut h) = sat_engine::engine(c.schedule, 4);
     let _ = h.send(Command::Locate(start));
@@ -646,7 +678,7 @@ pub fn render_range(
         }
     }
     h.collect_garbage();
-    Ok((l, r))
+    (l, r)
 }
 
 /// Compiles `doc` for `sample_rate`, processing at most `max_block` frames
@@ -662,12 +694,25 @@ pub fn compile_with(
     max_block: usize,
     sounds: &Sounds,
 ) -> Result<Compiled, CompileError> {
+    compile_inner(doc, sample_rate, max_block, sounds, None)
+}
+
+/// [`compile_with`], with the output taken from `tap`'s pre-strip node
+/// instead of master when it is given.
+fn compile_inner(
+    doc: &Document,
+    sample_rate: f64,
+    max_block: usize,
+    sounds: &Sounds,
+    tap: Option<TrackId>,
+) -> Result<Compiled, CompileError> {
     let tempo = doc.tempo_map().map_err(CompileError::Tempo)?;
     let audible = solo_audible(doc);
     let mut b = ScheduleBuilder::new(sample_rate, max_block);
     let mut params: HashMap<ParamTarget, (NodeId, Param, Conv)> = HashMap::new();
     let mut meters: HashMap<TrackId, Arc<Meter>> = HashMap::new();
     let mut players: HashMap<TrackId, NodeId> = HashMap::new();
+    let mut tapped: Option<NodeId> = None;
     // inputs of every bus: track strips, group strips and sends
     #[allow(clippy::type_complexity)]
     let mut bus_inputs: HashMap<TrackId, Vec<(NodeId, f32, Option<TrackId>)>> = HashMap::new();
@@ -677,7 +722,17 @@ pub fn compile_with(
         let tr = &doc.tracks[&t];
         let strip_id = nid(t, SALT_STRIP);
         // the node feeding the strip (and pre-fader sends)
+        let frozen = tr.frozen.and_then(|f| sounds.get(&f.audio).cloned());
         let pre: Option<NodeId> = match tr.kind {
+            // a frozen track plays its render instead of sources and fx
+            TrackKind::Track if frozen.is_some() => {
+                let sound = frozen.clone().unwrap();
+                let len = (sound.frames() as f64 * sample_rate / sound.rate as f64).round() as i64;
+                let seg = AudioSeg { at: 0, len, sound, src: 0.0, fade_in: 0, fade_out: 0, gain: 1.0 };
+                let id = nid(t, SALT_FROZEN);
+                b.node(id, NodeKind::Audio(Box::new(AudioPlayer::new(vec![seg]))), vec![]);
+                Some(id)
+            }
             TrackKind::Track => {
                 let mut events = Vec::new();
                 for p in doc.placements.values().filter(|p| doc.clips.get(&p.clip).is_some_and(|c| c.track == t)) {
@@ -741,7 +796,8 @@ pub fn compile_with(
             TrackKind::Group | TrackKind::Return | TrackKind::Master => Some(nid(t, SALT_BUS)),
         };
         // the fx grid, between the track's sound and its strip
-        let pre = match (pre, tr.fx_grids.front().and_then(|g| build_fx(doc, *g))) {
+        let fx = if frozen.is_some() { None } else { tr.fx_grids.front().and_then(|g| build_fx(doc, *g)) };
+        let pre = match (pre, fx) {
             (Some(src), Some((chain, slots))) => {
                 let id = nid(t, SALT_FX);
                 for (target, param) in module_targets(doc, &slots) {
@@ -752,6 +808,9 @@ pub fn compile_with(
             }
             (pre, _) => pre,
         };
+        if tap == Some(t) {
+            tapped = pre;
+        }
         let solo_muted = audible.as_ref().is_some_and(|a| !a.contains(&t));
         let meter = meters.entry(t).or_default().clone();
         let strip = Strip::new(
@@ -815,7 +874,10 @@ pub fn compile_with(
             }
         }
     }
-    let output = nid(doc.master, SALT_STRIP);
+    let output = match tap {
+        Some(_) => tapped.ok_or(CompileError::Silent)?,
+        None => nid(doc.master, SALT_STRIP),
+    };
     let schedule = b.build(output).map_err(CompileError::Schedule)?;
     Ok(Compiled { schedule, output, tempo, params, macros, meters, players })
 }

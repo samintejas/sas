@@ -107,6 +107,18 @@ pub struct Track {
     pub armed: bool,
     /// Input monitoring.
     pub monitor: Monitor,
+    /// A frozen render that plays in place of the track's sources and fx.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frozen: Option<Frozen>,
+}
+
+/// A track's frozen render: its sources through its fx, before the strip,
+/// rendered from the song start. The patch is kept, so unfreezing brings
+/// the live sound back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Frozen {
+    /// The render, in the audio pool.
+    pub audio: AudioId,
 }
 
 /// The three kinds of grid.

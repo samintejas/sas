@@ -67,7 +67,14 @@ plays (`dens`). Its seed comes from the project seed and the clip, so it
 plays and exports the same every time; with `reseed` on, every time round a
 looping clip plays a fresh phrase from (clip seed, loop count). Its step
 editor shows each step's pitch, and hand edits, clear and bake work as on
-the euclid. The demo has a reseeding turing track over its second half. The arrange view, piano roll and mixer from
+the euclid. The demo has a reseeding turing track over its second half. Ctrl+F (or "freeze"
+in the palette) freezes the selected track: its sources are rendered
+through its fx into the bundle's `freeze/` folder and played in place of
+them, which spares the CPU and sounds the same (fader, pan, sends and
+automation stay live). The patch is kept, so Ctrl+F again unfreezes it.
+Monitored input passes through a small cushion between the input and
+output clocks, so it no longer crackles when their buffer sizes differ, and
+audio clips fade out over 5 ms when the transport stops in them. The arrange view, piano roll and mixer from
 the prototype are drawn with vello; the engine plays through the default
 audio device and feeds live per-track meters.
 
@@ -149,6 +156,7 @@ the app: the device's rate).
 | Ctrl+Z, Ctrl+Shift+Z | undo, redo |
 | Ctrl+O, Ctrl+S, Ctrl+Shift+S, Ctrl+N, Ctrl+Q | open, save, save as, new, quit (Cmd on macOS) |
 | Ctrl+E, Ctrl+Shift+E | export the song (with its tail) or the loop range to WAV |
+| Ctrl+F | freeze the selected track (render its sources and fx to audio), or unfreeze it |
 | drop a `.sat` folder on the window | open it |
 | drop a `.wav` on the window | load it into the shown instrument grid's (or the selected track's) sampler, adding a sampler if there is none |
 | click a clip, the ruler, a group's chevron | edit it in the piano roll, move the playhead, fold the group |

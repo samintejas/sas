@@ -103,6 +103,8 @@ pub enum Op {
     SetTrackFlag { id: TrackId, flag: TrackFlag, on: bool },
     /// Sets input monitoring.
     SetMonitor { id: TrackId, monitor: Monitor },
+    /// Freezes a track to a render in the audio pool, or unfreezes it.
+    SetFrozen { id: TrackId, frozen: Option<Frozen> },
     /// Adds a send to a return.
     AddSend { track: TrackId, target: TrackId, level_db: f32, pre_fader: bool },
     /// Removes a send.
@@ -413,6 +415,7 @@ pub fn apply(d: &mut Document, op: Op) -> Result<Change, OpError> {
                     fx_grids: Vector::unit(grids.fx),
                     armed: false,
                     monitor: if kind.has_clips() { Monitor::Auto } else { Monitor::Off },
+                    frozen: None,
                 },
             );
             insert_at(children_mut(d, parent), index, id);
@@ -476,6 +479,18 @@ pub fn apply(d: &mut Document, op: Op) -> Result<Change, OpError> {
                 return Err(OpError::NotAllowed("only tracks monitor input"));
             }
             d.tracks.get_mut(&id).unwrap().monitor = monitor;
+            Structure
+        }
+        Op::SetFrozen { id, frozen } => {
+            if !track(d, id)?.kind.has_clips() {
+                return Err(OpError::NotAllowed("only tracks freeze"));
+            }
+            if let Some(f) = frozen
+                && !d.audio.contains_key(&f.audio)
+            {
+                return Err(OpError::NotAllowed("the render is not in the audio pool"));
+            }
+            d.tracks.get_mut(&id).unwrap().frozen = frozen;
             Structure
         }
         Op::AddSend { track: from, target, level_db, pre_fader } => {
@@ -549,8 +564,10 @@ pub fn apply(d: &mut Document, op: Op) -> Result<Change, OpError> {
             if d.audio.contains_key(&file.id) {
                 return Err(exists("audio file", file.id));
             }
-            if file.file.is_empty() || file.file.contains(['/', '\\']) || file.file.starts_with('.') {
-                return Err(OpError::BadValue("audio file names are plain names inside audio/"));
+            // a plain name inside audio/, or inside freeze/ for a frozen render
+            let name = file.file.strip_prefix("freeze/").unwrap_or(&file.file);
+            if name.is_empty() || name.contains(['/', '\\']) || name.starts_with('.') {
+                return Err(OpError::BadValue("audio file names are plain names inside audio/ or freeze/"));
             }
             if file.rate == 0 || !(1..=2).contains(&file.channels) {
                 return Err(OpError::BadValue("audio needs a rate and 1 or 2 channels"));
