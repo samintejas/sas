@@ -39,7 +39,13 @@ where: each comp boundary is an equal-power crossfade (20 ms by default) and
 the clip has its own fades. In the arrange view an audio clip shows its
 comped waveform with its crossfades and fade handles, and its takes in lanes
 underneath; swiping a lane comps that take in. The demo's vocal is three
-generated takes, each flubbing a different note, comped into one. The arrange view, piano roll and mixer from
+generated takes, each flubbing a different note, comped into one. Recording
+captures the default input onto the armed tracks: each pass becomes a take,
+and with the loop on every time round the loop is another take of the same
+clip, comped in where it was sung. Selecting an audio clip shows its comp
+in the bottom panel with its gain, fades and crossfade time. Setting
+`SAT_INPUT_WAV=some.wav` records from that file (played in real time)
+instead of a device, for headless runs. The arrange view, piano roll and mixer from
 the prototype are drawn with vello; the engine plays through the default
 audio device and feeds live per-track meters.
 
@@ -100,6 +106,8 @@ cargo run --release -p sat-app -- my.sat  # opens a project bundle
 | Keys and mouse | Does |
 |---|---|
 | Space, Home, `l` | play / stop, back to the start, loop on / off |
+| top bar: stop, play, record, loop | stop (again: back to the start), play / pause, record onto the armed tracks (arming the selected track if none is; starts the transport; again: stop recording, keep playing), loop on / off |
+| audio clip panel: drag gain, fade in, fade out or xfade up / down, double-click | change it (shift for fine steps), reset it |
 | Tab, or the panel tabs | switch the bottom panel between the clip and the mixer |
 | drag a fader or knob | set level, pan or a send (Shift for fine steps, double-click to reset); one drag is one undo step |
 | `m` / `s` buttons, or the keys | mute / solo (the keys act on the selected track); the round button arms recording |

@@ -27,6 +27,7 @@
 //! `sat [project.sat]` opens a project bundle; without one it opens a demo.
 
 mod audio;
+mod input;
 mod project;
 
 use std::collections::HashMap;
@@ -51,7 +52,7 @@ use sat_ui::panel::{self, PanelView, Tab};
 use sat_ui::piano_roll::{self, RollGeom, RollHit, RollView, Tool, clip_notes, next_snap};
 use sat_ui::roll_edit::{self, Edited};
 use sat_ui::session::{SessionHit, SessionLayout, SessionView};
-use sat_ui::shell::{self, Frame, MainView, PANEL_H, ShellLayout, ViewButton};
+use sat_ui::shell::{self, Frame, MainView, PANEL_H, ShellLayout, TransportButton, ViewButton};
 use sat_ui::steps::{StepGeom, StepHit, StepView};
 use vello::kurbo::{Point, Rect, Vec2};
 use vello::util::{RenderContext, RenderSurface};
@@ -233,6 +234,17 @@ enum GridDrag {
     Pan { from: Point, start: Vec2 },
 }
 
+/// A recording in progress: the input captured since record was pressed.
+struct Recording {
+    tracks: Vec<TrackId>,
+    /// Timeline seconds where it started.
+    start: f64,
+    /// The loop, in seconds, if the transport loops.
+    looping: Option<(f64, f64)>,
+    l: Vec<f32>,
+    r: Vec<f32>,
+}
+
 /// A drag on an audio clip in the arrange view.
 #[derive(Debug, Clone)]
 enum AudioDrag {
@@ -241,6 +253,8 @@ enum AudioDrag {
     Comp { clip: ClipId, take: u16, origin: Ticks, from: Ticks, start: sat_doc::AudioClip },
     /// Moving a fade handle.
     Fade { clip: ClipId, origin: Ticks, out: bool },
+    /// Dragging a field of the audio clip editor.
+    Field { clip: ClipId, field: sat_ui::audio_edit::AudioField, from: f64, start: f64 },
 }
 
 /// The comp with `take` over the segment of `a` holding clip time `at`.
@@ -337,10 +351,14 @@ struct App {
     macro_layout: Option<sat_ui::macros::MacroLayout>,
     grid_drag: Option<GridDrag>,
     audio_drag: Option<AudioDrag>,
+    audio_layout: Option<sat_ui::audio_edit::AudioEditLayout>,
     /// Length of the last drawn or resized note.
     note_len: sat_doc::sat_time::Ticks,
     last_click: Option<(Instant, Point)>,
     last_frame: Instant,
+    /// The input, opened the first time something is recorded.
+    input: Option<input::Input>,
+    rec: Option<Recording>,
     quit: bool,
 }
 
@@ -513,6 +531,7 @@ impl App {
     }
 
     fn redraw(&mut self) {
+        self.poll_recording();
         let Some(g) = &mut self.gfx else { return };
         let size = g.window.inner_size();
         if size.width == 0 || size.height == 0 {
@@ -530,7 +549,7 @@ impl App {
             transport: TransportView {
                 playhead: self.playback.playhead(),
                 playing: self.playback.playing,
-                recording: false,
+                recording: self.rec.is_some(),
             },
             panel_h: PANEL_H,
             panel: self.panel,
@@ -560,6 +579,7 @@ impl App {
             self.roll.lo = Some(g.layout.lo);
         }
         self.roll_geom = drawn.roll;
+        self.audio_layout = drawn.audio;
         self.step_geom = drawn.steps;
         if matches!(self.view, MainView::Grid(_)) && drawn.grid.is_none() {
             // the track went away (undo): back to the arrangement
@@ -603,6 +623,81 @@ impl App {
         g.window.pre_present_notify();
         dev.queue.present(st);
         self.last_frame = Instant::now();
+    }
+
+    /// Play or pause; pausing ends a recording.
+    fn toggle_play(&mut self) {
+        if self.playback.playing {
+            self.stop_recording();
+        }
+        self.playback.toggle();
+    }
+
+    /// Starts recording onto the armed tracks (arming the selected track if
+    /// none is), starting the transport if it is stopped.
+    fn start_recording(&mut self) {
+        let doc = self.history.doc();
+        let mut tracks: Vec<TrackId> = doc
+            .tracks_in_order()
+            .into_iter()
+            .filter(|t| doc.tracks[t].armed && doc.tracks[t].kind == TrackKind::Track)
+            .collect();
+        if tracks.is_empty() {
+            match self.arrange.selected_track.filter(|t| doc.tracks.get(t).is_some_and(|x| x.kind == TrackKind::Track))
+            {
+                Some(t) => {
+                    self.toggle_flag(t, TrackFlag::Arm);
+                    tracks.push(t);
+                }
+                None => return eprintln!("record: arm a track first"),
+            }
+        }
+        if self.input.is_none() {
+            match input::Input::open() {
+                Ok(i) => {
+                    eprintln!("sat: recording from {} @ {} Hz", i.name, i.rate);
+                    self.input = Some(i);
+                }
+                Err(e) => return eprintln!("record: {e}"),
+            }
+        }
+        if let Some(i) = &mut self.input {
+            i.clear();
+        }
+        let doc = self.history.doc();
+        let tempo = &self.playback.compiled.tempo;
+        let start = tempo.tick_to_secs(self.playback.playhead().0 as f64);
+        let lr = doc.loop_range;
+        let looping = lr.enabled.then(|| (tempo.tick_to_secs(lr.start.0 as f64), tempo.tick_to_secs(lr.end.0 as f64)));
+        self.rec = Some(Recording { tracks, start, looping, l: Vec::new(), r: Vec::new() });
+        if !self.playback.playing {
+            self.playback.toggle();
+        }
+    }
+
+    /// Moves newly captured input into the recording.
+    fn poll_recording(&mut self) {
+        if let (Some(rec), Some(i)) = (&mut self.rec, &mut self.input) {
+            i.drain(&mut rec.l, &mut rec.r);
+        }
+    }
+
+    /// Ends a recording, turning it into takes.
+    fn stop_recording(&mut self) {
+        self.poll_recording();
+        let (Some(rec), Some(i)) = (self.rec.take(), &self.input) else { return };
+        let sample = sat_disk::Sample { rate: i.rate, l: rec.l, r: rec.r };
+        let ops = sat_ui::record::record(
+            self.history.doc(),
+            &mut self.playback.pool,
+            &rec.tracks,
+            &sample,
+            rec.start,
+            rec.looping,
+        );
+        if !ops.is_empty() {
+            self.edit("record", ops);
+        }
     }
 
     fn toggle_flag(&mut self, t: TrackId, flag: TrackFlag) {
@@ -952,6 +1047,27 @@ impl App {
         if let Some(sl) = self.shell
             && sl.topbar.contains(pt)
         {
+            match shell::transport_buttons(sl.topbar).into_iter().find(|(_, r)| r.contains(pt)).map(|(b, _)| b) {
+                Some(TransportButton::Stop) => {
+                    self.stop_recording();
+                    if self.playback.playing {
+                        self.playback.stop();
+                    } else {
+                        self.playback.locate(Ticks::ZERO);
+                    }
+                    return;
+                }
+                Some(TransportButton::Play) => return self.toggle_play(),
+                Some(TransportButton::Record) => {
+                    return if self.rec.is_some() { self.stop_recording() } else { self.start_recording() };
+                }
+                Some(TransportButton::Loop) => {
+                    let mut range = self.history.doc().loop_range;
+                    range.enabled = !range.enabled;
+                    return self.edit("loop", vec![Op::SetLoop { range }]);
+                }
+                None => {}
+            }
             match shell::view_buttons(sl.topbar).into_iter().find(|(_, r)| r.contains(pt)).map(|(b, _)| b) {
                 Some(ViewButton::Arrange) => self.view = MainView::Arrange,
                 Some(ViewButton::Session) => self.view = MainView::Session,
@@ -1037,6 +1153,21 @@ impl App {
             if piano_roll::open_grid_button(sl.panel).contains(pt) {
                 let track = self.arrange.selected_clip.and_then(|c| self.history.doc().clips.get(&c)).map(|c| c.track);
                 return self.open_grid(track, GridKind::Source);
+            }
+            if let (Some(l), Some(clip)) = (&self.audio_layout, self.arrange.selected_clip) {
+                use sat_ui::audio_edit as ae;
+                let Some(field) = l.hit(pt) else { return };
+                let doc = self.history.doc();
+                if double {
+                    if let Some(a) = ae::with_value(doc, clip, field, field.default_value()) {
+                        self.edit("reset", vec![Op::SetClipAudio { clip, audio: Some(a) }]);
+                    }
+                    return;
+                }
+                let start = ae::value(doc, clip, field).unwrap_or(0.0);
+                self.history.begin_gesture("audio clip");
+                self.audio_drag = Some(AudioDrag::Field { clip, field, from: pt.y, start });
+                return;
             }
             if self.step_geom.is_some() {
                 return self.press_steps(pt, double);
@@ -1274,7 +1405,8 @@ impl App {
     }
 
     fn audio_drag_to(&mut self) {
-        let (Some(d), Some(l)) = (self.audio_drag.clone(), self.layout.as_ref()) else { return };
+        let Some(d) = self.audio_drag.clone() else { return };
+        let Some(l) = self.layout.as_ref() else { return };
         let doc = self.history.doc();
         match d {
             AudioDrag::Comp { clip, take, origin, from, start } => {
@@ -1289,6 +1421,15 @@ impl App {
                 };
                 if c.audio.as_ref() != Some(&after) {
                     self.edit("comp", vec![Op::SetClipAudio { clip, audio: Some(after) }]);
+                }
+            }
+            AudioDrag::Field { clip, field, from, start } => {
+                let fine = if self.mods.shift_key() { 0.1 } else { 1.0 };
+                let v = start + (from - self.cursor.y) * field.per_px() * fine;
+                if let Some(a) = sat_ui::audio_edit::with_value(doc, clip, field, v)
+                    && doc.clips.get(&clip).and_then(|c| c.audio.as_ref()) != Some(&a)
+                {
+                    self.edit("audio clip", vec![Op::SetClipAudio { clip, audio: Some(a) }]);
                 }
             }
             AudioDrag::Fade { clip, origin, out } => {
@@ -1440,7 +1581,7 @@ impl App {
         let ctrl = self.mods.control_key() || self.mods.super_key();
         let shift = self.mods.shift_key();
         match key {
-            Key::Named(NamedKey::Space) => self.playback.toggle(),
+            Key::Named(NamedKey::Space) => self.toggle_play(),
             Key::Named(NamedKey::Home) => self.playback.locate(Ticks::ZERO),
             Key::Named(NamedKey::Tab) => {
                 self.panel = if self.panel == PanelView::Mixer { PanelView::Clip } else { PanelView::Mixer };
@@ -1698,9 +1839,12 @@ fn main() {
         macro_layout: None,
         grid_drag: None,
         audio_drag: None,
+        audio_layout: None,
         note_len: Ticks::sixteenths(1),
         last_click: None,
         last_frame: Instant::now(),
+        input: None,
+        rec: None,
         quit: false,
     };
     let el = EventLoop::new().expect("event loop");
