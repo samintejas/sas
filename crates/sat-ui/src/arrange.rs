@@ -1166,7 +1166,13 @@ fn draw_clip(p: &mut Painter<'_>, th: &Theme, doc: &Document, st: &ArrangeState,
         let mut notes = feed.map(|m| sat_modules::effective_notes(doc, m, clip.id)).unwrap_or_default();
         let reseeds = feed.is_some_and(|m| sat_modules::reseeds(doc, m));
         if !notes.is_empty() {
-            let (lo, hi) = notes.iter().fold((127u8, 0u8), |(a, b), n| (a.min(n.pitch), b.max(n.pitch)));
+            let (mut lo, mut hi) = notes.iter().fold((127u8, 0u8), |(a, b), n| (a.min(n.pitch), b.max(n.pitch)));
+            // later passes of a reseeding generator reach anywhere in its range
+            if reseeds && let Some(m) = feed.and_then(|m| doc.modules.get(&m)) {
+                let ps = sat_modules::turing::Params::of(&sat_modules::macros::resolved(doc, m)).pitches();
+                lo = lo.min(ps.first().copied().unwrap_or(lo));
+                hi = hi.max(ps.last().copied().unwrap_or(hi));
+            }
             let span = (hi - lo).max(6) as f64;
             let nh = (body.height() / (span + 1.0)).clamp(1.5, 3.0);
             let mut k = 0;
@@ -1183,7 +1189,7 @@ fn draw_clip(p: &mut Painter<'_>, th: &Theme, doc: &Document, st: &ArrangeState,
                     let t0 = pl.start + Ticks(ct - pl.offset.0);
                     let x0 = l.x_of(t0);
                     let x1 = l.x_of(t0 + n.len).max(x0 + 2.0);
-                    let y = body.y1 - nh - (n.pitch - lo) as f64 / span * (body.height() - nh);
+                    let y = body.y1 - nh - (n.pitch.clamp(lo, hi) - lo) as f64 / span * (body.height() - nh);
                     p.rect(Rect::new(x0, y, x1 - 0.5, y + nh), col.alpha(0.9));
                 }
                 k += 1;
