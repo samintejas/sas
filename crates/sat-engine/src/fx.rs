@@ -3,7 +3,9 @@
 //! mixer strip. Everything is allocated in [`Fx::new`].
 
 use sat_dsp::db_gain;
-use sat_dsp::fx::{Comp, Delay, Drive, Eq, Filter, Limiter, Reverb};
+use sat_dsp::fx::{
+    Chorus, Comp, Crush, Delay, Drive, Eq, Filter, Flanger, Gate, Limiter, Phaser, Reverb, RingMod, Tremolo, Utility,
+};
 
 use crate::instrument::NONE;
 use crate::schedule::Buf;
@@ -40,6 +42,22 @@ pub enum FxKind {
     Split,
     /// Two inputs to one output.
     Merge,
+    /// Chorus.
+    Chorus,
+    /// Flanger.
+    Flanger,
+    /// Phaser.
+    Phaser,
+    /// Tremolo and auto-pan.
+    Tremolo,
+    /// Bit crusher.
+    Crush,
+    /// Noise gate (second input: key).
+    Gate,
+    /// Gain, pan, width, polarity.
+    Utility,
+    /// Ring modulator (second input: carrier).
+    RingMod,
 }
 
 /// One module of an fx grid: registers it reads and writes, and parameters.
@@ -74,6 +92,14 @@ enum State {
     Drive(Box<Drive>),
     Limiter(Box<Limiter>),
     Filter(Box<Filter>),
+    Chorus(Box<Chorus>),
+    Flanger(Box<Flanger>),
+    Phaser(Box<Phaser>),
+    Tremolo(Tremolo),
+    Crush(Crush),
+    Gate(Gate),
+    Utility(Utility),
+    RingMod(RingMod),
 }
 
 impl State {
@@ -86,6 +112,14 @@ impl State {
             FxKind::Drive => State::Drive(Box::default()),
             FxKind::Limiter => State::Limiter(Box::new(Limiter::new(sr))),
             FxKind::Filter => State::Filter(Box::default()),
+            FxKind::Chorus => State::Chorus(Box::new(Chorus::new(sr))),
+            FxKind::Flanger => State::Flanger(Box::new(Flanger::new(sr))),
+            FxKind::Phaser => State::Phaser(Box::default()),
+            FxKind::Tremolo => State::Tremolo(Tremolo::default()),
+            FxKind::Crush => State::Crush(Crush::default()),
+            FxKind::Gate => State::Gate(Gate::default()),
+            FxKind::Utility => State::Utility(Utility),
+            FxKind::RingMod => State::RingMod(RingMod::default()),
             _ => State::None,
         }
     }
@@ -167,6 +201,7 @@ impl Fx {
         match self.states.get(slot)? {
             State::Comp(c) => Some(c.meter),
             State::Limiter(l) => Some(l.meter),
+            State::Gate(g) => Some(g.meter),
             _ => None,
         }
     }
@@ -261,6 +296,20 @@ impl Fx {
                             State::Drive(d) => d.process(l, rr, p, sr),
                             State::Limiter(x) => x.process(l, rr, p, sr),
                             State::Filter(f) => f.process(l, rr, p, sr),
+                            State::Chorus(c) => c.process(l, rr, p, sr),
+                            State::Flanger(f) => f.process(l, rr, p, sr),
+                            State::Phaser(x) => x.process(l, rr, p, sr),
+                            State::Tremolo(t) => t.process(l, rr, p, sr),
+                            State::Crush(c) => c.process(l, rr, p, sr),
+                            State::Gate(g) => {
+                                let side = side.map(|s| (&s.l[r.clone()], &s.r[r.clone()]));
+                                g.process(l, rr, side, p, sr)
+                            }
+                            State::Utility(u) => u.process(l, rr, p),
+                            State::RingMod(m) => {
+                                let side = side.map(|s| (&s.l[r.clone()], &s.r[r.clone()]));
+                                m.process(l, rr, side, p, sr)
+                            }
                             State::None => {}
                         }
                     }
@@ -385,6 +434,37 @@ mod tests {
         let gentle = run(&mut Fx::new(vec![fin, s, plain, fout2], 48_000.0, 64), &x, &x);
         let peak = |b: &Buf| b.l[2400..].iter().fold(0f32, |a, v| a.max(v.abs()));
         assert!(peak(&squashed) < peak(&gentle) * 0.7, "{} vs {}", peak(&squashed), peak(&gentle));
+    }
+
+    #[test]
+    fn new_effects_run_in_a_chain_and_take_a_second_input() {
+        let mut u = FxModule::new(FxKind::Utility, 9);
+        u.params[..4].copy_from_slice(&[6.0206, 0.0, 1.0, 0.0]);
+        let out = run(&mut Fx::new(chain(Some(u)), 48_000.0, 64), &[0.25; 64], &[0.25; 64]);
+        assert!(out.l.iter().all(|x| (x - 0.5).abs() < 1e-4), "+6 db doubles");
+        // a gate keyed by a split-off copy at -inf stays shut
+        let mut fin = FxModule::new(FxKind::In, 1);
+        fin.outs[0] = 0;
+        fin.params[1] = 1.0;
+        let mut s = FxModule::new(FxKind::Split, 2);
+        s.ins[0] = 0;
+        s.outs = [1, 2];
+        s.params[0] = 0.5;
+        let mut quiet = FxModule::new(FxKind::Utility, 3);
+        quiet.ins[0] = 2;
+        quiet.outs[0] = 3;
+        quiet.params[0] = -120.0;
+        let mut g = FxModule::new(FxKind::Gate, 4);
+        g.ins = [1, 3];
+        g.outs[0] = 4;
+        g.params[..5].copy_from_slice(&[-40.0, 0.001, 0.01, 0.05, -80.0]);
+        let mut fout = FxModule::new(FxKind::Out, 5);
+        fout.ins[0] = 4;
+        let x: Vec<f32> = (0..4800).map(|i| (i as f32 * 0.05).sin() * 0.5).collect();
+        let mut fx = Fx::new(vec![fin, s, quiet, g, fout], 48_000.0, 64);
+        let out = run(&mut fx, &x, &x);
+        assert!(out.l[480..].iter().all(|v| v.abs() < 1e-3));
+        assert!(fx.reduction(3).unwrap() > 60.0);
     }
 
     #[test]

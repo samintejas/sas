@@ -406,6 +406,14 @@ fn fx_kind(kind: &str) -> Option<FxKind> {
         f::FX_FILTER => FxKind::Filter,
         f::SPLIT => FxKind::Split,
         f::MERGE => FxKind::Merge,
+        f::CHORUS => FxKind::Chorus,
+        f::FLANGER => FxKind::Flanger,
+        f::PHASER => FxKind::Phaser,
+        f::TREMOLO => FxKind::Tremolo,
+        f::CRUSH => FxKind::Crush,
+        f::GATE => FxKind::Gate,
+        f::UTILITY => FxKind::Utility,
+        f::RING_MOD => FxKind::RingMod,
         _ => return None,
     })
 }
