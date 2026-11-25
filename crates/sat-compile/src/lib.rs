@@ -15,6 +15,8 @@
 //! grid (see [`build_fx`]) runs between its sound and its strip; pre-fader
 //! sends tap after it. Every clip of a track is also compiled as a session
 //! clip its instrument can launch (see [`Compiled::launch`]).
+//! A track's audio clips (see [`audio_segments`]) play beside its
+//! instrument, into the same fx grid and strip.
 
 #![warn(missing_docs)]
 
@@ -24,9 +26,9 @@ use std::sync::Arc;
 use sat_doc::sat_time::{TempoMap, Ticks};
 use sat_doc::*;
 use sat_engine::{
-    AutoCurve, AutoPoint, Automation, Command, FX_PARAMS, Fx, FxKind, FxModule, Instrument, MAX_FX, MAX_FX_REGS,
-    MAX_MODS, MAX_PARAMS, MAX_REGS, Meter, NONE, NodeId, NodeKind, NoteEvent, Param, Patch, Sample, Schedule,
-    ScheduleBuilder, SessionClip, Strip, Synth, SynthParam, VKind, VModule, Wave, db_to_gain,
+    AudioPlayer, AudioSeg, AutoCurve, AutoPoint, Automation, Command, FX_PARAMS, Fx, FxKind, FxModule, Instrument,
+    MAX_FX, MAX_FX_REGS, MAX_MODS, MAX_PARAMS, MAX_REGS, Meter, NONE, NodeId, NodeKind, NoteEvent, Param, Patch,
+    Sample, Schedule, ScheduleBuilder, SessionClip, Strip, Synth, SynthParam, VKind, VModule, Wave, db_to_gain,
 };
 use sat_modules::instrument as ins;
 
@@ -148,6 +150,8 @@ const SALT_SYNTH: u128 = 0x5a7_0001;
 const SALT_STRIP: u128 = 0x5a7_0002;
 const SALT_BUS: u128 = 0x5a7_0003;
 const SALT_FX: u128 = 0x5a7_0004;
+const SALT_AUDIO: u128 = 0x5a7_0005;
+const SALT_SOURCES: u128 = 0x5a7_0006;
 
 fn nid(t: TrackId, salt: u128) -> NodeId {
     // salts sit in the middle bits, clear of ids that differ only in their low bits
@@ -504,6 +508,72 @@ fn session_clips(doc: &Document, track: TrackId, tempo: &TempoMap, sample_rate: 
         .collect()
 }
 
+/// Declick at a placement edge that cuts into a sound, in seconds.
+const DECLICK_S: f64 = 0.002;
+
+/// The audio segments of every audio clip placed on `track`: each comp
+/// segment of each placement, with its fades, crossfading into the next
+/// over the clip's crossfade time (centred on the boundary). Sounds missing
+/// from `sounds` are left out.
+pub fn audio_segments(doc: &Document, track: TrackId, tempo: &TempoMap, sr: f64, sounds: &Sounds) -> Vec<AudioSeg> {
+    let s = |t: i64| tempo.tick_to_sample(Ticks(t), sr).round() as i64;
+    let declick = (DECLICK_S * sr).round() as i64;
+    let mut out = Vec::new();
+    for p in doc.placements.values() {
+        let Some(c) = doc.clips.get(&p.clip).filter(|c| c.track == track) else { continue };
+        let Some(a) = &c.audio else { continue };
+        // the clip time heard: the placement window inside the clip
+        let (w0, w1) = (p.offset.0.max(0), (p.offset.0 + p.length.0).min(c.length.0));
+        if w1 <= w0 {
+            continue;
+        }
+        let tl = |ct: i64| s(p.start.0 + ct - p.offset.0);
+        let clip0 = tl(0);
+        let (win0, win1) = (tl(w0), tl(w1));
+        let xf = ((a.xfade_ms.clamp(0.0, 500.0) as f64 / 1000.0) * sr).round() as i64;
+        let gain = db_to_gain(a.gain_db);
+        let clip_in = tl(a.fade_in.0) - clip0;
+        let clip_out = tl(c.length.0) - tl(c.length.0 - a.fade_out.0);
+        let segs: Vec<_> = a.comp.iter().collect();
+        for (k, cs) in segs.iter().enumerate() {
+            let (st, en) = (cs.start.0, segs.get(k + 1).map_or(c.length.0, |n| n.start.0.min(c.length.0)));
+            if en <= st {
+                continue;
+            }
+            let Some(take) = a.takes.get(cs.take as usize) else { continue };
+            let Some(sound) = sounds.get(&take.audio) else { continue };
+            let interior_start = k > 0;
+            let interior_end = k + 1 < segs.len() && en < c.length.0;
+            let (mut at, mut fade_in) = if interior_start { (tl(st) - xf / 2, xf) } else { (tl(st), clip_in) };
+            let (mut end, mut fade_out) = if interior_end { (tl(en) + xf - xf / 2, xf) } else { (tl(en), clip_out) };
+            // a placement edge cutting into the segment gets a short declick
+            if at < win0 {
+                fade_in = declick.max(fade_in - (win0 - at));
+                at = win0;
+            }
+            if end > win1 {
+                fade_out = declick.max(fade_out - (end - win1));
+                end = win1;
+            }
+            let len = end - at;
+            if len <= 0 {
+                continue;
+            }
+            out.push(AudioSeg {
+                at,
+                len,
+                sound: sound.clone(),
+                src: take.offset as f64 + (at - clip0) as f64 * sound.rate as f64 / sr,
+                fade_in: fade_in.clamp(0, len),
+                fade_out: fade_out.clamp(0, len),
+                gain,
+            });
+        }
+    }
+    out.sort_by_key(|s| s.at);
+    out
+}
+
 /// Compiles `doc` for `sample_rate`, processing at most `max_block` frames
 /// per run, with no sounds loaded (samplers are silent).
 pub fn compile(doc: &Document, sample_rate: f64, max_block: usize) -> Result<Compiled, CompileError> {
@@ -542,7 +612,7 @@ pub fn compile_with(
                         events.push(NoteEvent { at, len, pitch: n.pitch, velocity: n.velocity });
                     }
                 }
-                build_instrument(doc, tr, events, sounds).map(|(kind, targets)| {
+                let inst = build_instrument(doc, tr, events, sounds).map(|(kind, targets)| {
                     let id = nid(t, SALT_SYNTH);
                     for (target, param) in targets {
                         params.insert(target, (id, param, Conv::Same));
@@ -556,7 +626,22 @@ pub fn compile_with(
                     players.insert(t, id);
                     b.node(id, kind, vec![]);
                     id
-                })
+                });
+                let segs = audio_segments(doc, t, &tempo, sample_rate, sounds);
+                let audio = (!segs.is_empty()).then(|| {
+                    let id = nid(t, SALT_AUDIO);
+                    b.node(id, NodeKind::Audio(Box::new(AudioPlayer::new(segs))), vec![]);
+                    id
+                });
+                match (inst, audio) {
+                    (Some(i), Some(a)) => {
+                        // notes and audio clips on one track: sum them before the fx
+                        let id = nid(t, SALT_SOURCES);
+                        b.node(id, NodeKind::Sum, vec![(i, 1.0), (a, 1.0)]);
+                        Some(id)
+                    }
+                    (i, a) => i.or(a),
+                }
             }
             TrackKind::Group | TrackKind::Return | TrackKind::Master => Some(nid(t, SALT_BUS)),
         };

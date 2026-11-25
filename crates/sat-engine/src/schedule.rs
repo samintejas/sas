@@ -197,6 +197,8 @@ pub enum NodeKind {
     Instrument(Box<crate::Instrument>),
     /// A track's fx grid, processing its input in place.
     Fx(Box<crate::Fx>),
+    /// A track's audio clips.
+    Audio(Box<crate::AudioPlayer>),
 }
 
 /// A node in the schedule.
@@ -478,6 +480,7 @@ impl Schedule {
                 NodeKind::Synth(s) => s.process(out, off, len, pos, self.sample_rate),
                 NodeKind::Instrument(s) => s.process(out, off, len, pos, self.sample_rate),
                 NodeKind::Fx(s) => s.process(out, off, len),
+                NodeKind::Audio(s) => s.process(out, off, len, pos, self.sample_rate),
             }
         }
     }

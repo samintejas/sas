@@ -109,6 +109,33 @@ pub fn path_in(bundle: &Path, f: &AudioFile) -> PathBuf {
 #[derive(Debug, Clone, Default)]
 pub struct Pool {
     sounds: Sounds,
+    overviews: HashMap<AudioId, Vec<(f32, f32)>>,
+}
+
+/// Frames per entry of a sound's overview.
+pub const OVERVIEW_FRAMES: usize = 256;
+
+/// Min and max of a sound (both channels) over every [`OVERVIEW_FRAMES`]
+/// frames, the coarse waveform views draw from.
+pub fn overview(s: &Sample) -> Vec<(f32, f32)> {
+    let n = s.frames();
+    (0..n.div_ceil(OVERVIEW_FRAMES))
+        .map(|k| {
+            let (a, b) = (k * OVERVIEW_FRAMES, ((k + 1) * OVERVIEW_FRAMES).min(n));
+            (a..b).fold((0.0f32, 0.0f32), |(lo, hi), i| (lo.min(s.l[i]).min(s.r[i]), hi.max(s.l[i]).max(s.r[i])))
+        })
+        .collect()
+}
+
+/// Min and max of an overview over frames `a..b` of its sound (at least
+/// the entry holding `a`; nothing outside the sound).
+pub fn overview_range(ov: &[(f32, f32)], a: f64, b: f64) -> (f32, f32) {
+    if b < 0.0 || ov.is_empty() {
+        return (0.0, 0.0);
+    }
+    let i = (a.max(0.0) as usize) / OVERVIEW_FRAMES;
+    let j = (b.max(0.0) as usize).div_ceil(OVERVIEW_FRAMES).max(i + 1).min(ov.len());
+    ov.get(i..j).unwrap_or(&[]).iter().fold((0.0f32, 0.0f32), |(lo, hi), (l, h)| (lo.min(*l), hi.max(*h)))
 }
 
 impl Pool {
@@ -144,8 +171,18 @@ impl Pool {
             channels: if is_mono(&sample) { 1 } else { 2 },
             frames: sample.frames() as u64,
         };
-        self.sounds.insert(id, Arc::new(sample));
+        self.insert(id, sample);
         f
+    }
+
+    fn insert(&mut self, id: AudioId, sample: Sample) {
+        self.overviews.insert(id, overview(&sample));
+        self.sounds.insert(id, Arc::new(sample));
+    }
+
+    /// A sound's overview (see [`overview`]).
+    pub fn overview(&self, id: AudioId) -> Option<&[(f32, f32)]> {
+        self.overviews.get(&id).map(|v| v.as_slice())
     }
 
     /// Decodes a WAV file into the pool, named after the file.
@@ -165,9 +202,7 @@ impl Pool {
                 continue;
             }
             match decode(&path_in(bundle, f)) {
-                Ok(s) => {
-                    self.sounds.insert(f.id, Arc::new(s));
-                }
+                Ok(s) => self.insert(f.id, s),
                 Err(e) => failed.push((f.name.clone(), e)),
             }
         }
@@ -274,6 +309,11 @@ mod tests {
         let mut fresh = Pool::new();
         assert!(fresh.load(&bundle, &doc).is_empty());
         assert_eq!(fresh.get(f.id), pool.get(f.id));
+        let ov = fresh.overview(f.id).unwrap();
+        assert_eq!(ov.len(), 2, "500 frames in entries of 256");
+        let (lo, hi) = overview_range(ov, 0.0, 500.0);
+        assert!(lo < -0.4 && hi > 0.4);
+        assert_eq!(overview_range(ov, 600.0, 900.0), (0.0, 0.0), "past the end");
         let p = fresh.peaks(f.id, 10).unwrap();
         assert_eq!(p.len(), 10);
         assert!(p.iter().any(|(_, hi)| *hi > 0.4) && p.iter().any(|(lo, _)| *lo < -0.4));

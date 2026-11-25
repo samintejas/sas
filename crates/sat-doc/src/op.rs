@@ -146,6 +146,8 @@ pub enum Op {
     /// Copies a clip: its patterns and snapshot are duplicated, and a second
     /// cable is wired from the path feeding `src` to the new clip's inlet.
     DuplicateClip { src: ClipId, id: ClipId, cable: Option<CableId> },
+    /// Makes a clip an audio clip (takes and comp), or a notes clip with `None`.
+    SetClipAudio { clip: ClipId, audio: Option<AudioClip> },
     /// Sets (or clears, with `None`) a clip's snapshot value for a target.
     SetSnapshot { clip: ClipId, target: ParamTarget, value: Option<f32> },
     /// Replaces the notes a source module plays for a clip.
@@ -557,6 +559,9 @@ pub fn apply(d: &mut Document, op: Op) -> Result<Change, OpError> {
             Structure
         }
         Op::RemoveAudio { id } => {
+            if d.clips.values().any(|c| c.audio.as_ref().is_some_and(|a| a.takes.iter().any(|t| t.audio == id))) {
+                return Err(OpError::NotAllowed("a take still plays this sound"));
+            }
             if d.audio.remove(&id).is_none() {
                 return Err(nf("audio file", id));
             }
@@ -672,7 +677,10 @@ pub fn apply(d: &mut Document, op: Op) -> Result<Change, OpError> {
             if length.0 <= 0 {
                 return Err(OpError::BadValue("clip length"));
             }
-            d.clips.insert(id, Clip { id, track: t, name, color, length, looped, snapshot: OrdMap::new(), seed });
+            d.clips.insert(
+                id,
+                Clip { id, track: t, name, color, length, looped, snapshot: OrdMap::new(), seed, audio: None },
+            );
             Structure
         }
         Op::RemoveClip { id } => {
@@ -729,6 +737,28 @@ pub fn apply(d: &mut Document, op: Op) -> Result<Change, OpError> {
                 d.patterns.insert((m, id), p);
             }
             d.clips.insert(id, c);
+            Structure
+        }
+        Op::SetClipAudio { clip, audio } => {
+            if let Some(a) = &audio {
+                if a.takes.is_empty() {
+                    return Err(OpError::BadValue("an audio clip needs a take"));
+                }
+                if let Some(t) = a.takes.iter().find(|t| !d.audio.contains_key(&t.audio)) {
+                    return Err(nf("audio file", t.audio));
+                }
+                let starts_ok = a.comp.front().is_some_and(|s| s.start == Ticks::ZERO)
+                    && a.comp.iter().zip(a.comp.iter().skip(1)).all(|(x, y)| x.start < y.start);
+                if !starts_ok || a.comp.iter().any(|s| s.take as usize >= a.takes.len()) {
+                    return Err(OpError::BadValue("comp segments start at 0, rise, and name takes"));
+                }
+                finite(a.gain_db, "gain")?;
+                finite(a.xfade_ms, "crossfade")?;
+                if a.fade_in.0 < 0 || a.fade_out.0 < 0 || !(0.0..=500.0).contains(&a.xfade_ms) {
+                    return Err(OpError::BadValue("fades are positive, crossfades 0–500 ms"));
+                }
+            }
+            d.clips.get_mut(&clip).ok_or_else(|| nf("clip", clip))?.audio = audio;
             Structure
         }
         Op::SetSnapshot { clip, target, value } => {

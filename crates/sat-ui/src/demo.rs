@@ -193,15 +193,42 @@ impl B {
             },
             Op::Connect { id: CableId::new(), from: PortRef::new(seq, "notes"), to: Endpoint::Inlet(id) },
             Op::WritePattern { module: seq, clip: id, notes: Vector::from(notes) },
-            Op::AddPlacement {
+        ]);
+        // no bars to play: a clip for the session only
+        if play_bars > 0 {
+            self.ops.push(Op::AddPlacement {
                 id: PlacementId::new(),
                 clip: id,
                 start: bars(start_bar),
                 offset: Ticks::ZERO,
                 length: bars(play_bars),
+            });
+        }
+        id
+    }
+
+    /// An audio clip of `len_bars`, placed whole at `start_bar`.
+    fn audio_clip(&mut self, track: TrackId, name: &str, color: u8, start_bar: i64, len_bars: i64, audio: AudioClip) {
+        let id = ClipId::new();
+        self.ops.extend([
+            Op::AddClip {
+                id,
+                track,
+                name: name.into(),
+                color: Color(color),
+                length: bars(len_bars),
+                looped: false,
+                seed: 1,
+            },
+            Op::SetClipAudio { clip: id, audio: Some(audio) },
+            Op::AddPlacement {
+                id: PlacementId::new(),
+                clip: id,
+                start: bars(start_bar),
+                offset: Ticks::ZERO,
+                length: bars(len_bars),
             },
         ]);
-        id
     }
 }
 
@@ -243,6 +270,76 @@ pub fn vowel() -> sat_disk::Sample {
     }
     let peak = out.iter().fold(0.0f32, |a, x| a.max(x.abs())).max(1e-6);
     let l: Vec<f32> = out.iter().map(|x| x / peak * 0.7).collect();
+    sat_disk::Sample { rate: RATE, r: l.clone(), l }
+}
+
+/// The demo's sung phrase: (start, length) in sixteenths at 124 bpm, and pitch.
+pub const PHRASE: [(f32, f32, f32); 8] = [
+    (0.0, 6.0, 69.0),
+    (8.0, 4.0, 72.0),
+    (12.0, 4.0, 71.0),
+    (16.0, 12.0, 67.0),
+    (32.0, 6.0, 69.0),
+    (40.0, 4.0, 74.0),
+    (44.0, 4.0, 72.0),
+    (48.0, 14.0, 71.0),
+];
+
+/// One take of [`PHRASE`] sung on "ah" (24 kHz, mono): a little early or
+/// late, a little louder or softer on each note, and note `flat` sung most
+/// of a semitone flat, so takes are worth comping.
+pub fn sung(take: u32, flat: usize) -> sat_disk::Sample {
+    const RATE: f32 = 24_000.0;
+    const SIXTEENTH: f32 = 60.0 / 124.0 / 4.0;
+    const FORMANTS: [(f32, f32, f32); 3] = [(730.0, 90.0, 1.0), (1090.0, 110.0, 0.5), (2440.0, 170.0, 0.22)];
+    let mut seed = 0x9e37_79b9u32.wrapping_mul(take + 1);
+    let mut rnd = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        seed as f32 / u32::MAX as f32 * 2.0 - 1.0
+    };
+    // each note: start, end (s), pitch, level
+    let notes: Vec<(f32, f32, f32, f32)> = PHRASE
+        .iter()
+        .enumerate()
+        .map(|(i, (s, l, p))| {
+            let start = s * SIXTEENTH + 0.02 + rnd() * 0.02;
+            let pitch = p - if i == flat { 0.7 } else { 0.0 };
+            (start, start + l * SIXTEENTH - 0.03, pitch, 1.0 + rnd() * 0.15)
+        })
+        .collect();
+    let frames = (64.0 * SIXTEENTH * RATE) as usize;
+    let vib_rate = 5.2 + rnd() * 0.4;
+    let (mut phase, mut f0) = (0.0f64, 440.0f32);
+    let mut out = Vec::with_capacity(frames);
+    for i in 0..frames {
+        let t = i as f32 / RATE;
+        // the note sounding (or the last one, for its release)
+        let k = notes.iter().rposition(|n| n.0 <= t).unwrap_or(0);
+        let (s, e, pitch, level) = notes[k];
+        let env = ((t - s) / 0.04).clamp(0.0, 1.0) * ((e + 0.08 - t) / 0.08).clamp(0.0, 1.0) * level;
+        let depth = ((t - s - 0.2) / 0.4).clamp(0.0, 1.0) * 0.3;
+        let target = 440.0 * 2f32.powf((pitch - 69.0 + depth * (t * vib_rate * std::f32::consts::TAU).sin()) / 12.0);
+        // a quick glide into each note
+        f0 += (target - f0) * 0.004;
+        phase += f0 as f64 / RATE as f64;
+        let mut v = 0.0;
+        if env > 0.0 {
+            for h in 1..=14 {
+                let f = h as f32 * f0;
+                if f > 5_000.0 {
+                    break;
+                }
+                let shape: f32 = FORMANTS.iter().map(|(c, bw, g)| g / (1.0 + ((f - c) / (bw * 0.5)).powi(2))).sum();
+                v += (shape + 0.02) / (h as f32).sqrt()
+                    * ((phase * h as f64).fract() as f32 * std::f32::consts::TAU).sin();
+            }
+        }
+        out.push(v * env);
+    }
+    let peak = out.iter().fold(0.0f32, |a, x| a.max(x.abs())).max(1e-6);
+    let l: Vec<f32> = out.iter().map(|x| x / peak * 0.6).collect();
     sat_disk::Sample { rate: RATE, r: l.clone(), l }
 }
 
@@ -378,8 +475,35 @@ pub fn demo() -> Demo {
     ];
     let (vox, vseq) = b.track("vox", 4, Some(vocals), Ins::Sampler(ah.id, VOX));
     let line = vec![n(0, 6, 69, 0.7), n(8, 4, 72, 0.7), n(12, 4, 71, 0.6), n(16, 12, 67, 0.7)];
-    let v_a = b.clip(vox, vseq, "take 2", 4, 2, line.clone(), 4, 4);
-    let v_b = b.clip(vox, vseq, "take 3", 4, 2, line, 12, 4);
+    // the sampler's clips play in the session; the arrangement has the sung takes
+    let v_a = b.clip(vox, vseq, "ah", 4, 2, line.clone(), 4, 0);
+    let v_b = b.clip(vox, vseq, "ah 2", 4, 2, line, 12, 0);
+    let takes: Vec<Take> = [1usize, 3, 7]
+        .iter()
+        .enumerate()
+        .map(|(i, flat)| {
+            let name = format!("take {}", i + 1);
+            let f =
+                sounds.add_with_id(AudioId::from_u128(0xb0 + i as u128), &format!("vox {name}"), sung(i as u32, *flat));
+            b.ops.push(Op::AddAudio { file: f.clone() });
+            Take { audio: f.id, name, offset: 0 }
+        })
+        .collect();
+    // each take flubs a different note: the comp keeps the good ones
+    let mut verse = AudioClip::single(takes[2].clone());
+    verse.takes = takes.iter().cloned().collect();
+    verse.comp = Vector::unit(CompSegment { start: Ticks::ZERO, take: 2 });
+    let verse = verse.comped(Ticks::sixteenths(30), Ticks::sixteenths(47), 0, bars(4)).comped(
+        Ticks::sixteenths(47),
+        bars(4),
+        1,
+        bars(4),
+    );
+    let verse = AudioClip { fade_in: Ticks::sixteenths(1), fade_out: Ticks::sixteenths(2), ..verse };
+    b.audio_clip(vox, "vox", 4, 4, 4, verse.clone());
+    let drop = AudioClip { comp: Vector::unit(CompSegment { start: Ticks::ZERO, take: 0 }), ..verse };
+    let drop = drop.comped(Ticks::sixteenths(16), Ticks::sixteenths(30), 2, bars(4));
+    b.audio_clip(vox, "vox 2", 4, 12, 4, drop);
 
     // the same clips as session scenes
     let scenes: [(&str, Vec<(TrackId, ClipId)>); 3] = [

@@ -33,7 +33,13 @@ imported sound is copied there when the project is saved. Phase 5 (session +
 recording) has started with the session view: a clip launcher where scenes
 are rows and tracks and groups are columns. Clips, scenes and groups launch
 on the next bar (inside the loop when it is on), and a track that has
-launched a clip follows the session until "back to arrangement". The arrange view, piano roll and mixer from
+launched a clip follows the session until "back to arrangement". Audio
+clips hold takes of the same passage and a comp that picks which take plays
+where: each comp boundary is an equal-power crossfade (20 ms by default) and
+the clip has its own fades. In the arrange view an audio clip shows its
+comped waveform with its crossfades and fade handles, and its takes in lanes
+underneath; swiping a lane comps that take in. The demo's vocal is three
+generated takes, each flubbing a different note, comped into one. The arrange view, piano roll and mixer from
 the prototype are drawn with vello; the engine plays through the default
 audio device and feeds live per-track meters.
 
@@ -42,8 +48,8 @@ audio device and feeds live per-track meters.
 | `sat-time` | ticks (960 PPQ), tempo map with step and linear ramps, meter map, quantisation | done |
 | `sat-doc` | entities, `Op` reducer, transactions, undo with gestures, project bundle with migrations | done |
 | `sat-dsp` | oscillators (polyBLEP), state-variable filter, ADSR, noise, drum voices, gain and pan laws, biquads, eq, compressor, delay, reverb, saturation, limiter | in progress |
-| `sat-engine` | flat schedule, mixer strips, test synth, patchable voice instrument, drum synth, sampler, session clip launching, fx chains, automation, loop, lock-free commands, schedule swap with state carry-over, offline render | done (single-threaded) |
-| `sat-compile` | document → schedule: track tree, solo, sends, placements and looping clips, instrument patches, samplers and fx chains from their grids, live parameter mapping | done |
+| `sat-engine` | flat schedule, mixer strips, test synth, patchable voice instrument, drum synth, sampler, audio clip playback with fades and crossfades, session clip launching, fx chains, automation, loop, lock-free commands, schedule swap with state carry-over, offline render | done (single-threaded) |
+| `sat-compile` | document → schedule: track tree, solo, sends, placements and looping clips, audio clip comps, instrument patches, samplers and fx chains from their grids, live parameter mapping | done |
 | `sat-disk` | WAV import and export (hound), the open project's pool of decoded sounds, writing sounds into the bundle, waveform peaks | in progress |
 | `sat-modules` | built-in modules and their parameter specs: source modules (which editor each opens, the euclid generator, the drum kit, the hand-edit layer), instrument and fx modules, the default voice patch, fx chains and insertion, patching rules | in progress |
 | `sat-theme` | Dots design tokens (`assets/dots/tokens.json`) generated into a Rust `Palette`, plus spacing, radius and type scales | done |
@@ -114,6 +120,8 @@ cargo run --release -p sat-app -- my.sat  # opens a project bundle
 | source grid: + module, the dock's +, Delete, Esc | add a piano roll, drum seq or euclid; add a one-bar clip after the track's last one; remove the selected module; deselect |
 | instrument grid: drag from an out to an in of the same colour, drag a cable off an in | patch them (replacing what fed that input; loops are refused), repatch or unplug it |
 | instrument grid: drag a parameter row, + module, Delete | change the sound while it plays, add a module, remove the selected module |
+| an audio clip's take lane: click, or drag along it | play that take over the comp segment under the click, or over the dragged range (snapped to sixteenths) |
+| an audio clip's square fade handles | drag the fade in or out |
 | sampler: click its waveform | load a WAV (white line: where notes start; amber: where the loop starts) |
 | macros page: drag a macro, learn, click an empty macro, open | play it; map the next touched parameter (in any grid or the euclid editor) to a free macro, click a macro to clear it; start learning; show that grid |
 | a parameter row with a macro badge (m1–m16) | drag it to play its macro |
@@ -139,7 +147,7 @@ cargo run --release -p sat-ui --example screenshot -- euclid.png 2 euclid   # a 
 cargo run --release -p sat-ui --example screenshot -- grid.png 2 clip grid  # its source grid
 cargo run --release -p sat-ui --example screenshot -- ins.png 2 clip instrument  # its instrument grid
 cargo run --release -p sat-ui --example screenshot -- fx.png 2 clip fx       # its fx grid
-cargo run --release -p sat-ui --example screenshot -- smp.png 2 "take 2" instrument  # the vox sampler
+cargo run --release -p sat-ui --example screenshot -- smp.png 2 ah instrument  # the vox sampler
 cargo run --release -p sat-ui --example screenshot -- mac.png 2 macros instrument  # macros page
 cargo run --release -p sat-ui --example screenshot -- ses.png 2 clip session  # session view
 ```
