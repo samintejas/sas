@@ -62,6 +62,7 @@ fn renders_the_arrange_view() {
         grid: &sat_ui::grid::GridView::default(),
         learn: false,
         sounds: &d.sounds,
+        session: &sat_ui::session::SessionView::default(),
     };
     let (w, h) = (1280u32, 800u32);
     let mut scene = vello::Scene::new();
@@ -118,6 +119,7 @@ fn renders_the_mixer() {
         grid: &sat_ui::grid::GridView::default(),
         learn: false,
         sounds: &d.sounds,
+        session: &sat_ui::session::SessionView::default(),
     };
     let (w, h) = (1280u32, 800u32);
     let mut scene = vello::Scene::new();

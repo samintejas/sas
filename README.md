@@ -29,7 +29,11 @@ selected track's macros with its fader and pan. Knobs, macros and bypass
 switches change the sound live while it plays. The demo song is made with
 built-in modules only (its vocal is a sampler playing a generated "ah"),
 which is the phase 4 gate. Sounds live in the bundle's `audio/` folder; an
-imported sound is copied there when the project is saved. The arrange view, piano roll and mixer from
+imported sound is copied there when the project is saved. Phase 5 (session +
+recording) has started with the session view: a clip launcher where scenes
+are rows and tracks and groups are columns. Clips, scenes and groups launch
+on the next bar (inside the loop when it is on), and a track that has
+launched a clip follows the session until "back to arrangement". The arrange view, piano roll and mixer from
 the prototype are drawn with vello; the engine plays through the default
 audio device and feeds live per-track meters.
 
@@ -38,7 +42,7 @@ audio device and feeds live per-track meters.
 | `sat-time` | ticks (960 PPQ), tempo map with step and linear ramps, meter map, quantisation | done |
 | `sat-doc` | entities, `Op` reducer, transactions, undo with gestures, project bundle with migrations | done |
 | `sat-dsp` | oscillators (polyBLEP), state-variable filter, ADSR, noise, drum voices, gain and pan laws, biquads, eq, compressor, delay, reverb, saturation, limiter | in progress |
-| `sat-engine` | flat schedule, mixer strips, test synth, patchable voice instrument, drum synth, sampler, fx chains, automation, loop, lock-free commands, schedule swap with state carry-over, offline render | done (single-threaded) |
+| `sat-engine` | flat schedule, mixer strips, test synth, patchable voice instrument, drum synth, sampler, session clip launching, fx chains, automation, loop, lock-free commands, schedule swap with state carry-over, offline render | done (single-threaded) |
 | `sat-compile` | document → schedule: track tree, solo, sends, placements and looping clips, instrument patches, samplers and fx chains from their grids, live parameter mapping | done |
 | `sat-disk` | WAV import and export (hound), the open project's pool of decoded sounds, writing sounds into the bundle, waveform peaks | in progress |
 | `sat-modules` | built-in modules and their parameter specs: source modules (which editor each opens, the euclid generator, the drum kit, the hand-edit layer), instrument and fx modules, the default voice patch, fx chains and insertion, patching rules | in progress |
@@ -102,7 +106,9 @@ cargo run --release -p sat-app -- my.sat  # opens a project bundle
 | piano roll: drag a note, its right edge, the velocity lane | move it (time and pitch), resize it, set velocity; the selection moves together |
 | piano roll: double-click a note, Delete, arrows, Ctrl+A, Esc | delete, delete the selection, nudge by the grid or transpose (Shift: octave), select all, clear |
 | piano roll: select tool, shift-click, the grid and quantise buttons | box-select, add to the selection, change the grid (Alt drags off it), snap starts to the grid |
-| top bar view buttons, "open source grid", "‹ arrange" | switch between the arrangement and the selected track's source, instrument or fx grid |
+| top bar view buttons, "open source grid", "‹ arrange" | switch between the session, the arrangement and the selected track's source, instrument or fx grid |
+| session: a clip's triangle, a scene, a group's cell | launch it on the next bar (starting the transport if stopped); a scene launches its row and stops tracks with an empty slot |
+| session: a clip's name, an empty slot or stop button, stop all, back to arrangement | select it, stop that track (or group), stop everything, play the arrangement again |
 | source grid: drag a module's header, drag a parameter row, drag the canvas or wheel | move the module, change the value, pan |
 | source grid: drag from a notes out to a clip's inlet, drag a wire off an inlet | wire that clip to the module (replacing its feed), rewire or unplug it |
 | source grid: + module, the dock's +, Delete, Esc | add a piano roll, drum seq or euclid; add a one-bar clip after the track's last one; remove the selected module; deselect |
@@ -135,6 +141,7 @@ cargo run --release -p sat-ui --example screenshot -- ins.png 2 clip instrument 
 cargo run --release -p sat-ui --example screenshot -- fx.png 2 clip fx       # its fx grid
 cargo run --release -p sat-ui --example screenshot -- smp.png 2 "take 2" instrument  # the vox sampler
 cargo run --release -p sat-ui --example screenshot -- mac.png 2 macros instrument  # macros page
+cargo run --release -p sat-ui --example screenshot -- ses.png 2 clip session  # session view
 ```
 
 ## Listening

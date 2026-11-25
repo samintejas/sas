@@ -13,7 +13,8 @@
 //! of the source module wired straight into its dock inlet (a generator's
 //! output plus the clip's hand edits; see `sat_modules`). Every track's fx
 //! grid (see [`build_fx`]) runs between its sound and its strip; pre-fader
-//! sends tap after it. Session launching arrives with a later phase.
+//! sends tap after it. Every clip of a track is also compiled as a session
+//! clip its instrument can launch (see [`Compiled::launch`]).
 
 #![warn(missing_docs)]
 
@@ -25,7 +26,7 @@ use sat_doc::*;
 use sat_engine::{
     AutoCurve, AutoPoint, Automation, Command, FX_PARAMS, Fx, FxKind, FxModule, Instrument, MAX_FX, MAX_FX_REGS,
     MAX_MODS, MAX_PARAMS, MAX_REGS, Meter, NONE, NodeId, NodeKind, NoteEvent, Param, Patch, Sample, Schedule,
-    ScheduleBuilder, Strip, Synth, SynthParam, VKind, VModule, Wave, db_to_gain,
+    ScheduleBuilder, SessionClip, Strip, Synth, SynthParam, VKind, VModule, Wave, db_to_gain,
 };
 use sat_modules::instrument as ins;
 
@@ -76,9 +77,23 @@ pub struct Compiled {
     #[allow(clippy::type_complexity)]
     macros: HashMap<ParamTarget, Vec<(NodeId, Param, &'static sat_modules::ParamSpec, MacroBind)>>,
     meters: HashMap<TrackId, Arc<Meter>>,
+    /// The instrument node of each track that can launch clips.
+    players: HashMap<TrackId, NodeId>,
+}
+
+/// The engine's key for a clip.
+pub fn clip_key(clip: ClipId) -> u64 {
+    clip.0.as_u128() as u64
 }
 
 impl Compiled {
+    /// The command that launches `clip` on `track` at timeline sample `at`,
+    /// or stops the track's session clip there with `None`.
+    pub fn launch(&self, track: TrackId, clip: Option<ClipId>, at: i64) -> Option<Command> {
+        let node = *self.players.get(&track)?;
+        Some(Command::Launch { node, clip: clip.map(clip_key), at })
+    }
+
     /// The post-fader peak meter of a track's strip.
     pub fn meter(&self, track: TrackId) -> Option<&Arc<Meter>> {
         self.meters.get(&track)
@@ -463,6 +478,32 @@ fn build_instrument(
     Some((NodeKind::Synth(Box::new(s)), targets))
 }
 
+/// A track's clips as session clips: one cycle of each, from its start.
+fn session_clips(doc: &Document, track: TrackId, tempo: &TempoMap, sample_rate: f64) -> Vec<SessionClip> {
+    let at = |t: Ticks| tempo.tick_to_sample(t, sample_rate).round() as i64;
+    doc.clips_on(track)
+        .map(|c| {
+            let p = Placement {
+                id: PlacementId::from_u128(0),
+                clip: c.id,
+                start: Ticks::ZERO,
+                offset: Ticks::ZERO,
+                length: c.length,
+            };
+            let events = placement_notes(doc, &p)
+                .iter()
+                .map(|n| NoteEvent {
+                    at: at(n.start),
+                    len: (at(n.end) - at(n.start)).max(1),
+                    pitch: n.pitch,
+                    velocity: n.velocity,
+                })
+                .collect();
+            SessionClip { key: clip_key(c.id), events, len: at(c.length).max(1), looped: c.looped }
+        })
+        .collect()
+}
+
 /// Compiles `doc` for `sample_rate`, processing at most `max_block` frames
 /// per run, with no sounds loaded (samplers are silent).
 pub fn compile(doc: &Document, sample_rate: f64, max_block: usize) -> Result<Compiled, CompileError> {
@@ -481,6 +522,7 @@ pub fn compile_with(
     let mut b = ScheduleBuilder::new(sample_rate, max_block);
     let mut params: HashMap<ParamTarget, (NodeId, Param, Conv)> = HashMap::new();
     let mut meters: HashMap<TrackId, Arc<Meter>> = HashMap::new();
+    let mut players: HashMap<TrackId, NodeId> = HashMap::new();
     // inputs of every bus: track strips, group strips and sends
     #[allow(clippy::type_complexity)]
     let mut bus_inputs: HashMap<TrackId, Vec<(NodeId, f32, Option<TrackId>)>> = HashMap::new();
@@ -505,6 +547,13 @@ pub fn compile_with(
                     for (target, param) in targets {
                         params.insert(target, (id, param, Conv::Same));
                     }
+                    let clips = session_clips(doc, t, &tempo, sample_rate);
+                    let kind = match kind {
+                        NodeKind::Instrument(i) => NodeKind::Instrument(Box::new(i.with_clips(clips))),
+                        NodeKind::Synth(s) => NodeKind::Synth(Box::new(s.with_clips(clips))),
+                        k => k,
+                    };
+                    players.insert(t, id);
                     b.node(id, kind, vec![]);
                     id
                 })
@@ -587,5 +636,5 @@ pub fn compile_with(
     }
     let output = nid(doc.master, SALT_STRIP);
     let schedule = b.build(output).map_err(CompileError::Schedule)?;
-    Ok(Compiled { schedule, output, tempo, params, macros, meters })
+    Ok(Compiled { schedule, output, tempo, params, macros, meters, players })
 }

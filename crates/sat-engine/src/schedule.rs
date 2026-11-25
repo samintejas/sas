@@ -414,6 +414,35 @@ impl Schedule {
     }
 
     /// Releases every sounding note.
+    /// Queues session clip `clip` (or a stop, with `None`) on node `id` for
+    /// timeline sample `at`. Returns false if the node plays no such clip.
+    pub fn launch(&mut self, id: NodeId, clip: Option<u64>, at: i64) -> bool {
+        let Some(i) = self.index_of(id) else { return false };
+        match &mut self.nodes[i].kind {
+            NodeKind::Synth(s) => s.seq_mut().launch(clip, at),
+            NodeKind::Instrument(s) => s.seq_mut().launch(clip, at),
+            _ => false,
+        }
+    }
+
+    /// Hands every track back to the arrangement.
+    pub(crate) fn back_to_arrangement(&mut self) {
+        for n in &mut self.nodes {
+            let cut = match &mut n.kind {
+                NodeKind::Synth(s) => s.seq_mut().back_to_arrangement(),
+                NodeKind::Instrument(s) => s.seq_mut().back_to_arrangement(),
+                _ => false,
+            };
+            if cut {
+                match &mut n.kind {
+                    NodeKind::Synth(s) => s.release_all(),
+                    NodeKind::Instrument(s) => s.release_all(),
+                    _ => {}
+                }
+            }
+        }
+    }
+
     pub(crate) fn all_notes_off(&mut self) {
         for n in &mut self.nodes {
             match &mut n.kind {

@@ -55,11 +55,7 @@ struct Voice {
 /// The synth node.
 #[derive(Debug, Clone)]
 pub struct Synth {
-    events: Vec<NoteEvent>,
-    cursor: usize,
-    /// The timeline sample the next block is expected to start at; anything
-    /// else is a jump (locate, loop) and reseeks the cursor.
-    expect: Option<i64>,
+    seq: crate::sequencer::Sequencer,
     voices: [Voice; VOICES],
     clock: u64,
     level: f32,
@@ -68,18 +64,38 @@ pub struct Synth {
     wave: Wave,
 }
 
+fn release(voices: &mut [Voice; VOICES]) {
+    for v in voices.iter_mut().filter(|v| v.active && v.remaining >= 0) {
+        v.remaining = -1;
+    }
+}
+
+fn start(voices: &mut [Voice; VOICES], clock: &mut u64, e: &NoteEvent, sr: f64) {
+    *clock += 1;
+    let slot = match voices.iter().position(|v| !v.active) {
+        Some(i) => i,
+        None => (0..VOICES).min_by_key(|&i| voices[i].age).unwrap_or(0),
+    };
+    voices[slot] = Voice {
+        active: true,
+        phase: 0.0,
+        inc: pitch_to_hz(e.pitch) / sr as f32,
+        remaining: e.len.max(1),
+        env: 0.0,
+        vel: e.velocity,
+        age: *clock,
+    };
+}
+
 fn pitch_to_hz(p: u8) -> f32 {
     440.0 * 2f32.powf((p as f32 - 69.0) / 12.0)
 }
 
 impl Synth {
     /// A synth that plays `events` (sorted here by start).
-    pub fn new(mut events: Vec<NoteEvent>, wave: Wave, level: f32) -> Synth {
-        events.sort_by(|a, b| a.at.cmp(&b.at).then(a.pitch.cmp(&b.pitch)));
+    pub fn new(events: Vec<NoteEvent>, wave: Wave, level: f32) -> Synth {
         Synth {
-            events,
-            cursor: 0,
-            expect: None,
+            seq: crate::sequencer::Sequencer::new(events),
             voices: [Voice::default(); VOICES],
             clock: 0,
             level,
@@ -87,6 +103,16 @@ impl Synth {
             release_s: 0.05,
             wave,
         }
+    }
+
+    /// The same synth with session clips it can launch.
+    pub fn with_clips(mut self, clips: Vec<crate::SessionClip>) -> Synth {
+        self.seq.set_clips(clips);
+        self
+    }
+
+    pub(crate) fn seq_mut(&mut self) -> &mut crate::sequencer::Sequencer {
+        &mut self.seq
     }
 
     /// Sets a parameter directly (off the audio thread, before the synth runs).
@@ -102,8 +128,7 @@ impl Synth {
     pub(crate) fn adopt(&mut self, old: &Synth) {
         self.voices = old.voices;
         self.clock = old.clock;
-        // the event list may have changed: reseek on the next block
-        self.expect = None;
+        self.seq.adopt(&old.seq);
     }
 
     pub(crate) fn release_all(&mut self) {
@@ -112,51 +137,24 @@ impl Synth {
                 v.remaining = -1;
             }
         }
-        self.expect = None;
-    }
-
-    fn start(&mut self, e: &NoteEvent, sr: f64) {
-        self.clock += 1;
-        let slot = match self.voices.iter().position(|v| !v.active) {
-            Some(i) => i,
-            None => (0..VOICES).min_by_key(|&i| self.voices[i].age).unwrap_or(0),
-        };
-        self.voices[slot] = Voice {
-            active: true,
-            phase: 0.0,
-            inc: pitch_to_hz(e.pitch) / sr as f32,
-            remaining: e.len.max(1),
-            env: 0.0,
-            vel: e.velocity,
-            age: self.clock,
-        };
+        self.seq.invalidate();
     }
 
     pub(crate) fn process(&mut self, out: &mut crate::Buf, off: usize, len: usize, pos: Option<i64>, sr: f64) {
-        if let Some(t0) = pos
-            && self.expect != Some(t0)
-        {
-            if self.expect.is_some() {
-                // a jump: cut what was playing
-                self.release_all();
-            }
-            self.cursor = self.events.partition_point(|e| e.at < t0);
+        if self.seq.begin(pos, len) {
+            // a jump: cut what was playing
+            self.release_all();
         }
-        self.expect = pos.map(|p| p + len as i64);
         let att = 1.0 / (self.attack_s * sr as f32).max(1.0);
         let rel = 1.0 / (self.release_s * sr as f32).max(1.0);
         for k in 0..len {
             if let Some(t0) = pos {
                 let t = t0 + k as i64;
-                while let Some(e) = self.events.get(self.cursor).copied() {
-                    if e.at > t {
-                        break;
-                    }
-                    if e.at == t {
-                        self.start(&e, sr);
-                    }
-                    self.cursor += 1;
-                }
+                let (voices, clock) = (&mut self.voices, &mut self.clock);
+                self.seq.step(t, |c| match c {
+                    crate::sequencer::Cue::Cut => release(voices),
+                    crate::sequencer::Cue::Start(e) => start(voices, clock, e, sr),
+                });
             }
             let mut s = 0.0;
             for v in self.voices.iter_mut().filter(|v| v.active) {

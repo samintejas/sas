@@ -20,6 +20,9 @@ fn engine_process_does_not_allocate() {
     let c = sat_compile::compile(s.h.doc(), SR, BLOCK).unwrap();
     let gain = c.param_command(&ParamTarget::Gain(s.bass), -6.0).unwrap();
     let send = c.param_command(&ParamTarget::SendLevel { track: s.lead, target: s.ret }, -3.0).unwrap();
+    let clip = s.h.doc().clips_on(s.lead).next().unwrap().id;
+    let launch = c.launch(s.lead, Some(clip), 20_000).unwrap();
+    let stop = c.launch(s.bass, None, 40_000).unwrap();
     let (mut e, mut h) = engine(c.schedule, 64);
     let (_, op) = Op::add_track("extra", None, 9);
     s.h.apply("add", [op]).unwrap();
@@ -30,6 +33,8 @@ fn engine_process_does_not_allocate() {
     h.send(Command::Play).unwrap();
     h.send(gain).unwrap();
     h.send(send).unwrap();
+    h.send(launch).unwrap();
+    h.send(stop).unwrap();
     h.send(Command::SetLoop(Some((10_000, 70_000)))).unwrap();
     assert_no_alloc(|| {
         for _ in 0..400 {
@@ -43,6 +48,7 @@ fn engine_process_does_not_allocate() {
             e.process(&mut l, &mut r);
         }
     });
+    h.send(Command::BackToArrangement).unwrap();
     h.send(Command::Stop).unwrap();
     assert_no_alloc(|| {
         for _ in 0..50 {

@@ -302,14 +302,14 @@ pub fn demo() -> Demo {
             })
             .collect()
     };
-    b.clip(drums, dseq, "intro", 0, 1, kick(1), 0, 4);
-    b.clip(drums, dseq, "groove", 0, 2, kick(2), 4, 8);
+    let d_intro = b.clip(drums, dseq, "intro", 0, 1, kick(1), 0, 4);
+    let d_groove = b.clip(drums, dseq, "groove", 0, 2, kick(2), 4, 8);
     let fill: Vec<Note> = (0..16).map(|s| n(s, 1, 38 + (s % 3) as u8, 0.4 + 0.03 * s as f32)).collect();
-    b.clip(drums, dseq, "fill", 0, 1, fill, 12, 4);
+    let d_fill = b.clip(drums, dseq, "fill", 0, 1, fill, 12, 4);
 
     let (bass, bseq) = b.track("bass", 1, Some(rhythm), Ins::Patch(BASS));
     let bass_a = vec![n(0, 3, 45, 0.9), n(4, 2, 48, 0.7), n(8, 2, 45, 0.8), n(11, 3, 43, 0.7), n(14, 2, 40, 0.6)];
-    b.clip(bass, bseq, "bass a", 1, 1, bass_a, 0, 4);
+    let b_a = b.clip(bass, bseq, "bass a", 1, 1, bass_a, 0, 4);
     let bass_b = vec![
         n(0, 3, 45, 0.9),
         n(3, 1, 57, 0.6),
@@ -338,7 +338,7 @@ pub fn demo() -> Demo {
     };
     b.ops.push(op);
     let bass_c = vec![n(0, 2, 45, 0.8), n(2, 2, 52, 0.6), n(6, 2, 48, 0.7), n(10, 4, 43, 0.8)];
-    b.clip(bass, bseq, "bass c", 1, 1, bass_c, 12, 4);
+    let b_c = b.clip(bass, bseq, "bass c", 1, 1, bass_c, 12, 4);
 
     let (perc, eseq) = b.track_with("perc", 2, Some(rhythm), Ins::Patch(BLIP), sat_modules::EUCLID, "euclid 1");
     for (k, v) in [("hits", 7.0), ("rot", 2.0), ("acc", 2.0), ("note", 72.0), ("gate", 0.3), ("vel", 0.55)] {
@@ -360,8 +360,8 @@ pub fn demo() -> Demo {
     let pads = |root: u8| -> Vec<Note> {
         (0..4).flat_map(|c| [0u8, 3, 7, 10].map(|i| n(c * 16, 15, root + i + [0, 5, 3, 7][c as usize], 0.5))).collect()
     };
-    b.clip(keys, kseq, "pads", 6, 4, pads(57), 0, 8);
-    b.clip(keys, kseq, "pads 2", 6, 4, pads(60), 8, 8);
+    let k_a = b.clip(keys, kseq, "pads", 6, 4, pads(57), 0, 8);
+    let k_b = b.clip(keys, kseq, "pads 2", 6, 4, pads(60), 8, 8);
 
     let vocals = b.group("vocals", 4, 2);
     let mut sounds = sat_disk::Pool::new();
@@ -378,8 +378,22 @@ pub fn demo() -> Demo {
     ];
     let (vox, vseq) = b.track("vox", 4, Some(vocals), Ins::Sampler(ah.id, VOX));
     let line = vec![n(0, 6, 69, 0.7), n(8, 4, 72, 0.7), n(12, 4, 71, 0.6), n(16, 12, 67, 0.7)];
-    b.clip(vox, vseq, "take 2", 4, 2, line.clone(), 4, 4);
-    b.clip(vox, vseq, "take 3", 4, 2, line, 12, 4);
+    let v_a = b.clip(vox, vseq, "take 2", 4, 2, line.clone(), 4, 4);
+    let v_b = b.clip(vox, vseq, "take 3", 4, 2, line, 12, 4);
+
+    // the same clips as session scenes
+    let scenes: [(&str, Vec<(TrackId, ClipId)>); 3] = [
+        ("intro", vec![(drums, d_intro), (bass, b_a), (keys, k_a)]),
+        ("verse", vec![(drums, d_groove), (bass, selected), (perc, eclip), (keys, k_a), (vox, v_a)]),
+        ("break", vec![(drums, d_fill), (bass, b_c), (keys, k_b), (vox, v_b)]),
+    ];
+    for (i, (name, slots)) in scenes.into_iter().enumerate() {
+        let id = SceneId::new();
+        b.ops.push(Op::AddScene { id, name: name.into(), index: i });
+        for (track, clip) in slots {
+            b.ops.push(Op::SetSlot { scene: id, track, clip: Some(clip) });
+        }
+    }
 
     let (hall, op) = Op::add_bus(TrackKind::Return, "hall", None, 99);
     b.ops.push(op);

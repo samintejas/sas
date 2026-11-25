@@ -19,5 +19,6 @@ pub mod paint;
 pub mod panel;
 pub mod piano_roll;
 pub mod roll_edit;
+pub mod session;
 pub mod shell;
 pub mod steps;

@@ -28,12 +28,14 @@ pub enum MainView {
     Arrange,
     /// One of a track's grids.
     Grid(GridId),
+    /// The session's clip launcher.
+    Session,
 }
 
 /// The view buttons in the top bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewButton {
-    /// Session view (later).
+    /// Session view.
     Session,
     /// Arrange view.
     Arrange,
@@ -88,6 +90,8 @@ pub struct Frame<'a> {
     pub learn: bool,
     /// The decoded sounds samplers play.
     pub sounds: &'a sat_disk::Pool,
+    /// What the session is playing.
+    pub session: &'a crate::session::SessionView,
 }
 
 /// Layouts of everything drawn, for hit testing.
@@ -107,6 +111,8 @@ pub struct Drawn {
     pub grid: Option<GridLayout>,
     /// The macros page, when the panel shows it.
     pub macros: Option<crate::macros::MacroLayout>,
+    /// The session view, when shown.
+    pub session: Option<crate::session::SessionLayout>,
 }
 
 /// Rectangles of the shell's regions.
@@ -181,6 +187,7 @@ fn topbar(p: &mut Painter<'_>, th: &Theme, f: &Frame<'_>, r: Rect) {
     }
     let active = match f.view {
         MainView::Arrange => ViewButton::Arrange,
+        MainView::Session => ViewButton::Session,
         MainView::Grid(g) => match f.doc.grids.get(&g).map(|g| g.kind) {
             Some(GridKind::Instrument) => ViewButton::Instrument,
             Some(GridKind::Fx) => ViewButton::Fx,
@@ -262,7 +269,21 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
     topbar(&mut p, th, f, sl.topbar);
     let al = ArrangeLayout::new(f.doc, f.arrange, sl.arrange);
     let mut gl = None;
+    let mut ssl = None;
     match f.view {
+        MainView::Session => {
+            p.clip(sl.arrange, |p| {
+                ssl = Some(crate::session::draw(
+                    p,
+                    th,
+                    f.doc,
+                    f.session,
+                    f.arrange.selected_clip,
+                    &f.transport,
+                    sl.arrange,
+                ))
+            });
+        }
         MainView::Grid(g) => {
             p.clip(sl.arrange, |p| {
                 gl = grid::draw(p, th, f.doc, g, f.grid, f.arrange.selected_clip, f.sounds, sl.arrange)
@@ -270,6 +291,9 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
         }
         MainView::Arrange => {
             p.clip(sl.arrange, |p| arrange::draw(p, th, f.doc, f.arrange, &f.transport, f.levels, &al));
+            if !f.session.following.is_empty() {
+                crate::session::draw_back(&mut p, th, sl.arrange);
+            }
         }
     }
     p.rrect_stroke(sl.arrange.inset(0.5), 0.0, 1.0, th.c.border_default);
@@ -279,7 +303,7 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
     let mut mc = None;
     let on_screen = match f.view {
         MainView::Grid(g) => Some(g),
-        MainView::Arrange => None,
+        MainView::Arrange | MainView::Session => None,
     };
     if sl.panel.height() > 0.0 {
         p.clip(sl.panel, |p| match f.panel {
@@ -302,5 +326,5 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
         });
         p.rrect_stroke(sl.panel.inset(0.5), 0.0, 1.0, th.c.border_default);
     }
-    Drawn { shell: sl, arrange: al, mixer: ml, roll: rl, steps: sg, grid: gl, macros: mc }
+    Drawn { shell: sl, arrange: al, mixer: ml, roll: rl, steps: sg, grid: gl, macros: mc, session: ssl }
 }
