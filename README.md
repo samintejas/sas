@@ -17,7 +17,9 @@ in the piano roll, the drum sequencer or the euclid generator (with hand edits
 over it) and heard while the set plays, and each track's source grid shows its
 modules and the clip dock, where cables decide which module feeds each clip.
 Phase 4 (instrument + fx grids) is done: each track's instrument grid is a
-patchable voice (note in, vco, noise, mixer, filter, adsr, vca, lfo, voice out)
+patchable voice (note in, vco, noise, mixer, filter, adsr, vca, lfo, voice out,
+ring mod, wavefolder, and control utilities: cv mix, attenuverter, quantizer,
+sample and hold, slew, random, comparator, logic, clock divider)
 that every voice runs, a drum synth that plays drums by pitch, or a sampler
 that plays a WAV repitched from its root note (gate, one shot or loop, with a
 start point, a crossfaded loop point and an envelope); every

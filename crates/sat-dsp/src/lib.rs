@@ -8,6 +8,7 @@
 
 pub mod drums;
 pub mod fx;
+pub mod scale;
 
 use core::f32::consts::{PI, TAU};
 

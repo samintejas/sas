@@ -5,6 +5,7 @@
 //! A clip name selects that clip and shows it in the bottom panel. A fourth
 //! argument `grid` shows the selected clip's source grid instead of the arrangement.
 //! `SAT_PALETTE=<query>` draws the command palette open with that query.
+//! `SAT_GRID_MENU=1` draws a grid view with its add-module menu open.
 
 use sat_doc::sat_time::Ticks;
 use sat_ui::arrange::{ArrangeState, TransportView};
@@ -80,7 +81,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         roll: &RollView::default(),
         steps: &StepView::default(),
         view,
-        grid: &sat_ui::grid::GridView::default(),
+        grid: &sat_ui::grid::GridView { menu: std::env::var_os("SAT_GRID_MENU").is_some(), ..Default::default() },
         learn: false,
         sounds: &demo.sounds,
         session: &session,

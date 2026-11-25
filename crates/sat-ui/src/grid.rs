@@ -348,12 +348,19 @@ pub fn layout(doc: &Document, grid: GridId, r: Rect, view: &GridView) -> Option<
         .collect();
     let add_module = Rect::new(r.x1 - 96.0, cy - 13.0, r.x1 - 12.0, cy + 13.0);
     let menu = if view.menu {
-        sat_modules::catalogue(kind)
+        // one column, or as many as it takes to fit above the bottom edge,
+        // filled top to bottom, left to right, ending under the button
+        let per = (((r.y1 - add_module.y1 - 12.0) / 28.0).floor() as usize).max(1);
+        let items = sat_modules::catalogue(kind);
+        let cols = items.len().div_ceil(per);
+        items
             .iter()
             .enumerate()
             .map(|(i, (k, _))| {
-                let y = add_module.y1 + 6.0 + i as f64 * 28.0;
-                (*k, Rect::new(add_module.x1 - 160.0, y, add_module.x1, y + 28.0))
+                let (col, row) = (i / per, i % per);
+                let y = add_module.y1 + 6.0 + row as f64 * 28.0;
+                let x1 = add_module.x1 - (cols - 1 - col) as f64 * 164.0;
+                (*k, Rect::new(x1 - 160.0, y, x1, y + 28.0))
             })
             .collect()
     } else {
@@ -973,8 +980,7 @@ pub fn draw(
     }
     chip(p, th, l.add_module, "module", Some(Icon::Plus));
     if !l.menu.is_empty() {
-        let first = l.menu[0].1;
-        let all = Rect::new(first.x0 - 4.0, first.y0 - 4.0, first.x1 + 4.0, l.menu.last().unwrap().1.y1 + 4.0);
+        let all = l.menu.iter().fold(l.menu[0].1, |a, (_, r)| a.union(*r)).inflate(4.0, 4.0);
         p.rrect(all, 6.0, c.bg_surface);
         p.rrect_stroke(all.inset(-0.5), 6.0, 1.0, c.border_strong);
         for (k, r) in &l.menu {

@@ -272,6 +272,17 @@ fn vkind(kind: &str) -> Option<VKind> {
         ins::VCA => VKind::Vca,
         ins::LFO => VKind::Lfo,
         ins::VOICE_OUT => VKind::VoiceOut,
+        ins::CV_MIX => VKind::CvMix,
+        ins::ATTEN => VKind::Atten,
+        ins::QUANTIZE => VKind::Quantize,
+        ins::SAMPLE_HOLD => VKind::SampleHold,
+        ins::SLEW => VKind::Slew,
+        ins::RANDOM => VKind::Random,
+        ins::COMPARE => VKind::Compare,
+        ins::LOGIC => VKind::Logic,
+        ins::CLOCK_DIV => VKind::ClockDiv,
+        ins::RING => VKind::Ring,
+        ins::FOLD => VKind::Fold,
         _ => return None,
     })
 }
@@ -807,4 +818,29 @@ pub fn compile_with(
     let output = nid(doc.master, SALT_STRIP);
     let schedule = b.build(output).map_err(CompileError::Schedule)?;
     Ok(Compiled { schedule, output, tempo, params, macros, meters, players })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_module_fits_its_engine() {
+        for (k, _) in ins::MODULES {
+            if k == ins::DRUM_SYNTH || k == ins::SAMPLER {
+                continue;
+            }
+            assert!(vkind(k).is_some(), "{k} has no voice module");
+            let ports = sat_modules::ports(k);
+            assert!(ports.iter().filter(|p| p.input).count() <= 4, "{k} inputs");
+            assert!(ports.iter().filter(|p| !p.input).count() <= 3, "{k} outputs");
+            assert!(sat_modules::params_of(k).len() <= MAX_PARAMS, "{k} params");
+        }
+        for (k, _) in sat_modules::fx::MODULES {
+            assert!(fx_kind(k).is_some(), "{k} has no fx module");
+            let ports = sat_modules::ports(k);
+            assert!(ports.iter().filter(|p| p.input).count() <= 2, "{k} inputs");
+            assert!(ports.iter().filter(|p| !p.input).count() <= 2, "{k} outputs");
+        }
+    }
 }

@@ -1,5 +1,7 @@
 //! Instrument-grid modules: a voice patch (note in, oscillators, noise, mixer,
-//! filter, envelope, vca, lfo, voice out) that every voice runs, a drum
+//! filter, envelope, vca, lfo, voice out, plus audio shapers and control
+//! utilities: ring mod, folder, cv mix, attenuverter, quantizer, sample and
+//! hold, slew, random, comparator, logic, clock divider) that every voice runs, a drum
 //! synth that plays General MIDI drums by pitch, or a sampler that plays a
 //! sound from the audio pool repitched by note.
 //!
@@ -30,6 +32,28 @@ pub const VOICE_OUT: &str = "voice_out";
 pub const DRUM_SYNTH: &str = "drum_synth";
 /// A self-contained sampler: plays its module's sound (see `Module::audio`).
 pub const SAMPLER: &str = "sampler";
+/// Control-voltage mixer: adds up to three signals (an adder).
+pub const CV_MIX: &str = "cv_mix";
+/// Attenuverter: scales, inverts and offsets a signal.
+pub const ATTEN: &str = "atten";
+/// Pitch quantizer: snaps a pitch to a scale.
+pub const QUANTIZE: &str = "quantize";
+/// Sample and hold.
+pub const SAMPLE_HOLD: &str = "sample_hold";
+/// Slew limiter (glide, lag).
+pub const SLEW: &str = "slew";
+/// Stepped and smooth random.
+pub const RANDOM: &str = "random";
+/// Comparator.
+pub const COMPARE: &str = "compare";
+/// Gate logic: and, or, xor.
+pub const LOGIC: &str = "logic";
+/// Clock divider.
+pub const CLOCK_DIV: &str = "clock_div";
+/// Ring modulator.
+pub const RING: &str = "ring";
+/// Wavefolder.
+pub const FOLD: &str = "fold";
 /// Sampler play modes, in engine order.
 pub const PLAY_MODES: &[&str] = &["gate", "one shot", "loop"];
 
@@ -44,7 +68,7 @@ const fn output(key: &'static str, kind: PortKind) -> PortSpec {
 const WAVES: &[&str] = &["sine", "tri", "saw", "square"];
 
 /// Instrument modules that can be added: kind and label.
-pub const MODULES: [(&str, &str); 11] = [
+pub const MODULES: [(&str, &str); 22] = [
     (NOTE_IN, "note in"),
     (VCO, "vco"),
     (NOISE, "noise"),
@@ -54,6 +78,17 @@ pub const MODULES: [(&str, &str); 11] = [
     (VCA, "vca"),
     (LFO, "lfo"),
     (VOICE_OUT, "voice out"),
+    (RING, "ring mod"),
+    (FOLD, "folder"),
+    (CV_MIX, "cv mix"),
+    (ATTEN, "attenuvert"),
+    (QUANTIZE, "quantizer"),
+    (SAMPLE_HOLD, "s & h"),
+    (SLEW, "slew"),
+    (RANDOM, "random"),
+    (COMPARE, "compare"),
+    (LOGIC, "logic"),
+    (CLOCK_DIV, "clock div"),
     (DRUM_SYNTH, "drum synth"),
     (SAMPLER, "sampler"),
 ];
@@ -68,8 +103,20 @@ pub fn ports(kind: &str) -> &'static [PortSpec] {
     const FILTER_PORTS: [PortSpec; 3] = [input("in", Audio), input("cutoff", Mod), output("out", Audio)];
     const ADSR_PORTS: [PortSpec; 2] = [input("gate", Mod), output("env", Mod)];
     const VCA_PORTS: [PortSpec; 3] = [input("in", Audio), input("cv", Mod), output("out", Audio)];
-    const LFO_PORTS: [PortSpec; 1] = [output("out", Mod)];
+    const LFO_PORTS: [PortSpec; 4] = [input("rate", Mod), input("sync", Mod), output("out", Mod), output("uni", Mod)];
     const VOICE_OUT_PORTS: [PortSpec; 1] = [input("in", Audio)];
+    const CV_MIX_PORTS: [PortSpec; 4] = [input("1", Mod), input("2", Mod), input("3", Mod), output("out", Mod)];
+    const ATTEN_PORTS: [PortSpec; 3] = [input("in", Mod), input("cv", Mod), output("out", Mod)];
+    const QUANT_PORTS: [PortSpec; 4] = [input("pitch", Mod), input("cv", Mod), output("out", Mod), output("trig", Mod)];
+    const SH_PORTS: [PortSpec; 3] = [input("in", Mod), input("trig", Mod), output("out", Mod)];
+    const SLEW_PORTS: [PortSpec; 2] = [input("in", Mod), output("out", Mod)];
+    const RANDOM_PORTS: [PortSpec; 2] = [output("step", Mod), output("smooth", Mod)];
+    const COMPARE_PORTS: [PortSpec; 4] = [input("a", Mod), input("b", Mod), output("gt", Mod), output("lt", Mod)];
+    const LOGIC_PORTS: [PortSpec; 5] =
+        [input("a", Mod), input("b", Mod), output("and", Mod), output("or", Mod), output("xor", Mod)];
+    const DIV_PORTS: [PortSpec; 3] = [input("clock", Mod), input("reset", Mod), output("out", Mod)];
+    const RING_PORTS: [PortSpec; 3] = [input("in", Audio), input("carrier", Audio), output("out", Audio)];
+    const FOLD_PORTS: [PortSpec; 3] = [input("in", Audio), input("fold", Mod), output("out", Audio)];
     match kind {
         NOTE_IN => &NOTE_IN_PORTS,
         VCO => &VCO_PORTS,
@@ -80,6 +127,17 @@ pub fn ports(kind: &str) -> &'static [PortSpec] {
         VCA => &VCA_PORTS,
         LFO => &LFO_PORTS,
         VOICE_OUT => &VOICE_OUT_PORTS,
+        CV_MIX => &CV_MIX_PORTS,
+        ATTEN => &ATTEN_PORTS,
+        QUANTIZE => &QUANT_PORTS,
+        SAMPLE_HOLD => &SH_PORTS,
+        SLEW => &SLEW_PORTS,
+        RANDOM => &RANDOM_PORTS,
+        COMPARE => &COMPARE_PORTS,
+        LOGIC => &LOGIC_PORTS,
+        CLOCK_DIV => &DIV_PORTS,
+        RING => &RING_PORTS,
+        FOLD => &FOLD_PORTS,
         _ => &[],
     }
 }
@@ -120,6 +178,32 @@ pub fn params(kind: &str) -> &'static [ParamSpec] {
         p("wave", "wave", 0.0, 3.0, 0.0, Unit::Choice(WAVES)),
         p("depth", "depth", 0.0, 1.0, 0.3, Unit::Percent),
     ];
+    const CV_MIX_P: [ParamSpec; 4] = [
+        p("g1", "1", -1.0, 1.0, 1.0, Unit::Bipolar),
+        p("g2", "2", -1.0, 1.0, 1.0, Unit::Bipolar),
+        p("g3", "3", -1.0, 1.0, 1.0, Unit::Bipolar),
+        p("offset", "offset", -1.0, 1.0, 0.0, Unit::Bipolar),
+    ];
+    const ATTEN_P: [ParamSpec; 2] =
+        [p("amount", "amount", -1.0, 1.0, 1.0, Unit::Bipolar), p("offset", "offset", -1.0, 1.0, 0.0, Unit::Bipolar)];
+    const QUANT_P: [ParamSpec; 4] = [
+        p("root", "root", 0.0, 11.0, 0.0, Unit::Choice(sat_dsp::scale::ROOTS)),
+        p("scale", "scale", 0.0, 13.0, 1.0, Unit::Choice(sat_dsp::scale::NAMES)),
+        p("transpose", "transpose", -24.0, 24.0, 0.0, Unit::Semis),
+        p("range", "cv range", 0.0, 48.0, 12.0, Unit::Semis),
+    ];
+    const SLEW_P: [ParamSpec; 2] =
+        [p("rise", "rise", 0.0005, 5.0, 0.05, Unit::Seconds), p("fall", "fall", 0.0005, 5.0, 0.05, Unit::Seconds)];
+    const RANDOM_P: [ParamSpec; 2] =
+        [p("rate", "rate", 0.05, 50.0, 4.0, Unit::Hz), p("depth", "depth", 0.0, 1.0, 1.0, Unit::Percent)];
+    const COMPARE_P: [ParamSpec; 1] = [p("thresh", "threshold", -1.0, 1.0, 0.0, Unit::Bipolar)];
+    const DIV_P: [ParamSpec; 1] = [p("div", "divide by", 1.0, 32.0, 2.0, Unit::Int)];
+    const RING_P: [ParamSpec; 1] = [p("mix", "mix", 0.0, 1.0, 1.0, Unit::Percent)];
+    const FOLD_P: [ParamSpec; 3] = [
+        p("fold", "fold", 0.0, 1.0, 0.3, Unit::Percent),
+        p("bias", "bias", -1.0, 1.0, 0.0, Unit::Bipolar),
+        p("amount", "mod amt", -1.0, 1.0, 0.5, Unit::Bipolar),
+    ];
     const VOICE_OUT_P: [ParamSpec; 2] =
         [p("level", "level", -60.0, 6.0, -6.0, Unit::Db), p("pan", "pan", -1.0, 1.0, 0.0, Unit::Pan)];
     const DRUM_P: [ParamSpec; 3] = [
@@ -150,6 +234,15 @@ pub fn params(kind: &str) -> &'static [ParamSpec] {
         VOICE_OUT => &VOICE_OUT_P,
         DRUM_SYNTH => &DRUM_P,
         SAMPLER => &SAMPLER_P,
+        CV_MIX => &CV_MIX_P,
+        ATTEN => &ATTEN_P,
+        QUANTIZE => &QUANT_P,
+        SLEW => &SLEW_P,
+        RANDOM => &RANDOM_P,
+        COMPARE => &COMPARE_P,
+        CLOCK_DIV => &DIV_P,
+        RING => &RING_P,
+        FOLD => &FOLD_P,
         _ => &[],
     }
 }
