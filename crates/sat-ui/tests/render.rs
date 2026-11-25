@@ -64,6 +64,8 @@ fn renders_the_arrange_view() {
         sounds: &d.sounds,
         session: &sat_ui::session::SessionView::default(),
         palette: None,
+        bank: &sat_ui::bank::BankView::default(),
+        drag_clip: None,
     };
     let (w, h) = (1280u32, 800u32);
     let mut scene = vello::Scene::new();
@@ -122,6 +124,8 @@ fn renders_the_mixer() {
         sounds: &d.sounds,
         session: &sat_ui::session::SessionView::default(),
         palette: None,
+        bank: &sat_ui::bank::BankView::default(),
+        drag_clip: None,
     };
     let (w, h) = (1280u32, 800u32);
     let mut scene = vello::Scene::new();

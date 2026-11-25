@@ -23,6 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let panel = match view.as_str() {
         "mixer" => PanelView::Mixer,
         "macros" => PanelView::Macros,
+        "bank" => PanelView::Bank,
         _ => PanelView::Clip,
     };
     let mut demo = sat_ui::demo::demo();
@@ -84,6 +85,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sounds: &demo.sounds,
         session: &session,
         palette: palette.as_ref(),
+        bank: &sat_ui::bank::BankView::default(),
+        drag_clip: None,
     };
     let t = std::time::Instant::now();
     shell::draw(&mut scene, &mut fonts, &theme, &frame, w, h);
