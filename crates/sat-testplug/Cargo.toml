@@ -1,0 +1,22 @@
+[package]
+name = "sat-testplug"
+description = "The sat crash-test plugin as a real CLAP library, to load through dlopen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+sat-plug.workspace = true
+clap-sys = "0.6"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

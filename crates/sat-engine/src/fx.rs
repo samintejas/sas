@@ -40,6 +40,21 @@ pub enum FxKind {
     Split,
     /// Two inputs to one output.
     Merge,
+    /// An external processor (a hosted plugin), set with [`Fx::set_external`];
+    /// passes audio through until one is set.
+    External,
+}
+
+/// Audio processing that lives outside the engine, such as a plugin in a
+/// host process. It runs on the audio thread, so it must not allocate or
+/// block for longer than its own budget; when it cannot produce audio (its
+/// host died or hung) it writes silence.
+pub trait External: Send {
+    /// Processes `l` and `r` in place; `params` are the module's parameter
+    /// values in order.
+    fn process(&mut self, l: &mut [f32], r: &mut [f32], params: &[f32]);
+    /// Another handle to the same processor (schedules are cloned).
+    fn boxed_clone(&self) -> Box<dyn External>;
 }
 
 /// One module of an fx grid: registers it reads and writes, and parameters.
@@ -74,6 +89,22 @@ enum State {
     Drive(Box<Drive>),
     Limiter(Box<Limiter>),
     Filter(Box<Filter>),
+    External(Ext),
+}
+
+/// A boxed [`External`] that the derives can handle.
+struct Ext(Box<dyn External>);
+
+impl Clone for Ext {
+    fn clone(&self) -> Ext {
+        Ext(self.0.boxed_clone())
+    }
+}
+
+impl core::fmt::Debug for Ext {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("External")
+    }
 }
 
 impl State {
@@ -138,6 +169,13 @@ impl Fx {
         }
     }
 
+    /// Gives an [`FxKind::External`] module in `slot` its processor.
+    pub fn set_external(&mut self, slot: usize, ext: Box<dyn External>) {
+        if self.mods.get(slot).is_some_and(|m| m.kind == FxKind::External) {
+            self.states[slot] = State::External(Ext(ext));
+        }
+    }
+
     /// Sets parameter `index` of module `slot`.
     pub fn set_param(&mut self, slot: u8, index: u8, v: f32) -> bool {
         match self.mods.get_mut(slot as usize) {
@@ -154,6 +192,10 @@ impl Fx {
     pub fn adopt(&mut self, old: &mut Fx) {
         for i in 0..self.mods.len() {
             let (key, kind) = (self.mods[i].key, self.mods[i].kind);
+            // an external processor's state lives in its host, not here
+            if kind == FxKind::External {
+                continue;
+            }
             if let Some(j) = old.mods.iter().position(|m| m.key == key && m.kind == kind)
                 && self.sr == old.sr
             {
@@ -261,6 +303,7 @@ impl Fx {
                             State::Drive(d) => d.process(l, rr, p, sr),
                             State::Limiter(x) => x.process(l, rr, p, sr),
                             State::Filter(f) => f.process(l, rr, p, sr),
+                            State::External(e) => e.0.process(l, rr, &p[..FX_PARAMS - 1]),
                             State::None => {}
                         }
                     }

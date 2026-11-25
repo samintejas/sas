@@ -127,6 +127,8 @@ pub struct Frame<'a> {
     pub learn: bool,
     /// The decoded sounds samplers play.
     pub sounds: &'a sat_disk::Pool,
+    /// The plugins plugin modules host.
+    pub plugins: &'a crate::grid::PluginViews,
     /// What the session is playing.
     pub session: &'a crate::session::SessionView,
     /// The command palette, when open.
@@ -341,7 +343,18 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
         }
         MainView::Grid(g) => {
             p.clip(sl.arrange, |p| {
-                gl = grid::draw(p, th, f.doc, g, f.grid, f.arrange.selected_clip, f.sounds, f.levels, sl.arrange)
+                gl = grid::draw(
+                    p,
+                    th,
+                    f.doc,
+                    g,
+                    f.grid,
+                    f.arrange.selected_clip,
+                    f.sounds,
+                    f.plugins,
+                    f.levels,
+                    sl.arrange,
+                )
             });
         }
         MainView::Arrange => {

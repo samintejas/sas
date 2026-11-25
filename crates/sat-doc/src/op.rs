@@ -131,6 +131,8 @@ pub enum Op {
     RemoveAudio { id: AudioId },
     /// Sets (or clears) the sound a module plays.
     SetModuleAudio { module: ModuleId, audio: Option<AudioId> },
+    /// Sets the plugin a plugin module hosts (a `.clap` path).
+    SetModulePlugin { module: ModuleId, plugin: Option<String> },
 
     // --- values ---
     /// Sets the base value of a parameter, macro, fader, pan or send level.
@@ -550,7 +552,7 @@ pub fn apply(d: &mut Document, op: Op) -> Result<Change, OpError> {
             for v in params.values() {
                 finite(*v, "parameter")?;
             }
-            d.modules.insert(id, Module { id, grid, kind, name, params, pos, audio: None });
+            d.modules.insert(id, Module { id, grid, kind, name, params, pos, audio: None, plugin: None });
             Structure
         }
         Op::RemoveModule { id } => {
@@ -592,6 +594,13 @@ pub fn apply(d: &mut Document, op: Op) -> Result<Change, OpError> {
                 return Err(nf("audio file", a));
             }
             d.modules.get_mut(&module).ok_or_else(|| nf("module", module))?.audio = audio;
+            Structure
+        }
+        Op::SetModulePlugin { module, plugin } => {
+            if plugin.as_deref().is_some_and(str::is_empty) {
+                return Err(OpError::BadValue("a plugin path cannot be empty"));
+            }
+            d.modules.get_mut(&module).ok_or_else(|| nf("module", module))?.plugin = plugin;
             Structure
         }
         Op::MoveModule { id, pos } => {

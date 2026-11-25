@@ -33,6 +33,7 @@ mod audio;
 mod cushion;
 mod export;
 mod input;
+mod plugins;
 mod project;
 
 use std::collections::HashMap;
@@ -94,12 +95,17 @@ struct Playback {
     status: String,
     /// The decoded sounds samplers play.
     pool: sat_disk::Pool,
+    /// The plugin modules' host processes.
+    hosts: plugins::Hosts,
 }
 
 impl Playback {
     fn start(doc: &Document, pool: sat_disk::Pool) -> Playback {
         let rate = audio::device_rate().unwrap_or(FALLBACK_RATE);
-        let compiled = sat_compile::compile_with(doc, rate, MAX_BLOCK, pool.sounds()).expect("project compiles");
+        let mut hosts = plugins::Hosts::default();
+        hosts.sync(doc, rate, MAX_BLOCK);
+        let compiled =
+            sat_compile::compile_with_plugins(doc, rate, MAX_BLOCK, pool.sounds(), &hosts).expect("project compiles");
         let (engine, mut handle) = sat_engine::engine(compiled.schedule.clone(), 256);
         let _ = handle.send(Command::SetLoop(compiled.loop_samples(doc)));
         match audio::start(engine, MAX_BLOCK) {
@@ -111,6 +117,7 @@ impl Playback {
                 playing: false,
                 clock: None,
                 pool,
+                hosts,
             },
             Err(e) => Playback {
                 status: format!("no audio ({e})"),
@@ -120,6 +127,7 @@ impl Playback {
                 playing: false,
                 clock: None,
                 pool,
+                hosts,
             },
         }
     }
@@ -134,7 +142,8 @@ impl Playback {
     /// Recompiles after a structural edit and swaps the new schedule in.
     fn recompile(&mut self, doc: &Document) {
         let rate = self.compiled.schedule.sample_rate();
-        match sat_compile::compile_with(doc, rate, MAX_BLOCK, self.pool.sounds()) {
+        self.hosts.sync(doc, rate, MAX_BLOCK);
+        match sat_compile::compile_with_plugins(doc, rate, MAX_BLOCK, self.pool.sounds(), &self.hosts) {
             Ok(c) => {
                 self.send(Command::Swap(Box::new(c.schedule.clone())));
                 self.send(Command::SetLoop(c.loop_samples(doc)));
@@ -537,6 +546,23 @@ impl App {
         self.grid.selected = Some(module);
     }
 
+    /// Asks for a `.clap` file and hosts it in plugin module `id`, with the
+    /// module's knobs at the plugin's defaults.
+    fn load_plugin(&mut self, id: ModuleId) {
+        let dialog = rfd::FileDialog::new().set_title("Load a CLAP plugin").add_filter("CLAP plugin", &["clap"]);
+        let Some(path) = dialog.pick_file() else { return };
+        let path = path.to_string_lossy().into_owned();
+        // start the host first, so the first schedule already plays the defaults
+        let rate = self.playback.compiled.schedule.sample_rate();
+        self.playback.hosts.start(id, &path, rate, MAX_BLOCK);
+        let mut ops = vec![Op::SetModulePlugin { module: id, plugin: Some(path) }];
+        for (i, v) in self.playback.hosts.defaults(id).into_iter().take(7).enumerate() {
+            let target = ParamTarget::Module { module: id, param: format!("p{}", i + 1) };
+            ops.push(Op::SetValue { target, value: v });
+        }
+        self.edit("load plugin", ops);
+    }
+
     fn open(&mut self) {
         let mut dialog = rfd::FileDialog::new().set_title("Open a sat project (.sat folder)");
         if let Some(dir) = self.project.path.as_ref().and_then(|p| p.parent()) {
@@ -657,6 +683,7 @@ impl App {
         let scale = g.window.scale_factor();
         let (w, h) = (size.width as f64 / scale, size.height as f64 / scale);
         self.session.advance(self.history.doc(), self.playback.playhead());
+        let plugin_views = self.playback.hosts.views();
         let frame = Frame {
             doc: self.history.doc(),
             name: &self.project.name,
@@ -677,6 +704,7 @@ impl App {
             grid: &self.grid,
             learn: self.learn,
             sounds: &self.playback.pool,
+            plugins: &plugin_views,
             session: &self.session,
             palette: self.palette.as_ref(),
             bank: &self.bank,
@@ -1969,6 +1997,21 @@ impl App {
                     self.load_sound(Some(id), l.grid, &path);
                 }
             }
+            GridHit::Plugin(id) => {
+                self.grid.selected = Some(id);
+                let doc = self.history.doc();
+                match doc.modules.get(&id).and_then(|m| m.plugin.clone()) {
+                    // a crashed or hung plugin restarts (its knobs are in the document)
+                    Some(path) if self.playback.hosts.error(id).is_none() => {
+                        if self.playback.hosts.down(id) {
+                            let rate = self.playback.compiled.schedule.sample_rate();
+                            self.playback.hosts.start(id, &path, rate, MAX_BLOCK);
+                            self.playback.recompile(self.history.doc());
+                        }
+                    }
+                    _ => self.load_plugin(id),
+                }
+            }
             GridHit::Bypass(id) => {
                 let on = self.history.doc().modules.get(&id).is_some_and(sat_modules::fx::bypassed);
                 let target = ParamTarget::Module { module: id, param: sat_modules::fx::BYPASS.into() };
@@ -2529,6 +2572,10 @@ fn parse_args() -> Result<Args, String> {
 }
 
 fn main() {
+    // a plugin host process: the app re-runs itself to host each plugin
+    if std::env::args().nth(1).as_deref() == Some("--plughost") {
+        std::process::exit(sat_plug::host::main(std::env::args().skip(2).collect()));
+    }
     let args = parse_args().unwrap_or_else(|e| {
         eprintln!("sat: {e}\nusage: sat [--export out.wav [--loop] [--rate hz]] [project.sat]");
         std::process::exit(2);

@@ -84,6 +84,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         grid: &sat_ui::grid::GridView { menu: std::env::var_os("SAT_GRID_MENU").is_some(), ..Default::default() },
         learn: false,
         sounds: &demo.sounds,
+        plugins: &Default::default(),
         session: &session,
         palette: palette.as_ref(),
         bank: &sat_ui::bank::BankView::default(),

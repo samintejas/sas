@@ -74,7 +74,28 @@ them, which spares the CPU and sounds the same (fader, pan, sends and
 automation stay live). The patch is kept, so Ctrl+F again unfreezes it.
 Monitored input passes through a small cushion between the input and
 output clocks, so it no longer crackles when their buffer sizes differ, and
-audio clips fade out over 5 ms when the transport stops in them. The arrange view, piano roll and mixer from
+audio clips fade out over 5 ms when the transport stops in them. Phase 6 is
+done.
+
+Phase 7 (CLAP hosting) has started. The "plugin" fx module hosts a CLAP
+plugin: click its header to pick a `.clap` file, and its first seven
+parameters appear on the module's knobs, under the plugin's own names.
+Plugins never load in the app. Each runs in a host process (`sat-plughost`,
+or the app re-run as `sat --plughost`) and swaps audio with the engine
+through shared memory in the same block, so hosting adds no latency. If the
+host has not answered within half a block, that block is silent (a dropout)
+and the set carries on. A plugin that crashes or hangs leaves its module
+silent, marked "crashed · reload" or "not responding · reload", while the
+rest of the set keeps playing; click it to start a fresh host. The
+`sat-testplug` crate builds a crash-test plugin (a gain that panics,
+aborts, hangs or leaks on request) as a real `.clap` library, and the same
+plugin is built into the host as `builtin:crash-test`. For now each plugin
+module gets its own host process, plugin state is not saved with the
+project (a reload starts from the plugin's defaults), there are no plugin
+editor windows, and export and freeze pass plugin modules through dry. The gate test
+(`cargo test -p sat-plug --test gate`) plays a set with the crash-test
+plugin on one track, makes it panic and then hang mid-song, and checks that
+every block still arrives on time and the other tracks play on. The arrange view, piano roll and mixer from
 the prototype are drawn with vello; the engine plays through the default
 audio device and feeds live per-track meters.
 
@@ -89,6 +110,8 @@ audio device and feeds live per-track meters.
 | `sat-modules` | built-in modules and their parameter specs: source modules (which editor each opens, the euclid generator, the drum kit, the hand-edit layer), instrument and fx modules, the default voice patch, fx chains and insertion, patching rules | in progress |
 | `sat-theme` | Dots design tokens (`assets/dots/tokens.json`) generated into a Rust `Palette`, plus spacing, radius and type scales | done |
 | `sat-ui` | vello + parley painter, top bar, arrange view, source grid, piano roll, step editors, mixer, shared controls (faders, knobs, meters), hit-testing, headless GPU rendering | in progress |
+| `sat-plug` | CLAP hosting: host processes, the shared-memory block exchange with a time budget, crash and hang detection, the crash-test plugin | in progress |
+| `sat-testplug` | the crash-test plugin as a `.clap` library | done |
 | `sat-app` | the `sat` binary: winit window, vello surface, cpal output running the engine, mixing gestures with undo, open / save / autosave, WAV export (also headless) | in progress |
 
 ## Phase 1 gate
