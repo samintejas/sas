@@ -8,6 +8,7 @@
 #![warn(missing_docs)]
 
 pub mod arrange;
+pub mod arrange_edit;
 pub mod audio_edit;
 pub mod controls;
 pub mod demo;

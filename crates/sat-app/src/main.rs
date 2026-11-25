@@ -38,12 +38,13 @@ use std::time::{Duration, Instant};
 use sat_compile::Compiled;
 use sat_doc::sat_time::Ticks;
 use sat_doc::{
-    CableId, ClipId, Document, Endpoint, GridKind, History, ModuleId, Note, Op, ParamTarget, PortRef, TrackFlag,
-    TrackId, TrackKind,
+    CableId, ClipId, Document, Endpoint, GridKind, History, ModuleId, Note, Op, ParamTarget, PlacementId, PortRef,
+    TrackFlag, TrackId, TrackKind,
 };
 use sat_engine::{Command, EngineHandle};
 use sat_modules::{Editor, PortKind, drum, euclid};
-use sat_ui::arrange::{ArrangeLayout, ArrangeState, Hit, TransportView, header_controls};
+use sat_ui::arrange::{ArrangeLayout, ArrangeState, Hit, RowKind, TransportView, header_controls};
+use sat_ui::arrange_edit::{self, Span};
 use sat_ui::controls::{self, SILENT_DB};
 use sat_ui::grid::{self, GridHit, GridLayout, GridView};
 use sat_ui::mixer::{Knob, Levels, MixHit, MixerLayout};
@@ -258,6 +259,17 @@ enum AudioDrag {
     Field { clip: ClipId, field: sat_ui::audio_edit::AudioField, from: f64, start: f64 },
 }
 
+/// A drag on a clip placement in the arrange view. Each keeps the span the
+/// placement had when the drag began, so every move recomputes from it.
+#[derive(Debug, Clone)]
+enum ClipDrag {
+    /// Moving it along its track; `copy` (alt at the press) moves a copy
+    /// instead, made once the pointer has moved.
+    Move { placement: PlacementId, from: Span, x: f64, copy: bool },
+    /// Dragging its left or right edge.
+    Trim { placement: PlacementId, from: Span, x: f64, right: bool },
+}
+
 /// The comp with `take` over the segment of `a` holding clip time `at`.
 fn comp_segment(a: &sat_doc::AudioClip, at: Ticks, take: u16, len: Ticks) -> sat_doc::AudioClip {
     let i = a.comp.iter().take_while(|s| s.start <= at).count().saturating_sub(1);
@@ -358,6 +370,12 @@ struct App {
     grid_drag: Option<GridDrag>,
     audio_drag: Option<AudioDrag>,
     audio_layout: Option<sat_ui::audio_edit::AudioEditLayout>,
+    clip_drag: Option<ClipDrag>,
+    /// The last press was in the bottom panel (keys go to its editor), else
+    /// in the main view (keys edit clips there).
+    panel_focus: bool,
+    /// The pointer shape shown, so it is only set when it changes.
+    cursor_icon: winit::window::CursorIcon,
     /// Length of the last drawn or resized note.
     note_len: sat_doc::sat_time::Ticks,
     last_click: Option<(Instant, Point)>,
@@ -417,6 +435,7 @@ impl App {
         self.grid = GridView::default();
         self.grid_drag = None;
         self.audio_drag = None;
+        self.clip_drag = None;
         self.playback.recompile(&doc);
         self.history = History::new(doc, 500);
         self.playback.locate(Ticks::ZERO);
@@ -800,6 +819,9 @@ impl App {
         if self.audio_drag.take().is_some() {
             self.history.end_gesture();
         }
+        if self.clip_drag.take().is_some() {
+            self.history.end_gesture();
+        }
     }
 
     fn press_session(&mut self, pt: Point, double: bool) {
@@ -1013,7 +1035,7 @@ impl App {
 
     /// Keys for the piano roll; returns whether the key was used.
     fn roll_key(&mut self, key: &Key) -> bool {
-        if self.panel != PanelView::Clip || self.roll_drag.is_some() || self.mods.alt_key() {
+        if self.panel != PanelView::Clip || self.roll_drag.is_some() || self.mods.alt_key() || !self.panel_focus {
             return false;
         }
         let Some((_, _, notes, len)) = self.roll_target() else { return false };
@@ -1058,6 +1080,7 @@ impl App {
             }
             return;
         }
+        self.panel_focus = self.shell.is_some_and(|sl| sl.panel.contains(pt));
         if let Some(sl) = self.shell
             && sl.panel.contains(pt)
         {
@@ -1112,7 +1135,20 @@ impl App {
         }
         let Some(layout) = &self.layout else { return };
         match layout.hit(pt) {
-            Hit::Clip { clip, .. } => self.select_clip(clip),
+            Hit::Clip { placement, clip } => {
+                self.select_clip(clip);
+                self.arrange.selected_placement = Some(placement);
+                self.begin_clip_drag(placement, None);
+            }
+            Hit::ClipEdge { placement, clip, right } => {
+                self.select_clip(clip);
+                self.arrange.selected_placement = Some(placement);
+                self.begin_clip_drag(placement, Some(right));
+            }
+            Hit::Snap => self.arrange.snap = sat_ui::arrange::next_snap(self.arrange.snap),
+            Hit::Lane(t, at) if double && layout.row_at(pt.y).is_some_and(|r| r.kind == RowKind::Track) => {
+                self.draw_clip(t, at)
+            }
             Hit::Take { placement, clip, take, at } => {
                 self.select_clip(clip);
                 let doc = self.history.doc();
@@ -1159,7 +1195,151 @@ impl App {
                 let snapped = Ticks((t.0 / 960) * 960).max(Ticks::ZERO);
                 self.playback.locate(snapped);
             }
-            Hit::Lane(..) | Hit::Nothing => {}
+            Hit::Lane(..) | Hit::Nothing => self.arrange.selected_placement = None,
+        }
+    }
+
+    /// Starts moving a placement or, given an edge (`Some(right)`), trimming
+    /// it. Alt-dragging a clip's body drags a copy and leaves the original.
+    fn begin_clip_drag(&mut self, placement: PlacementId, edge: Option<bool>) {
+        let Some(p) = self.history.doc().placements.get(&placement).cloned() else { return };
+        let from = Span::of(&p);
+        let x = self.cursor.x;
+        if let Some(right) = edge {
+            self.history.begin_gesture("trim clip");
+            self.clip_drag = Some(ClipDrag::Trim { placement, from, x, right });
+            return;
+        }
+        let copy = self.mods.alt_key();
+        self.history.begin_gesture(if copy { "copy clip" } else { "move clip" });
+        self.clip_drag = Some(ClipDrag::Move { placement, from, x, copy });
+    }
+
+    fn clip_drag_to(&mut self) {
+        let Some(mut d) = self.clip_drag.clone() else { return };
+        if let ClipDrag::Move { placement, from, x, copy: true } = d {
+            if (self.cursor.x - x).abs() < 3.0 {
+                return;
+            }
+            let doc = self.history.doc();
+            let Some(p) = doc.placements.get(&placement) else { return };
+            let Some((clip, pid, ops)) = arrange_edit::copy_ops(doc, p, from) else { return };
+            self.edit("copy clip", ops);
+            self.select_clip(clip);
+            self.arrange.selected_placement = Some(pid);
+            d = ClipDrag::Move { placement: pid, from, x, copy: false };
+            self.clip_drag = Some(d.clone());
+        }
+        let Some(l) = self.layout.as_ref() else { return };
+        // alt trims off the grid (alt at the press already chose a copy for moves)
+        let snap = if self.mods.alt_key() && matches!(d, ClipDrag::Trim { .. }) { None } else { self.arrange.snap };
+        let doc = self.history.doc();
+        let (placement, span) = match d {
+            ClipDrag::Move { placement, from, x, .. } => {
+                let delta = l.tick_at(self.cursor.x).0 - l.tick_at(x).0;
+                (placement, arrange_edit::moved(from, delta, snap))
+            }
+            ClipDrag::Trim { placement, from, x, right } => {
+                let Some(clip) = doc.placements.get(&placement).and_then(|p| doc.clips.get(&p.clip)) else { return };
+                let delta = l.tick_at(self.cursor.x).0 - l.tick_at(x).0;
+                (placement, arrange_edit::trimmed(from, clip, right, delta, snap))
+            }
+        };
+        if doc.placements.get(&placement).is_some_and(|p| Span::of(p) != span) {
+            self.edit("clip", vec![span.op(placement)]);
+        }
+    }
+
+    /// Double-click on an empty lane: a new looping clip there, a bar (or one
+    /// snap step, if longer) long, fed by the track's first source module.
+    fn draw_clip(&mut self, track: TrackId, at: Ticks) {
+        let doc = self.history.doc();
+        let Some(tr) = doc.tracks.get(&track).filter(|t| t.kind == TrackKind::Track) else { return };
+        let bar = Ticks::quarters(4);
+        let step = self.arrange.snap.unwrap_or(Ticks::sixteenths(1)).0.max(1);
+        let start = Ticks(at.0 - at.0.rem_euclid(step));
+        let length = bar.max(self.arrange.snap.unwrap_or(bar));
+        let feed = tr.source_grid.and_then(|g| {
+            doc.modules_on(g).find(|m| sat_modules::ports(&m.kind).iter().any(|p| p.key == "notes" && !p.input))
+        });
+        let (id, pid) = (ClipId::new(), PlacementId::new());
+        let n = doc.clips_on(track).count();
+        let mut ops = vec![
+            Op::AddClip { id, track, name: format!("clip {}", n + 1), color: tr.color, length, looped: true, seed: 1 },
+            Op::AddPlacement { id: pid, clip: id, start, offset: Ticks::ZERO, length },
+        ];
+        if let Some(m) = feed {
+            ops.push(Op::Connect { id: CableId::new(), from: PortRef::new(m.id, "notes"), to: Endpoint::Inlet(id) });
+        }
+        self.edit("draw clip", ops);
+        self.select_clip(id);
+        self.arrange.selected_placement = Some(pid);
+        self.panel = PanelView::Clip;
+    }
+
+    /// Keys for the selected placement while the main view has focus:
+    /// delete, ctrl+d (a copy right after it), left / right (nudge by the
+    /// snap), ctrl+l (loop over it), escape (deselect).
+    fn arrange_key(&mut self, key: &Key) -> bool {
+        if self.panel_focus || self.view != MainView::Arrange || self.clip_drag.is_some() {
+            return false;
+        }
+        let doc = self.history.doc();
+        let Some(p) = self.arrange.selected_placement.and_then(|p| doc.placements.get(&p)).cloned() else {
+            return false;
+        };
+        let ctrl = self.mods.control_key() || self.mods.super_key();
+        let from = Span::of(&p);
+        let step = self.arrange.snap.unwrap_or(Ticks::sixteenths(1)).0;
+        match key {
+            Key::Named(NamedKey::Delete | NamedKey::Backspace) => {
+                let ops = arrange_edit::remove_ops(doc, p.id);
+                self.edit("delete clip", ops);
+                self.arrange.selected_placement = None;
+            }
+            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("d") => {
+                let to = Span { start: from.end(), ..from };
+                let Some((clip, pid, ops)) = arrange_edit::copy_ops(doc, &p, to) else { return true };
+                self.edit("duplicate clip", ops);
+                self.select_clip(clip);
+                self.arrange.selected_placement = Some(pid);
+            }
+            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("l") => {
+                let range = sat_doc::LoopRange { start: from.start, end: from.end(), enabled: true };
+                self.edit("loop to clip", vec![Op::SetLoop { range }]);
+            }
+            Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight) if !self.mods.alt_key() => {
+                let d = if matches!(key, Key::Named(NamedKey::ArrowLeft)) { -step } else { step };
+                let to = Span { start: Ticks((from.start.0 + d).max(0)), ..from };
+                if to != from {
+                    self.edit("nudge clip", vec![to.op(p.id)]);
+                }
+            }
+            Key::Named(NamedKey::Escape) => self.arrange.selected_placement = None,
+            _ => return false,
+        }
+        true
+    }
+
+    /// The pointer shape for what is under it: a resize arrow on clip edges.
+    fn update_cursor(&mut self) {
+        use winit::window::CursorIcon;
+        let icon = match &self.clip_drag {
+            Some(ClipDrag::Trim { .. }) => CursorIcon::EwResize,
+            Some(ClipDrag::Move { .. }) => CursorIcon::Grabbing,
+            None if self.view == MainView::Arrange && self.palette.is_none() => {
+                match self.layout.as_ref().map(|l| l.hit(self.cursor)) {
+                    Some(Hit::ClipEdge { .. }) => CursorIcon::EwResize,
+                    _ => CursorIcon::Default,
+                }
+            }
+            None => CursorIcon::Default,
+        };
+        if icon != self.cursor_icon {
+            self.cursor_icon = icon;
+            if let Some(g) = &self.gfx {
+                g.window.set_cursor(icon);
+            }
         }
     }
 
@@ -1743,6 +1923,9 @@ impl App {
         if self.grid_key(key) {
             return self.update_title();
         }
+        if self.arrange_key(key) {
+            return self.update_title();
+        }
         if self.roll_key(key) {
             return self.update_title();
         }
@@ -1882,8 +2065,11 @@ impl ApplicationHandler for App {
                 dirty = self.drag.is_some()
                     || self.roll_drag.is_some()
                     || self.grid_drag.is_some()
-                    || self.audio_drag.is_some();
+                    || self.audio_drag.is_some()
+                    || self.clip_drag.is_some();
                 self.drag_to();
+                self.clip_drag_to();
+                self.update_cursor();
                 self.audio_drag_to();
                 self.roll_drag_to();
                 self.grid_drag_to();
@@ -2014,6 +2200,9 @@ fn main() {
         grid_drag: None,
         audio_drag: None,
         audio_layout: None,
+        clip_drag: None,
+        panel_focus: false,
+        cursor_icon: winit::window::CursorIcon::Default,
         note_len: Ticks::sixteenths(1),
         last_click: None,
         last_frame: Instant::now(),

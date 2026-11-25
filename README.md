@@ -123,6 +123,10 @@ cargo run --release -p sat-app -- my.sat  # opens a project bundle
 | drop a `.sat` folder on the window | open it |
 | drop a `.wav` on the window | load it into the shown instrument grid's (or the selected track's) sampler, adding a sampler if there is none |
 | click a clip, the ruler, a group's chevron | edit it in the piano roll, move the playhead, fold the group |
+| arrange: drag a clip, drag its left or right edge | move it along its track, trim or extend it (a looping clip repeats, a one-shot stops at its ends); both snap to the toolbar's snap (1 bar, 1 beat, 1/16, off), Alt trims off the grid |
+| arrange: Alt-drag a clip, Ctrl+D | drag a copy (the original stays), put a copy right after it; a copy is a clip of its own playing the same notes or audio |
+| arrange: Delete, Left / Right, Ctrl+L, Esc | delete the selected clip (and the clip itself once nothing plays it), nudge it by the snap, loop over it, deselect |
+| arrange: double-click an empty lane | a new looping clip there, fed by the track's first source module |
 | piano roll: click empty space (draw tool) | draw a note; keep dragging to set its length |
 | piano roll: drag a note, its right edge, the velocity lane | move it (time and pitch), resize it, set velocity; the selection moves together |
 | piano roll: double-click a note, Delete, arrows, Ctrl+A, Esc | delete, delete the selection, nudge by the grid or transpose (Shift: octave), select all, clear |

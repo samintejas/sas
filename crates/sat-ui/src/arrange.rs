@@ -34,6 +34,30 @@ pub struct ArrangeState {
     pub selected_track: Option<TrackId>,
     /// Collapsed groups.
     pub collapsed: BTreeSet<TrackId>,
+    /// The selected placement (moved, trimmed, duplicated or deleted by keys).
+    pub selected_placement: Option<PlacementId>,
+    /// The grid clip edits snap to; `None` is off.
+    pub snap: Option<Ticks>,
+}
+
+/// The arrange snap settings the toolbar cycles through.
+pub const SNAPS: [Option<Ticks>; 4] = [Some(Ticks(PPQ * 4)), Some(Ticks(PPQ)), Some(Ticks(PPQ / 4)), None];
+
+/// The snap after `s` in [`SNAPS`].
+pub fn next_snap(s: Option<Ticks>) -> Option<Ticks> {
+    let i = SNAPS.iter().position(|x| *x == s).unwrap_or(0);
+    SNAPS[(i + 1) % SNAPS.len()]
+}
+
+/// How the toolbar names a snap setting.
+pub fn snap_label(s: Option<Ticks>) -> &'static str {
+    match s {
+        Some(t) if t.0 == PPQ * 4 => "1 bar",
+        Some(t) if t.0 == PPQ => "1 beat",
+        Some(t) if t.0 == PPQ / 4 => "1/16",
+        Some(_) => "grid",
+        None => "off",
+    }
 }
 
 impl Default for ArrangeState {
@@ -45,6 +69,8 @@ impl Default for ArrangeState {
             selected_clip: None,
             selected_track: None,
             collapsed: BTreeSet::new(),
+            selected_placement: None,
+            snap: Some(Ticks(PPQ * 4)),
         }
     }
 }
@@ -183,6 +209,17 @@ pub enum Hit {
         /// The fade out (else the fade in).
         out: bool,
     },
+    /// The left or right edge of a clip placement: drag to trim it.
+    ClipEdge {
+        /// The placement.
+        placement: PlacementId,
+        /// Its clip.
+        clip: ClipId,
+        /// The right edge (else the left).
+        right: bool,
+    },
+    /// The toolbar's snap button.
+    Snap,
     /// Empty timeline on a row, at a tick.
     Lane(TrackId, Ticks),
     /// The ruler, at a tick.
@@ -209,8 +246,20 @@ pub struct ArrangeLayout {
     pub clips: Vec<ClipBox>,
     /// Take lanes of visible audio clip placements.
     pub takes: Vec<TakeBox>,
+    /// The toolbar's snap button.
+    pub snap: Rect,
     origin: Ticks,
     px_per_tick: f64,
+}
+
+/// How close to a clip's edge a press trims it, in px.
+pub const EDGE_GRAB: f64 = 6.0;
+
+/// Where the toolbar's snap button is in an arrange tile at `bounds`.
+pub fn snap_button(bounds: Rect) -> Rect {
+    let ty = bounds.y0 + TOOLBAR_H / 2.0;
+    let x = bounds.x1 - 12.0 - 64.0;
+    Rect::new(x - 74.0, ty - 12.0, x - 8.0, ty + 12.0)
 }
 
 /// Height of the clip part of a track row.
@@ -287,6 +336,7 @@ impl ArrangeLayout {
             rows,
             clips: Vec::new(),
             takes: Vec::new(),
+            snap: snap_button(bounds),
             origin: st.origin,
             px_per_tick,
         };
@@ -351,8 +401,16 @@ impl ArrangeLayout {
         Ticks(self.origin.0 + ((x - self.timeline.x0) / self.px_per_tick).round() as i64)
     }
 
+    /// The row at screen height `y`.
+    pub fn row_at(&self, y: f64) -> Option<&Row> {
+        self.rows.iter().find(|r| y >= r.y && y < r.y + r.h)
+    }
+
     /// What is under `pt`.
     pub fn hit(&self, pt: Point) -> Hit {
+        if self.snap.contains(pt) {
+            return Hit::Snap;
+        }
         if self.ruler.contains(pt) {
             return Hit::Ruler(self.tick_at(pt.x));
         }
@@ -369,6 +427,14 @@ impl ArrangeLayout {
             }
         }
         if let Some(c) = self.clips.iter().rev().find(|c| c.rect.contains(pt)) {
+            // the outer few pixels of a clip trim it; a narrow clip keeps its middle to move it
+            let grab = (c.rect.width() / 4.0).min(EDGE_GRAB);
+            if pt.x <= c.rect.x0 + grab {
+                return Hit::ClipEdge { placement: c.placement, clip: c.clip, right: false };
+            }
+            if pt.x >= c.rect.x1 - grab {
+                return Hit::ClipEdge { placement: c.placement, clip: c.clip, right: true };
+            }
             return Hit::Clip { placement: c.placement, clip: c.clip };
         }
         if let Some(k) = self.takes.iter().rev().find(|k| k.rect.contains(pt)) {
@@ -543,10 +609,10 @@ pub fn draw(
         icons::draw(p, icon, r.inset(-7.0), c.text_primary);
         x -= 32.0;
     }
-    let snap = Rect::new(x - 74.0, ty - 12.0, x - 8.0, ty + 12.0);
+    let snap = l.snap;
     p.rrect(snap, 5.0, c.bg_control);
     p.rrect_stroke(snap.inset(-0.5), 5.0, 1.0, c.border_strong.alpha(0.6));
-    p.text(snap.x0 + 8.0, ty, "1 bar", &TextStyle::mono(12.0, c.text_strong), Align::Left);
+    p.text(snap.x0 + 8.0, ty, snap_label(st.snap), &TextStyle::mono(12.0, c.text_strong), Align::Left);
     icons::draw(p, Icon::ChevronDown, Rect::new(snap.x1 - 20.0, ty - 6.0, snap.x1 - 8.0, ty + 6.0), c.text_secondary);
     p.text(snap.x0 - 10.0, ty, "snap", &TextStyle::mono(12.0, c.text_secondary), Align::Right);
 
@@ -911,8 +977,26 @@ fn draw_clip(p: &mut Painter<'_>, th: &Theme, doc: &Document, st: &ArrangeState,
         }
     });
     p.rrect_stroke(r.inset(-0.5), 4.0, 1.0, col.alpha(0.7));
-    if st.selected_clip == Some(clip.id) {
-        p.rrect_stroke(r.inset(1.0), 5.0, 2.0, c.accent_primary);
+    draw_selection(p, th, st, cb);
+}
+
+/// Outlines the selected placement, with grips at its trim edges; other
+/// placements of the selected clip (which play the same clip) get a faint outline.
+fn draw_selection(p: &mut Painter<'_>, th: &Theme, st: &ArrangeState, cb: &ClipBox) {
+    let c = &th.c;
+    let r = cb.rect;
+    if st.selected_placement == Some(cb.placement) {
+        p.rrect_stroke(r.inset(1.0), 4.0, 2.0, c.accent_primary);
+        if r.width() > 24.0 {
+            let cy = r.center().y + 4.0;
+            for x in [r.x0 + 3.0, r.x1 - 5.0] {
+                p.rrect(Rect::new(x, cy - 7.0, x + 2.0, cy + 7.0), 1.0, c.accent_primary);
+            }
+        }
+    } else if st.selected_clip == Some(cb.clip) {
+        let w = if st.selected_placement.is_none() { 2.0 } else { 1.0 };
+        let a = if st.selected_placement.is_none() { 1.0 } else { 0.45 };
+        p.rrect_stroke(r.inset(1.0), 4.0, w, c.accent_primary.alpha(a));
     }
 }
 
@@ -1058,9 +1142,7 @@ fn draw_audio_clip(
         }
     });
     p.rrect_stroke(r.inset(-0.5), 3.0, 1.0, col.alpha(0.7));
-    if st.selected_clip == Some(clip.id) {
-        p.rrect_stroke(r.inset(1.0), 4.0, 2.0, c.accent_primary);
-    }
+    draw_selection(p, th, st, cb);
 }
 
 fn draw_take(
