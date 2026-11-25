@@ -2036,8 +2036,12 @@ impl App {
         self.grid.wire = None;
         match d {
             GridDrag::Module { .. } => self.history.end_gesture(),
+            // patching between ports (on a source grid: into a note processor's input)
             GridDrag::Wire { from, detach, .. }
-                if self.grid_layout.as_ref().is_some_and(|l| l.kind != GridKind::Source) =>
+                if self
+                    .grid_layout
+                    .as_ref()
+                    .is_some_and(|l| l.kind != GridKind::Source || l.input_near(self.cursor).is_some()) =>
             {
                 let target = self.grid_layout.as_ref().and_then(|l| l.input_near(self.cursor));
                 let doc = self.history.doc();

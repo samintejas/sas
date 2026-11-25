@@ -15,6 +15,7 @@ pub mod euclid;
 pub mod fx;
 pub mod instrument;
 pub mod macros;
+pub mod notefx;
 pub mod spec;
 pub mod turing;
 
@@ -79,6 +80,7 @@ pub fn ports(kind: &str) -> &'static [PortSpec] {
     match kind {
         PIANO_ROLL | DRUM_SEQ | EUCLID | TURING => &[NOTES_OUT],
         RECORDER => &[AUDIO_OUT],
+        k if notefx::is_processor(k) => notefx::ports(k),
         k if fx::is_fx(k) => fx::ports(k),
         _ => instrument::ports(kind),
     }
@@ -90,6 +92,7 @@ pub fn params_of(kind: &str) -> &'static [ParamSpec] {
         EUCLID => &euclid::PARAMS,
         TURING => &turing::PARAMS,
         RECORDER => &RECORDER_PARAMS,
+        k if notefx::is_processor(k) => notefx::params(k),
         k if fx::is_fx(k) => fx::params(k),
         _ => instrument::params(kind),
     }
@@ -109,13 +112,21 @@ pub fn catalogue(kind: GridKind) -> &'static [(&'static str, &'static str)] {
     }
 }
 
-/// Source modules that can be added to a source grid: kind and label.
-pub const SOURCES: [(&str, &str); 5] = [
+/// Source modules that can be added to a source grid: kind and label. The
+/// note processors (see [`notefx`]) come after the sources.
+pub const SOURCES: [(&str, &str); 12] = [
     (PIANO_ROLL, "piano roll"),
     (DRUM_SEQ, "drum seq"),
     (EUCLID, "euclid"),
     (TURING, "turing"),
     (RECORDER, "recorder"),
+    notefx::MODULES[0],
+    notefx::MODULES[1],
+    notefx::MODULES[2],
+    notefx::MODULES[3],
+    notefx::MODULES[4],
+    notefx::MODULES[5],
+    notefx::MODULES[6],
 ];
 
 /// The recorder on a track's source grid, if it has one.
@@ -238,11 +249,42 @@ pub fn generating(m: &Module) -> bool {
     is_generator(&m.kind) && m.params.get(FIXED).copied().unwrap_or(0.0) < 0.5
 }
 
+/// Do this module kind's parameters decide notes (a generator or a note
+/// processor)?
+pub fn makes_notes(kind: &str) -> bool {
+    is_generator(kind) || notefx::is_processor(kind)
+}
+
+/// The module whose notes a clip's editor edits: the module feeding the clip,
+/// or, when that is a chain of note processors, the module at its head
+/// (following each processor's first input).
+pub fn editing_source(doc: &Document, clip: ClipId) -> Option<ModuleId> {
+    let mut m = doc.inlet_cable(clip)?.from.module;
+    for _ in 0..MAX_CHAIN {
+        let kind = &doc.modules.get(&m)?.kind;
+        if !notefx::is_processor(kind) {
+            return Some(m);
+        }
+        let first = notefx::ports(kind).iter().find(|p| p.input)?.key;
+        m = upstream(doc, m, first)?;
+    }
+    None
+}
+
+/// Longest chain of note processors followed.
+const MAX_CHAIN: usize = 32;
+
+/// The module patched into `port` of `module`.
+fn upstream(doc: &Document, module: ModuleId, port: &str) -> Option<ModuleId> {
+    let to = Endpoint::Port(PortRef::new(module, port));
+    doc.cables.values().find(|k| k.to == to).map(|k| k.from.module)
+}
+
 /// Does changing `target` change notes (so the schedule must be recompiled
 /// rather than sent a parameter event)?
 pub fn shapes_notes(doc: &Document, target: &ParamTarget) -> bool {
     match target {
-        ParamTarget::Module { module, .. } => doc.modules.get(module).is_some_and(|m| is_generator(&m.kind)),
+        ParamTarget::Module { module, .. } => doc.modules.get(module).is_some_and(|m| makes_notes(&m.kind)),
         ParamTarget::Macro { grid, index } => macros::drives_notes(doc, *grid, *index),
         _ => false,
     }
@@ -266,11 +308,34 @@ pub fn seed_for(doc: &Document, module: ModuleId, clip: ClipId, cycle: u64) -> u
     turing::mix(doc.seed ^ turing::mix(c ^ ids) ^ turing::mix(cycle.wrapping_add(0x5eed)))
 }
 
-/// Does `module` play a new phrase each time round a looping clip?
+/// Does `module` play a new phrase each time round a looping clip? A note
+/// processor does when anything feeding it does, or when it rolls dice of its
+/// own (a random arp, random velocity).
 pub fn reseeds(doc: &Document, module: ModuleId) -> bool {
-    doc.modules
-        .get(&module)
-        .is_some_and(|m| generating(m) && m.kind == TURING && turing::Params::of(&macros::resolved(doc, m)).reseed)
+    reseeds_in(doc, module, 0)
+}
+
+fn reseeds_in(doc: &Document, module: ModuleId, depth: usize) -> bool {
+    let Some(m) = doc.modules.get(&module) else { return false };
+    if notefx::is_processor(&m.kind) {
+        if depth >= MAX_CHAIN {
+            return false;
+        }
+        let r = macros::resolved(doc, m);
+        let r = &r.params;
+        let dice = match m.kind.as_str() {
+            notefx::ARP => r.get("mode").is_some_and(|v| v.round() == 3.0),
+            notefx::VELOCITY => r.get("random").is_some_and(|v| *v > 0.0),
+            _ => false,
+        };
+        return dice
+            || notefx::ports(&m.kind)
+                .iter()
+                .filter(|p| p.input)
+                .filter_map(|p| upstream(doc, module, p.key))
+                .any(|u| reseeds_in(doc, u, depth + 1));
+    }
+    generating(m) && m.kind == TURING && turing::Params::of(&macros::resolved(doc, m)).reseed
 }
 
 /// The notes a module produces for a clip before hand edits: its generator's
@@ -282,7 +347,25 @@ pub fn base_notes(doc: &Document, module: ModuleId, clip: ClipId) -> Vec<Note> {
 /// [`base_notes`] for the `cycle`th time round a looping clip (only a
 /// generator that [`reseeds`] differs from cycle to cycle).
 pub fn base_notes_at(doc: &Document, module: ModuleId, clip: ClipId, cycle: u64) -> Vec<Note> {
+    base_in(doc, module, clip, cycle, 0)
+}
+
+fn base_in(doc: &Document, module: ModuleId, clip: ClipId, cycle: u64, depth: usize) -> Vec<Note> {
     let (Some(m), Some(c)) = (doc.modules.get(&module), doc.clips.get(&clip)) else { return Vec::new() };
+    if notefx::is_processor(&m.kind) {
+        if depth >= MAX_CHAIN {
+            return Vec::new();
+        }
+        let inputs: Vec<Vec<Note>> = notefx::ports(&m.kind)
+            .iter()
+            .filter(|p| p.input)
+            .map(|p| {
+                upstream(doc, module, p.key).map(|u| effective_in(doc, u, clip, cycle, depth + 1)).unwrap_or_default()
+            })
+            .collect();
+        let seed = seed_for(doc, module, clip, cycle);
+        return notefx::process(&macros::resolved(doc, m), &inputs, c.length, seed);
+    }
     if generating(m) {
         return match m.kind.as_str() {
             EUCLID => euclid::Params::of(&macros::resolved(doc, m)).generate(c.length),
@@ -347,7 +430,11 @@ pub fn effective_notes(doc: &Document, module: ModuleId, clip: ClipId) -> Vec<No
 
 /// [`effective_notes`] for the `cycle`th time round a looping clip.
 pub fn effective_notes_at(doc: &Document, module: ModuleId, clip: ClipId, cycle: u64) -> Vec<Note> {
-    let mut v = base_notes_at(doc, module, clip, cycle);
+    effective_in(doc, module, clip, cycle, 0)
+}
+
+fn effective_in(doc: &Document, module: ModuleId, clip: ClipId, cycle: u64, depth: usize) -> Vec<Note> {
+    let mut v = base_in(doc, module, clip, cycle, depth);
     if let Some(p) = doc.pattern(module, clip) {
         let o = &p.overrides;
         // a hand-added note replaces a generated one in the same slot
@@ -568,6 +655,43 @@ mod tests {
         assert_eq!(starts(&effective_notes(h.doc(), e, c)), vec![0, 4, 8, 12]);
         assert!(wire(h.doc(), e, c).is_empty(), "already wired");
         assert_eq!(h.doc().cables.len(), 1);
+    }
+
+    #[test]
+    fn note_processors_chain_between_a_source_and_its_clip() {
+        let (mut h, roll, c) = setup(PIANO_ROLL);
+        let grid = h.doc().modules[&roll].grid;
+        let note = step_note(Ticks::ZERO, Ticks::quarters(1), 60, 0.8);
+        h.apply("note", toggle_step(h.doc(), roll, c, note)).unwrap();
+        let (tr, op) = add_module(h.doc(), grid, notefx::TRANSPOSE, (0.0, 200.0));
+        h.apply("add", [op]).unwrap();
+        let (ch, op) = add_module(h.doc(), grid, notefx::CHORD, (0.0, 400.0));
+        h.apply("add", [op]).unwrap();
+        h.apply(
+            "semis",
+            [Op::SetValue { target: ParamTarget::Module { module: tr, param: "semis".into() }, value: 2.0 }],
+        )
+        .unwrap();
+        let pr = |m, k: &str| PortRef::new(m, k);
+        // roll -> transpose -> chord -> clip
+        let ops = patch(h.doc(), &pr(roll, "notes"), &pr(tr, "in"), None).unwrap();
+        h.apply("p1", ops).unwrap();
+        let ops = patch(h.doc(), &pr(tr, "notes"), &pr(ch, "in"), None).unwrap();
+        h.apply("p2", ops).unwrap();
+        h.apply("wire", wire(h.doc(), ch, c)).unwrap();
+        // a cable back into the head would loop
+        assert!(patch(h.doc(), &pr(ch, "notes"), &pr(tr, "in"), None).is_none());
+        let out: Vec<u8> = effective_notes(h.doc(), ch, c).iter().map(|n| n.pitch).collect();
+        assert_eq!(out, vec![62, 66, 69], "d major from a c two semitones up");
+        // the clip's editor edits the head of the chain
+        assert_eq!(editing_source(h.doc(), c), Some(roll));
+        assert!(shapes_notes(h.doc(), &ParamTarget::Module { module: tr, param: "semis".into() }));
+        assert!(!reseeds(h.doc(), ch));
+        // an unpatched processor plays nothing
+        h.apply("unplug", [Op::Disconnect { id: h.doc().cables.values().find(|k| k.from.module == roll).unwrap().id }])
+            .unwrap();
+        assert!(effective_notes(h.doc(), ch, c).is_empty());
+        assert_eq!(editing_source(h.doc(), c), None);
     }
 
     #[test]

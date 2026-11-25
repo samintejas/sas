@@ -125,9 +125,10 @@ impl StepGeom {
     }
 }
 
-/// The source module feeding `clip` and the editor it opens.
+/// The source module whose notes `clip`'s editor edits (see
+/// [`sat_modules::editing_source`]) and the editor it opens.
 pub fn source(doc: &Document, clip: ClipId) -> Option<(&Module, Editor)> {
-    let m = doc.modules.get(&doc.inlet_cable(clip)?.from.module)?;
+    let m = doc.modules.get(&sat_modules::editing_source(doc, clip)?)?;
     Some((m, sat_modules::editor_of(&m.kind)))
 }
 

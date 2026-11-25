@@ -16,6 +16,9 @@ project file end to end. Phase 3 (source grid) is done: notes are edited
 in the piano roll, the drum sequencer or the euclid generator (with hand edits
 over it) and heard while the set plays, and each track's source grid shows its
 modules and the clip dock, where cables decide which module feeds each clip.
+Note processors (transpose, scale, chord, arp, chance, velocity, merge) chain
+between a source and its clip: the clip plays the chain's output while its
+editor edits the notes at the head of the chain.
 Phase 4 (instrument + fx grids) is done: each track's instrument grid is a
 patchable voice (note in, vco, noise, mixer, filter, adsr, vca, lfo, voice out,
 ring mod, wavefolder, and control utilities: cv mix, attenuverter, quantizer,

@@ -205,7 +205,7 @@ fn rows_of(m: &Module) -> Vec<Option<&'static str>> {
     match m.kind.as_str() {
         sat_modules::EUCLID => EUCLID_ROWS.iter().map(|k| Some(*k)).collect(),
         sat_modules::TURING => TURING_ROWS.iter().map(|k| Some(*k)).collect(),
-        k if is_source(k) => vec![None],
+        k if is_source(k) && sat_modules::params_of(k).is_empty() => vec![None],
         k => sat_modules::params_of(k).iter().map(|s| Some(s.key)).collect(),
     }
 }
@@ -628,12 +628,21 @@ fn draw_tracks(p: &mut Painter<'_>, th: &Theme, doc: &Document, l: &GridLayout, 
 /// The clip a card previews: the selected clip if the module feeds it,
 /// otherwise the first clip it feeds.
 fn preview_clip(doc: &Document, m: ModuleId, selected: Option<ClipId>) -> Option<ClipId> {
-    let feeds: Vec<ClipId> = doc
-        .cables
-        .values()
-        .filter(|k| k.from.module == m)
-        .filter_map(|k| if let Endpoint::Inlet(c) = k.to { Some(c) } else { None })
-        .collect();
+    // clips this module feeds, directly or through note processors
+    let mut feeds: Vec<ClipId> = Vec::new();
+    let mut seen = vec![m];
+    let mut i = 0;
+    while i < seen.len() {
+        let from = seen[i];
+        for k in doc.cables.values().filter(|k| k.from.module == from) {
+            match &k.to {
+                Endpoint::Inlet(c) => feeds.push(*c),
+                Endpoint::Port(p) if !seen.contains(&p.module) => seen.push(p.module),
+                Endpoint::Port(_) => {}
+            }
+        }
+        i += 1;
+    }
     selected.filter(|s| feeds.contains(s)).or(feeds.first().copied())
 }
 
@@ -718,7 +727,7 @@ pub fn draw(
         l.canvas.x0 + 16.0,
         l.canvas.y1 - 16.0,
         if source {
-            "drag from an out port to a clip's inlet to wire it · drag a wire off an inlet to unplug it"
+            "drag from an out port to a clip's inlet or a note fx's in to wire it · drag a wire off to unplug it"
         } else if l.kind == GridKind::Fx {
             "+ module adds an effect before out · drag between ports to reroute · the power icon bypasses"
         } else {
@@ -991,7 +1000,13 @@ pub fn draw(
                 &TextStyle::mono(12.0, c.text_strong),
                 Align::Left,
             );
-            let what = if is_source(k) { "source" } else { "module" };
+            let what = if sat_modules::notefx::is_processor(k) {
+                "note fx"
+            } else if is_source(k) {
+                "source"
+            } else {
+                "module"
+            };
             p.text(r.x1 - 10.0, r.center().y, what, &TextStyle::mono(10.5, c.text_secondary), Align::Right);
         }
     }

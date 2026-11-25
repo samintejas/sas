@@ -78,7 +78,7 @@ pub fn learn(doc: &Document, module: ModuleId, key: &str) -> Option<(u8, Vec<Op>
 /// Does macro `index` of `grid` drive a parameter that shapes notes?
 pub fn drives_notes(doc: &Document, grid: GridId, index: u8) -> bool {
     doc.grids.get(&grid).and_then(|g| g.slots.get(&index)).is_some_and(|s| {
-        s.binds.iter().any(|b| doc.modules.get(&b.module).is_some_and(|m| crate::is_generator(&m.kind)))
+        s.binds.iter().any(|b| doc.modules.get(&b.module).is_some_and(|m| crate::makes_notes(&m.kind)))
     })
 }
 
