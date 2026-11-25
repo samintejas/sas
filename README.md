@@ -113,7 +113,7 @@ cargo run --release -p sat-app -- my.sat  # opens a project bundle
 | `[` / `]`, Alt+Up / Alt+Down | select the previous / next track; in a grid, show the previous / next track's grid of the same kind |
 | a grid's ‹ › buttons and source / instrument / fx tabs | step to a neighbouring track's grid, or switch to another of this track's grids |
 | a mixer strip's src / ins / fx buttons, double-click a strip, a track header or a session column header | open that track's grid (double-click opens a track's instrument, a bus's fx) |
-| click a mixer strip while a grid is shown | the grid follows to that track |
+| click a mixer strip, or a track in the list beside a grid, while a grid is shown | the grid follows to that track (its fx grid if it has none of that kind); the list's m / s buttons mute and solo |
 | Esc in a grid with nothing selected, or its back button | back to the arrangement or session it was opened from |
 | Tab, Shift+Tab, or the panel tabs | cycle the bottom panel through clip, mixer and macros |
 | drag a fader or knob | set level, pan or a send (Shift for fine steps, double-click to reset); one drag is one undo step |

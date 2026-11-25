@@ -1681,6 +1681,13 @@ impl App {
             GridHit::PrevTrack => self.step_track(false),
             GridHit::NextTrack => self.step_track(true),
             GridHit::Kind(kind) => self.open_grid(Some(l.track), kind),
+            GridHit::Track(t) => {
+                // the same kind of grid if the track has one, else its fx
+                let has = grid::grid_kinds(self.history.doc(), t).iter().any(|(k, _)| *k == l.kind);
+                self.open_grid(Some(t), if has { l.kind } else { GridKind::Fx });
+            }
+            GridHit::TrackMute(t) => self.toggle_flag(t, TrackFlag::Mute),
+            GridHit::TrackSolo(t) => self.toggle_flag(t, TrackFlag::Solo),
             GridHit::AddModule => self.grid.menu = !self.grid.menu,
             GridHit::MenuItem(kind) => {
                 let doc = self.history.doc();

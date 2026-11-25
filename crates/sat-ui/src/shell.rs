@@ -330,7 +330,7 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
         }
         MainView::Grid(g) => {
             p.clip(sl.arrange, |p| {
-                gl = grid::draw(p, th, f.doc, g, f.grid, f.arrange.selected_clip, f.sounds, sl.arrange)
+                gl = grid::draw(p, th, f.doc, g, f.grid, f.arrange.selected_clip, f.sounds, f.levels, sl.arrange)
             });
         }
         MainView::Arrange => {
