@@ -41,6 +41,8 @@ pub const MARGIN: f64 = 24.0;
 pub const EUCLID_ROWS: [&str; 5] = ["steps", "hits", "rot", "acc", "note"];
 /// Parameters shown on a turing card.
 pub const TURING_ROWS: [&str; 5] = ["steps", "change", "low", "range", "scale"];
+/// Parameters shown on a chord builder card.
+pub const CHORD_ROWS: [&str; 5] = ["key", "octave", "voicing", "rhythm", "strum"];
 
 /// What the grid view shows besides the document.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -244,6 +246,7 @@ fn rows_of(m: &Module) -> Vec<Option<&'static str>> {
     match m.kind.as_str() {
         sat_modules::EUCLID => EUCLID_ROWS.iter().map(|k| Some(*k)).collect(),
         sat_modules::TURING => TURING_ROWS.iter().map(|k| Some(*k)).collect(),
+        sat_modules::chords::CHORD_BUILDER => CHORD_ROWS.iter().map(|k| Some(*k)).collect(),
         k if is_source(k) && sat_modules::params_of(k).is_empty() => vec![None],
         k => sat_modules::params_of(k).iter().map(|s| Some(s.key)).collect(),
     }

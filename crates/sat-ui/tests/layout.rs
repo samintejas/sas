@@ -527,3 +527,49 @@ fn armed_tracks_show_a_monitor_switch() {
     let bass = d.doc.tracks.values().find(|t| t.name == "bass").unwrap().id;
     assert!(!l.rows.iter().find(|r| r.track == bass).unwrap().monitor);
 }
+
+mod chords {
+    use sat_doc::*;
+    use sat_modules::chords::Step;
+    use sat_ui::chords::{ChordHit, ChordView, fit_height, geometry};
+    use sat_ui::demo::demo;
+    use vello::kurbo::Rect;
+
+    fn panel() -> Rect {
+        Rect::new(4.0, 600.0, 1436.0, 600.0 + fit_height())
+    }
+
+    #[test]
+    fn pads_lane_and_tools_hit_where_laid_out() {
+        let d = demo();
+        let clip = d.doc.clips.values().find(|c| c.name == "chords").unwrap().id;
+        assert_eq!(sat_ui::steps::fit_height(&d.doc, clip), Some(fit_height()));
+        let g = geometry(&d.doc, Some(clip), panel(), &ChordView::default()).unwrap();
+        // seven triads, seven sevenths and seven borrowed chords
+        assert_eq!(g.pads.len(), 21);
+        assert_eq!(g.pad_for_key(0, 1), Some(Step::Degree(0, 3)));
+        assert_eq!(g.pad_for_key(1, 5), Some(Step::Degree(4, 4)));
+        assert!(g.pad_for_key(0, 8).is_none() && g.pad_for_key(0, 0).is_none());
+        let (s, _, r) = g.pads[9];
+        assert_eq!(g.hit(r.center()), ChordHit::Pad(s));
+        // the demo's progression: four chords a bar each, across the lane
+        assert_eq!(g.slots.len(), 4);
+        assert_eq!(g.hit(g.slots[2].center()), ChordHit::Slot(2));
+        assert!(g.slots.iter().all(|s| g.lane.contains(s.center())));
+        assert!(g.pads.iter().all(|(_, _, r)| r.y1 < g.lane.y0 && panel().contains(r.center())));
+        assert!(g.lane.y1 <= panel().y1);
+        assert_eq!(g.hit(g.knobs[7].1.center()), ChordHit::Knob("rhythm"));
+        // the selected chord's tools show only with a selection
+        assert!(!g.buttons.iter().any(|(h, _)| *h == ChordHit::Delete));
+        let g = geometry(&d.doc, Some(clip), panel(), &ChordView { selected: Some(1), ..Default::default() }).unwrap();
+        let del = g.buttons.iter().find(|(h, _)| *h == ChordHit::Delete).unwrap().1;
+        assert_eq!(g.hit(del.center()), ChordHit::Delete);
+        for h in [ChordHit::Apply, ChordHit::ToRoll, ChordHit::Clear, ChordHit::Write, ChordHit::Preset(1)] {
+            let r = g.buttons.iter().find(|(b, _)| *b == h).unwrap().1;
+            assert_eq!(g.hit(r.center()), h);
+        }
+        // no chord builder, no chord editor
+        let pads = d.doc.clips.values().find(|c| c.name == "pads").unwrap().id;
+        assert!(geometry(&d.doc, Some(pads), panel(), &ChordView::default()).is_none());
+    }
+}

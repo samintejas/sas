@@ -165,6 +165,7 @@ pub fn fit_height(doc: &Document, clip: ClipId) -> Option<f64> {
             12.0 + drum::rows(&notes).len().max(1) as f64 * FIT_ROW_H + 6.0
         }
         Editor::Euclid | Editor::Turing => FIT_CARD_H + 16.0,
+        Editor::Chords => return Some(crate::chords::fit_height()),
         Editor::PianoRoll => return None,
     };
     Some(TABS_H + TOOLS_H + body)
@@ -177,7 +178,7 @@ pub fn geometry(doc: &Document, clip: Option<ClipId>, r: Rect, view: &StepView) 
     let rate = match editor {
         Editor::Euclid | Editor::Turing => sat_modules::gen_steps(doc, m.id, clip.id)?.rate,
         Editor::Drums => DRUM_RATE,
-        Editor::PianoRoll => return None,
+        Editor::PianoRoll | Editor::Chords => return None,
     };
     let steps = ((clip.length.0 + rate.0 - 1) / rate.0).max(1) as usize;
     let npages = steps.div_ceil(PAGE);
@@ -250,7 +251,7 @@ pub fn geometry(doc: &Document, clip: Option<ClipId>, r: Rect, view: &StepView) 
                 g.cells.push(Cell { step: first + i, pitch, rect: Rect::new(*a, y0, *b, y0 + h) });
             }
         }
-        Editor::PianoRoll => {}
+        Editor::PianoRoll | Editor::Chords => {}
     }
     Some(g)
 }
@@ -407,7 +408,7 @@ pub fn draw(
                 }
             }
         }
-        Editor::PianoRoll => {}
+        Editor::PianoRoll | Editor::Chords => {}
     }
     Some(g)
 }

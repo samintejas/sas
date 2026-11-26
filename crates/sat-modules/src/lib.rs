@@ -10,6 +10,7 @@
 
 #![warn(missing_docs)]
 
+pub mod chords;
 pub mod drum;
 pub mod euclid;
 pub mod fx;
@@ -78,7 +79,7 @@ pub const NOTES_OUT: PortSpec = PortSpec { key: "notes", kind: PortKind::Notes, 
 /// The ports of a module kind.
 pub fn ports(kind: &str) -> &'static [PortSpec] {
     match kind {
-        PIANO_ROLL | DRUM_SEQ | EUCLID | TURING => &[NOTES_OUT],
+        PIANO_ROLL | DRUM_SEQ | EUCLID | TURING | chords::CHORD_BUILDER => &[NOTES_OUT],
         RECORDER => &[AUDIO_OUT],
         k if notefx::is_processor(k) => notefx::ports(k),
         k if fx::is_fx(k) => fx::ports(k),
@@ -91,6 +92,7 @@ pub fn params_of(kind: &str) -> &'static [ParamSpec] {
     match kind {
         EUCLID => &euclid::PARAMS,
         TURING => &turing::PARAMS,
+        chords::CHORD_BUILDER => &chords::PARAMS,
         RECORDER => &RECORDER_PARAMS,
         k if notefx::is_processor(k) => notefx::params(k),
         k if fx::is_fx(k) => fx::params(k),
@@ -114,11 +116,12 @@ pub fn catalogue(kind: GridKind) -> &'static [(&'static str, &'static str)] {
 
 /// Source modules that can be added to a source grid: kind and label. The
 /// note processors (see [`notefx`]) come after the sources.
-pub const SOURCES: [(&str, &str); 12] = [
+pub const SOURCES: [(&str, &str); 13] = [
     (PIANO_ROLL, "piano roll"),
     (DRUM_SEQ, "drum seq"),
     (EUCLID, "euclid"),
     (TURING, "turing"),
+    (chords::CHORD_BUILDER, "chord builder"),
     (RECORDER, "recorder"),
     notefx::MODULES[0],
     notefx::MODULES[1],
@@ -227,6 +230,8 @@ pub enum Editor {
     Euclid,
     /// The turing's knobs over its steps, each with its own pitch.
     Turing,
+    /// The chord builder: the key's chords to play and a progression lane.
+    Chords,
 }
 
 /// The editor for a module kind; unknown kinds open the piano roll.
@@ -235,13 +240,14 @@ pub fn editor_of(kind: &str) -> Editor {
         DRUM_SEQ => Editor::Drums,
         EUCLID => Editor::Euclid,
         TURING => Editor::Turing,
+        chords::CHORD_BUILDER => Editor::Chords,
         _ => Editor::PianoRoll,
     }
 }
 
 /// Does this module kind generate its notes from parameters?
 pub fn is_generator(kind: &str) -> bool {
-    kind == EUCLID || kind == TURING
+    kind == EUCLID || kind == TURING || kind == chords::CHORD_BUILDER
 }
 
 /// Is this module a generator that is currently generating (not baked)?
@@ -372,6 +378,9 @@ fn base_in(doc: &Document, module: ModuleId, clip: ClipId, cycle: u64, depth: us
             TURING => {
                 let p = turing::Params::of(&macros::resolved(doc, m));
                 p.generate(c.length, seed_for(doc, module, clip, if p.reseed { cycle } else { 0 }))
+            }
+            chords::CHORD_BUILDER => {
+                chords::generate(&chords::Params::in_doc(doc, m), &chords::progression(doc, module, clip), c.length)
             }
             _ => Vec::new(),
         };

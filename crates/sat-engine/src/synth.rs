@@ -50,6 +50,7 @@ struct Voice {
     env: f32,
     vel: f32,
     age: u64,
+    pitch: u8,
 }
 
 /// The synth node.
@@ -84,6 +85,7 @@ fn start(voices: &mut [Voice; VOICES], clock: &mut u64, e: &NoteEvent, sr: f64) 
         env: 0.0,
         vel: e.velocity,
         age: *clock,
+        pitch: e.pitch,
     };
 }
 
@@ -129,6 +131,20 @@ impl Synth {
         self.voices = old.voices;
         self.clock = old.clock;
         self.seq.adopt(&old.seq);
+    }
+
+    /// Starts (`on`) or releases a note played live, held until released.
+    pub(crate) fn live(&mut self, pitch: u8, velocity: f32, on: bool, sr: f64) {
+        if on {
+            let e = NoteEvent { at: 0, len: crate::LIVE_HOLD, pitch, velocity };
+            start(&mut self.voices, &mut self.clock, &e, sr);
+        } else {
+            for v in
+                self.voices.iter_mut().filter(|v| v.active && v.pitch == pitch && v.remaining > crate::LIVE_HOLD / 2)
+            {
+                v.remaining = -1;
+            }
+        }
     }
 
     pub(crate) fn release_all(&mut self) {

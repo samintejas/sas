@@ -138,6 +138,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         edited: false,
         roll: &RollView::default(),
         steps: &StepView::default(),
+        chords: &sat_ui::chords::ChordView {
+            selected: std::env::var("SAT_CHORD_SEL").ok().and_then(|v| v.parse().ok()),
+            held: std::env::var_os("SAT_CHORD_HELD").map(|_| sat_modules::chords::Step::Degree(5, 3)),
+            ..Default::default()
+        },
         view,
         grid: &sat_ui::grid::GridView { menu: std::env::var_os("SAT_GRID_MENU").is_some(), ..Default::default() },
         learn: false,

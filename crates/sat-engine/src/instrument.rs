@@ -333,6 +333,27 @@ impl Instrument {
         release(&mut self.engine);
         self.seq.invalidate();
     }
+
+    /// Starts (`on`) or releases a note played live, held until released.
+    pub(crate) fn live(&mut self, pitch: u8, velocity: f32, on: bool, sr: f64) {
+        if on {
+            let e = NoteEvent { at: 0, len: crate::LIVE_HOLD, pitch, velocity };
+            start(&mut self.engine, &mut self.clock, &e, sr as f32);
+            return;
+        }
+        match &mut self.engine {
+            Engine::Patch { patch, voices } => {
+                let p = pitch as f32 + patch.transpose();
+                for v in voices.iter_mut() {
+                    if v.active && v.pitch == p && v.remaining > crate::LIVE_HOLD / 2 {
+                        v.remaining = -1;
+                    }
+                }
+            }
+            Engine::Sampler(s) => s.release_live(pitch),
+            Engine::Drums { .. } => {}
+        }
+    }
 }
 
 /// Releases every held note.

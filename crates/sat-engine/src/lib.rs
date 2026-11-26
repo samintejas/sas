@@ -75,7 +75,23 @@ pub enum Command {
     /// Recording started or stopped (tracks monitoring on auto hear their
     /// input while recording).
     SetRecording(bool),
+    /// A note played live on an instrument node (from the chord builder's
+    /// pads or the computer keyboard): `on` starts it, held until the same
+    /// pitch is released; it sounds whether or not the transport plays.
+    Live {
+        /// The instrument node.
+        node: NodeId,
+        /// MIDI pitch.
+        pitch: u8,
+        /// Velocity 0–1.
+        velocity: f32,
+        /// Start (true) or release (false).
+        on: bool,
+    },
 }
+
+/// Gate length of a live note: long enough to hold until released.
+pub(crate) const LIVE_HOLD: i64 = i64::MAX / 4;
 
 /// Read-only engine state for the UI, updated every block.
 #[derive(Debug, Default)]
@@ -217,6 +233,9 @@ impl Engine {
                 }
                 Command::BackToArrangement => self.sched.back_to_arrangement(),
                 Command::SetRecording(on) => self.recording = on,
+                Command::Live { node, pitch, velocity, on } => {
+                    self.sched.live(node, pitch, velocity, on);
+                }
             }
         }
         if let Some(p) = self.pending_garbage.take()
@@ -350,5 +369,41 @@ mod monitor_tests {
         let (mut l, mut r) = (vec![1.0; 64], vec![1.0; 64]);
         e.process(&mut l, &mut r);
         assert!(l.iter().all(|x| *x == 0.0));
+    }
+}
+
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+
+    fn loud(e: &mut Engine) -> f32 {
+        let (mut l, mut r) = (vec![0.0; 256], vec![0.0; 256]);
+        e.process(&mut l, &mut r);
+        l.iter().fold(0.0f32, |a, x| a.max(x.abs()))
+    }
+
+    #[test]
+    fn live_notes_hold_until_released_while_stopped() {
+        let mut b = ScheduleBuilder::new(48_000.0, 256);
+        let s = NodeId(1);
+        b.node(s, NodeKind::Synth(Box::new(Synth::new(Vec::new(), Wave::Saw, 0.5))), vec![]);
+        let (mut e, mut h) = engine(b.build(s).unwrap(), 16);
+        assert_eq!(loud(&mut e), 0.0);
+        h.send(Command::Live { node: s, pitch: 60, velocity: 1.0, on: true }).unwrap();
+        h.send(Command::Live { node: s, pitch: 64, velocity: 1.0, on: true }).unwrap();
+        loud(&mut e);
+        // still sounding long after any sequenced note would have ended
+        for _ in 0..200 {
+            loud(&mut e);
+        }
+        assert!(loud(&mut e) > 0.05, "held");
+        h.send(Command::Live { node: s, pitch: 60, velocity: 0.0, on: false }).unwrap();
+        h.send(Command::Live { node: s, pitch: 64, velocity: 0.0, on: false }).unwrap();
+        for _ in 0..40 {
+            loud(&mut e);
+        }
+        assert!(loud(&mut e) < 1e-3, "released");
+        // a node that plays no notes ignores live notes
+        assert!(!e.sched.live(NodeId(99), 60, 1.0, true));
     }
 }

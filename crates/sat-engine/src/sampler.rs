@@ -133,6 +133,15 @@ impl Sampler {
         }
     }
 
+    /// Releases the live-held voices at `pitch`.
+    pub(crate) fn release_live(&mut self, pitch: u8) {
+        for v in self.voices.iter_mut() {
+            if v.active && v.pitch == pitch as f32 && v.remaining > crate::LIVE_HOLD / 2 {
+                v.remaining = -1;
+            }
+        }
+    }
+
     pub(crate) fn start(&mut self, pitch: u8, vel: f32, len: i64, clock: u64, sr: f32) {
         if self.sample.as_ref().is_none_or(|s| s.frames() == 0) {
             return;

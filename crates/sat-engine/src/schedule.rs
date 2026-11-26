@@ -481,6 +481,19 @@ impl Schedule {
         }
     }
 
+    /// Starts or releases a live note on an instrument node. Returns false
+    /// if the node does not play notes.
+    pub fn live(&mut self, id: NodeId, pitch: u8, velocity: f32, on: bool) -> bool {
+        let sr = self.sample_rate;
+        let Some(i) = self.index_of(id) else { return false };
+        match &mut self.nodes[i].kind {
+            NodeKind::Synth(s) => s.live(pitch, velocity, on, sr),
+            NodeKind::Instrument(s) => s.live(pitch, velocity, on, sr),
+            _ => return false,
+        }
+        true
+    }
+
     /// Hands every track back to the arrangement.
     pub(crate) fn back_to_arrangement(&mut self) {
         for n in &mut self.nodes {

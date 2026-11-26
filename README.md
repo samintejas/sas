@@ -19,6 +19,20 @@ modules and the clip dock, where cables decide which module feeds each clip.
 Note processors (transpose, scale, chord, arp, chance, velocity, merge) chain
 between a source and its clip: the clip plays the chain's output while its
 editor edits the notes at the head of the chain.
+The chord builder is a source that plays a chord progression in a key,
+like a chord-progression plugin: each clip holds its own progression,
+stored relative to the key (diatonic chords by scale degree, so they follow
+the scale; borrowed chords fixed), and the key is the project's or its own.
+Its editor shows the key's triads, sevenths and the chords borrowed from
+the parallel key as pads, sixteen common progressions to lay over the clip,
+and the progression as a lane of chords to select, invert, move an octave,
+lengthen or remove. Its knobs set octave, voicing (close, drop 2, drop 3,
+spread, open), voice leading, a bass note, the rhythm (held, pulsed,
+off-beat, charleston, push, arps), strum, gate, velocity and swing. A pad
+plays its chord live while held (and with write on, adds it or replaces the
+selected chord); keys 1 to 7 play the triads, with shift the sevenths and
+with alt the borrowed chords. "to piano roll" drops the clip's chords into
+a piano roll as notes and feeds the clip from it.
 Phase 4 (instrument + fx grids) is done: each track's instrument grid is a
 patchable voice (note in, vco, noise, mixer, filter, adsr, vca, lfo, voice out,
 ring mod, wavefolder, and control utilities: cv mix, attenuverter, quantizer,
