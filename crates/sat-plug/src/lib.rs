@@ -7,8 +7,13 @@
 //! host and waits for its output within a budget; a host that dies or
 //! hangs leaves its node silent and the rest of the set playing.
 //!
-//! Control (what the plugin is called, its parameters) comes back as one
-//! JSON line on the host's stdout when it has loaded the plugin.
+//! Control goes as JSON lines: the host says what the plugin is called and
+//! what parameters it has when it has loaded it, then answers commands on
+//! its stdin (save or load the plugin's state through a file) between
+//! blocks, one line each.
+//!
+//! Offline renders use a [`PlugHost::offline_processor`], which waits for
+//! each block as long as the plugin needs instead of dropping it.
 //!
 //! [`testplug`] is a crash-test plugin built into the host (as
 //! `builtin:crash-test`).
@@ -17,9 +22,9 @@ pub mod host;
 pub mod shm;
 pub mod testplug;
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
@@ -39,6 +44,25 @@ pub struct Hello {
     pub name: String,
     /// Its parameters, in order.
     pub params: Vec<ParamInfo>,
+}
+
+/// A command to a host, sent as one JSON line on its stdin.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Command {
+    /// Write the plugin's state to this file.
+    Save(String),
+    /// Give the plugin the state in this file.
+    Load(String),
+}
+
+/// A host's answer to a [`Command`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Reply {
+    /// Done.
+    pub ok: bool,
+    /// Why not.
+    pub error: Option<String>,
 }
 
 /// One plugin parameter.
@@ -76,10 +100,19 @@ pub const HANG_TIME: Duration = Duration::from_secs(1);
 /// How long a host may take to load its plugin.
 pub const LOAD_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long a host may take to answer a command.
+pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long an offline render waits for one block before giving up on the
+/// plugin (it is hung).
+pub const OFFLINE_BUDGET: Duration = Duration::from_secs(5);
+
 /// A running host process, owned by the app (not the audio thread).
 pub struct PlugHost {
     child: Child,
-    _stdin: Option<std::process::ChildStdin>,
+    stdin: Option<std::process::ChildStdin>,
+    /// Lines from the host's stdout.
+    lines: std::sync::mpsc::Receiver<String>,
     shm: Arc<Shm>,
     state: Arc<AtomicU8>,
     /// The heartbeat last seen, and when it last moved.
@@ -98,7 +131,7 @@ impl PlugHost {
         let name = format!("sat-plug-{}-{}.shm", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
         let path = std::env::temp_dir().join(name);
         let shm = Arc::new(Shm::create(&path, max_block, rate).map_err(|e| format!("shared memory: {e}"))?);
-        let mut child = Command::new(exe)
+        let mut child = std::process::Command::new(exe)
             .args(args)
             .arg(&path)
             .arg(plugin)
@@ -112,9 +145,12 @@ impl PlugHost {
         let stdin = child.stdin.take();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let mut line = String::new();
-            let _ = BufReader::new(out).read_line(&mut line);
-            let _ = tx.send(line);
+            for line in BufReader::new(out).lines() {
+                let Ok(line) = line else { break };
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
         });
         let line = match rx.recv_timeout(LOAD_TIMEOUT) {
             Ok(l) => l,
@@ -138,12 +174,54 @@ impl PlugHost {
         }
         shm.header().nparams.store(hello.params.len().min(MAX_PARAMS) as u32, Ordering::Relaxed);
         let beat = (shm.header().heartbeat.load(Ordering::Relaxed), Instant::now());
-        Ok(PlugHost { child, _stdin: stdin, shm, state: Arc::new(AtomicU8::new(RUNNING)), beat, hello })
+        Ok(PlugHost { child, stdin, lines: rx, shm, state: Arc::new(AtomicU8::new(RUNNING)), beat, hello })
     }
 
     /// A handle for the engine to process audio through this host.
     pub fn processor(&self) -> Processor {
-        Processor { shm: self.shm.clone(), state: self.state.clone(), sent: [f32::NAN; MAX_PARAMS], first: true }
+        Processor {
+            shm: self.shm.clone(),
+            state: self.state.clone(),
+            sent: [f32::NAN; MAX_PARAMS],
+            first: true,
+            offline: false,
+        }
+    }
+
+    /// A handle for offline renders: it waits up to [`OFFLINE_BUDGET`] for
+    /// each block, so a slow plugin is rendered, not dropped.
+    pub fn offline_processor(&self) -> Processor {
+        Processor { offline: true, ..self.processor() }
+    }
+
+    /// Sends `cmd` and waits for the answer.
+    fn command(&mut self, cmd: &Command) -> Result<(), String> {
+        if self.status() == Status::Crashed {
+            return Err(format!("{} has crashed", self.hello.name));
+        }
+        // an answer left over from a command that timed out
+        while self.lines.try_recv().is_ok() {}
+        let line = serde_json::to_string(cmd).map_err(|e| e.to_string())?;
+        let stdin = self.stdin.as_mut().ok_or("the host has no stdin")?;
+        writeln!(stdin, "{line}")
+            .and_then(|_| stdin.flush())
+            .map_err(|e| format!("the host stopped listening: {e}"))?;
+        let answer = self
+            .lines
+            .recv_timeout(COMMAND_TIMEOUT)
+            .map_err(|_| format!("{} did not answer within {} s", self.hello.name, COMMAND_TIMEOUT.as_secs()))?;
+        let reply: Reply = serde_json::from_str(answer.trim()).map_err(|e| format!("a garbled answer: {e}"))?;
+        if reply.ok { Ok(()) } else { Err(reply.error.unwrap_or_else(|| "the command failed".into())) }
+    }
+
+    /// Writes the plugin's state to `path`.
+    pub fn save_state(&mut self, path: &Path) -> Result<(), String> {
+        self.command(&Command::Save(path.to_string_lossy().into_owned()))
+    }
+
+    /// Gives the plugin the state saved in `path`.
+    pub fn load_state(&mut self, path: &Path) -> Result<(), String> {
+        self.command(&Command::Load(path.to_string_lossy().into_owned()))
     }
 
     /// How the host is doing: it crashed once its process ended, and hangs
@@ -197,11 +275,16 @@ pub struct Processor {
     state: Arc<AtomicU8>,
     sent: [f32; MAX_PARAMS],
     first: bool,
+    offline: bool,
 }
 
 impl Processor {
-    /// How long a block may take: half its own length, within 0.5–20 ms.
+    /// How long a block may take: half its own length, within 0.5–20 ms
+    /// (offline, [`OFFLINE_BUDGET`]).
     fn budget(&self, frames: usize) -> Duration {
+        if self.offline {
+            return OFFLINE_BUDGET;
+        }
         let secs = frames as f64 / self.shm.rate().max(1.0) * 0.5;
         Duration::from_secs_f64(secs.clamp(0.0005, 0.020))
     }
@@ -261,6 +344,8 @@ impl Processor {
                 spins += 1;
                 if spins < 4096 {
                     std::hint::spin_loop();
+                } else if self.offline {
+                    std::thread::sleep(Duration::from_micros(20));
                 } else {
                     std::thread::yield_now();
                 }
@@ -282,6 +367,12 @@ impl sat_engine::External for Processor {
     }
 
     fn boxed_clone(&self) -> Box<dyn sat_engine::External> {
-        Box::new(Processor { shm: self.shm.clone(), state: self.state.clone(), sent: self.sent, first: true })
+        Box::new(Processor {
+            shm: self.shm.clone(),
+            state: self.state.clone(),
+            sent: self.sent,
+            first: true,
+            offline: self.offline,
+        })
     }
 }

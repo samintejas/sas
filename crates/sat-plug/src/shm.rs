@@ -83,6 +83,10 @@ impl Shm {
         h.max_block.store(max_block as u32, Ordering::Relaxed);
         h.rate.store((rate as f32).to_bits(), Ordering::Relaxed);
         h.version.store(VERSION, Ordering::Relaxed);
+        // NaN: never sent, so the plugin keeps its own value
+        for v in &h.params {
+            v.store(f32::NAN.to_bits(), Ordering::Relaxed);
+        }
         h.magic.store(MAGIC, Ordering::Release);
         Ok(shm)
     }

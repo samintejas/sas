@@ -1,6 +1,8 @@
 //! The host process side: loads one CLAP plugin, reports what it is on
 //! stdout (one JSON line), then runs it on blocks from the shared-memory
-//! region until asked to quit or the engine goes away.
+//! region until asked to quit or the engine goes away. Between blocks it
+//! answers commands that come as JSON lines on stdin (saving and loading
+//! the plugin's state), one JSON line on stdout each.
 
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::path::Path;
@@ -15,14 +17,16 @@ use clap_sys::events::{
     clap_output_events,
 };
 use clap_sys::ext::params::{CLAP_EXT_PARAMS, clap_param_info, clap_plugin_params};
+use clap_sys::ext::state::{CLAP_EXT_STATE, clap_plugin_state};
 use clap_sys::factory::plugin_factory::{CLAP_PLUGIN_FACTORY_ID, clap_plugin_factory};
 use clap_sys::host::clap_host;
 use clap_sys::plugin::clap_plugin;
 use clap_sys::process::clap_process;
+use clap_sys::stream::{clap_istream, clap_ostream};
 use clap_sys::version::CLAP_VERSION;
 
 use crate::shm::{MAX_PARAMS, Shm};
-use crate::{Hello, ParamInfo};
+use crate::{Command, Hello, ParamInfo, Reply};
 
 static ORPHANED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -45,27 +49,56 @@ pub fn main(args: Vec<String>) -> i32 {
         Ok(l) => l,
         Err(e) => return fail(&e),
     };
-    // the app holds our stdin open; when it closes (the app quit or
-    // crashed) there is nobody left to play for
-    std::thread::spawn(|| {
-        let mut sink = Vec::new();
-        let _ = std::io::Read::read_to_end(&mut std::io::stdin(), &mut sink);
+    // commands come on stdin; when it closes (the app quit or crashed)
+    // there is nobody left to play for
+    let (tx, commands) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::BufRead::lines(std::io::stdin().lock()) {
+            let Ok(line) = line else { break };
+            let cmd = serde_json::from_str::<Command>(line.trim()).map_err(|e| e.to_string());
+            if tx.send(cmd).is_err() {
+                break;
+            }
+        }
         ORPHANED.store(true, Ordering::Relaxed);
     });
     let hello = Hello { ok: true, error: None, name: loaded.name.clone(), params: loaded.params.clone() };
-    println!("{}", serde_json::to_string(&hello).unwrap_or_default());
-    run(&shm, loaded);
+    say(&hello);
+    run(&shm, loaded, &commands);
     0
 }
 
+/// Writes one JSON line to stdout, at once.
+fn say<T: serde::Serialize>(msg: &T) {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "{}", serde_json::to_string(msg).unwrap_or_default());
+    let _ = out.flush();
+}
+
+/// Carries out a command between blocks.
+fn obey(p: &mut Loaded, cmd: Result<Command, String>) -> Reply {
+    let res = cmd.and_then(|cmd| match cmd {
+        // SAFETY: between blocks, on the thread that runs the plugin.
+        Command::Save(path) => unsafe { p.save_state() }
+            .and_then(|bytes| std::fs::write(&path, bytes).map_err(|e| format!("cannot write {path}: {e}"))),
+        Command::Load(path) => std::fs::read(&path)
+            .map_err(|e| format!("cannot read {path}: {e}"))
+            .and_then(|bytes| unsafe { p.load_state(&bytes) }),
+    });
+    match res {
+        Ok(()) => Reply { ok: true, error: None },
+        Err(e) => Reply { ok: false, error: Some(e) },
+    }
+}
+
 fn fail(e: &str) -> i32 {
-    let hello = Hello { ok: false, error: Some(e.into()), name: String::new(), params: Vec::new() };
-    println!("{}", serde_json::to_string(&hello).unwrap_or_default());
+    say(&Hello { ok: false, error: Some(e.into()), name: String::new(), params: Vec::new() });
     1
 }
 
 /// The block loop: wait for a request, process it, answer.
-fn run(shm: &Shm, mut p: Loaded) {
+fn run(shm: &Shm, mut p: Loaded, commands: &std::sync::mpsc::Receiver<Result<Command, String>>) {
     let h = shm.header();
     // from `done`, not `req`: the engine may send a block before this starts
     let mut last = h.done.load(Ordering::Acquire);
@@ -79,6 +112,11 @@ fn run(shm: &Shm, mut p: Loaded) {
         }
         let req = h.req.load(Ordering::Acquire);
         if req == last {
+            if let Ok(cmd) = commands.try_recv() {
+                let reply = obey(&mut p, cmd);
+                say(&reply);
+                continue;
+            }
             // spin briefly, then yield, then nap while nothing is playing
             let waited = idle.elapsed();
             if waited < Duration::from_micros(200) {
@@ -98,7 +136,8 @@ fn run(shm: &Shm, mut p: Loaded) {
             let n = (h.nparams.load(Ordering::Relaxed) as usize).min(p.params.len()).min(MAX_PARAMS);
             for (i, v) in values.iter_mut().enumerate().take(n) {
                 let x = f32::from_bits(h.params[i].load(Ordering::Relaxed));
-                if x != *v {
+                // NaN: the engine has not sent this one
+                if !x.is_nan() && x.to_bits() != v.to_bits() {
                     *v = x;
                     // the engine sends 0–1; the plugin wants its own range
                     let info = &p.params[i];
@@ -176,6 +215,34 @@ unsafe extern "C" fn events_get(list: *const clap_input_events, i: u32) -> *cons
 
 unsafe extern "C" fn events_push(_list: *const clap_output_events, _e: *const clap_event_header) -> bool {
     true
+}
+
+unsafe extern "C" fn stream_write(stream: *const clap_ostream, buffer: *const c_void, size: u64) -> i64 {
+    // SAFETY: ctx is the Vec save_state passed in, and the plugin gives
+    // `size` readable bytes.
+    unsafe {
+        let out = &mut *((*stream).ctx as *mut Vec<u8>);
+        out.extend_from_slice(std::slice::from_raw_parts(buffer as *const u8, size as usize));
+    }
+    size as i64
+}
+
+/// A saved state being read back.
+struct Reader<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
+
+unsafe extern "C" fn stream_read(stream: *const clap_istream, buffer: *mut c_void, size: u64) -> i64 {
+    // SAFETY: ctx is the Reader load_state passed in, and the plugin gives
+    // room for `size` bytes.
+    unsafe {
+        let r = &mut *((*stream).ctx as *mut Reader);
+        let n = (size as usize).min(r.bytes.len() - r.at);
+        ptr::copy_nonoverlapping(r.bytes[r.at..].as_ptr(), buffer as *mut u8, n);
+        r.at += n;
+        n as i64
+    }
 }
 
 /// A loaded, active plugin.
@@ -307,6 +374,57 @@ impl Loaded {
             }
         }
         self.steady += frames as i64;
+    }
+
+    /// The plugin's state extension, if it has one.
+    ///
+    /// # Safety
+    /// The plugin must be live.
+    unsafe fn state_ext(&self) -> Option<&'static clap_plugin_state> {
+        // SAFETY: per the caller; an extension lives as long as the plugin.
+        unsafe {
+            let ext = (*self.plugin).get_extension.map_or(ptr::null(), |g| g(self.plugin, CLAP_EXT_STATE.as_ptr()))
+                as *const clap_plugin_state;
+            ext.as_ref()
+        }
+    }
+
+    /// The plugin's state, as it saves it.
+    ///
+    /// # Safety
+    /// Between blocks, on the thread that runs the plugin.
+    unsafe fn save_state(&mut self) -> Result<Vec<u8>, String> {
+        // SAFETY: per the caller.
+        let Some(save) = unsafe { self.state_ext() }.and_then(|e| e.save) else {
+            return Err(format!("{} has no state to save", self.name));
+        };
+        let mut bytes: Vec<u8> = Vec::new();
+        let stream = clap_ostream { ctx: &mut bytes as *mut _ as *mut c_void, write: Some(stream_write) };
+        // SAFETY: a live plugin and a stream valid for the call.
+        if unsafe { save(self.plugin, &stream) } {
+            Ok(bytes)
+        } else {
+            Err(format!("{} could not save its state", self.name))
+        }
+    }
+
+    /// Gives the plugin a state it saved.
+    ///
+    /// # Safety
+    /// As [`Loaded::save_state`].
+    unsafe fn load_state(&mut self, bytes: &[u8]) -> Result<(), String> {
+        // SAFETY: per the caller.
+        let Some(load) = unsafe { self.state_ext() }.and_then(|e| e.load) else {
+            return Err(format!("{} cannot load a state", self.name));
+        };
+        let mut reader = Reader { bytes, at: 0 };
+        let stream = clap_istream { ctx: &mut reader as *mut _ as *mut c_void, read: Some(stream_read) };
+        // SAFETY: a live plugin and a stream valid for the call.
+        if unsafe { load(self.plugin, &stream) } {
+            Ok(())
+        } else {
+            Err(format!("{} rejected the saved state", self.name))
+        }
     }
 
     /// Stops, deactivates and destroys the plugin.

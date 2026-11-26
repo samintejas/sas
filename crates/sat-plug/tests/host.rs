@@ -121,3 +121,38 @@ fn dropping_the_host_ends_the_process_and_removes_the_region() {
     drop(h);
     assert!(!path.exists());
 }
+
+#[test]
+fn state_saves_and_loads_through_a_file() {
+    let path = std::env::temp_dir().join(format!("sat-plug-state-{}.bin", std::process::id()));
+    let mut a = host();
+    let mut p = a.processor();
+    let (mut l, mut r) = (vec![1.0f32; BLOCK], vec![1.0f32; BLOCK]);
+    assert!(run_ok(&mut p, &mut l, &mut r, &params(-12.0, 0.0)));
+    a.save_state(&path).expect("saves");
+    drop(a);
+    // a fresh host at its defaults (0 dB) takes the saved -12 dB back; no
+    // knobs are sent, so the gain heard is the state's
+    let mut b = host();
+    b.load_state(&path).expect("loads");
+    let mut p = b.processor();
+    let (mut l, mut r) = (vec![1.0f32; BLOCK], vec![1.0f32; BLOCK]);
+    assert!(run_ok(&mut p, &mut l, &mut r, &[]));
+    assert!((l[50] - 0.251_189).abs() < 1e-4, "{}", l[50]);
+    // a state that is not one is refused, and the host plays on
+    std::fs::write(&path, b"no").unwrap();
+    assert!(b.load_state(&path).is_err());
+    assert!(b.load_state(Path::new("/nonexistent/state")).is_err());
+    assert!(run_ok(&mut p, &mut l, &mut r, &[]));
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn an_offline_processor_waits_for_a_slow_block() {
+    let h = host();
+    let mut p = h.offline_processor();
+    // offline, the very first block after loading is never dropped
+    let (mut l, mut r) = (vec![1.0f32; BLOCK], vec![1.0f32; BLOCK]);
+    assert!(p.run(&mut l, &mut r, &params(6.0, 0.0)));
+    assert!((l[0] - 1.995_262).abs() < 1e-4);
+}
