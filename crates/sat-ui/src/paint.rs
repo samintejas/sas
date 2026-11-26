@@ -140,6 +140,14 @@ impl Painter<'_> {
         self.scene.fill(Fill::NonZero, Affine::IDENTITY, color(c), None, &RoundedRect::from_rect(r, radius));
     }
 
+    /// A 1 px outline just inside `r`.
+    pub fn rect_stroke_px(&mut self, r: Rect, c: Rgba) {
+        self.hline(r.x0, r.x1, r.y0 + 0.5, c);
+        self.hline(r.x0, r.x1, r.y1 - 0.5, c);
+        self.vline(r.x0 + 0.5, r.y0, r.y1, c);
+        self.vline(r.x1 - 0.5, r.y0, r.y1, c);
+    }
+
     /// Strokes a rounded rectangle inside `r` (pixel-aligned for 1 px lines).
     pub fn rrect_stroke(&mut self, r: Rect, radius: f64, width: f64, c: Rgba) {
         if c.a == 0 {

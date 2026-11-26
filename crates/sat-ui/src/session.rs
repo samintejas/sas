@@ -316,25 +316,25 @@ pub fn draw(
     p.clip(cells, |p| {
         // empty columns past the last track; the first adds one
         for (i, h) in l.ghost_cols.iter().enumerate() {
-            p.rrect(*h, 4.0, c.bg_surface.alpha(0.7));
+            p.rrect(*h, 1.0, c.bg_surface.alpha(0.7));
             if i == 0 {
                 let hy = h.center().y - 1.0;
                 icons::draw(p, Icon::Plus, Rect::new(h.x0 + 8.0, hy - 5.0, h.x0 + 18.0, hy + 5.0), c.text_secondary);
                 p.text(h.x0 + 26.0, hy, "track", &small, Align::Left);
             }
             for (_, row) in &l.scenes {
-                p.rrect(Rect::new(h.x0, row.y0, h.x1, row.y1), 3.0, ghost_cell);
+                p.rrect(Rect::new(h.x0, row.y0, h.x1, row.y1), 1.0, ghost_cell);
             }
             for row in &l.ghost_rows {
-                p.rrect(Rect::new(h.x0, row.y0, h.x1, row.y1), 3.0, ghost_cell);
+                p.rrect(Rect::new(h.x0, row.y0, h.x1, row.y1), 1.0, ghost_cell);
             }
-            p.rrect(Rect::new(h.x0, l.stop_row.0, h.x1, l.stop_row.1), 3.0, ghost_cell);
+            p.rrect(Rect::new(h.x0, l.stop_row.0, h.x1, l.stop_row.1), 1.0, ghost_cell);
         }
         for col in &l.cols {
             let tr = &doc.tracks[&col.track];
             let tcol = th.track(tr.color.0);
             // header
-            p.rrect(col.head, 4.0, c.bg_surface);
+            p.rrect(col.head, 1.0, c.bg_surface);
             p.rect(Rect::new(col.head.x0, col.head.y1 - 3.0, col.head.x1, col.head.y1), tcol);
             p.text_fit(col.head.x0 + 8.0, col.head.center().y - 1.0, &tr.name, &label, COL_W - 50.0);
             if col.group {
@@ -345,7 +345,7 @@ pub fn draw(
                 let cell = l.cell(col, *row);
                 if col.group {
                     // a summary of its tracks' clips in this scene
-                    p.rrect(cell, 3.0, c.bg_surface.alpha(0.6));
+                    p.rrect(cell, 1.0, c.bg_surface.alpha(0.6));
                     let kids: Vec<TrackId> = tracks_of(doc, col.track);
                     let n = kids.len().max(1) as f64;
                     let w = (cell.width() - 30.0) / n;
@@ -371,9 +371,9 @@ pub fn draw(
                         let playing = view.playing.get(&col.track) == Some(&clip.id);
                         let queued = view.queued.get(&col.track).is_some_and(|(q, _)| *q == Some(clip.id));
                         let sel = selected_clip == Some(clip.id);
-                        p.rrect(cell, 3.0, if playing { ccol.alpha(0.85) } else { ccol.alpha(0.28) });
+                        p.rrect(cell, 1.0, if playing { ccol.alpha(0.85) } else { ccol.alpha(0.28) });
                         let play_r = Rect::new(cell.x0, cell.y0, cell.x0 + PLAY_W, cell.y1);
-                        p.rrect(play_r, 3.0, Rgba::new(0, 0, 0, if playing { 60 } else { 40 }));
+                        p.rrect(play_r, 1.0, Rgba::new(0, 0, 0, if playing { 60 } else { 40 }));
                         let tri = Rect::new(
                             play_r.center().x - 5.0,
                             cell.center().y - 5.0,
@@ -417,11 +417,11 @@ pub fn draw(
                             );
                         }
                         if sel {
-                            p.rrect_stroke(cell.inset(-0.5), 3.0, 1.5, c.text_max);
+                            p.rrect_stroke(cell.inset(-0.5), 1.0, 1.5, c.text_max);
                         }
                     }
                     None => {
-                        p.rrect(cell, 3.0, c.bg_surface.alpha(0.45));
+                        p.rrect(cell, 1.0, c.bg_surface.alpha(0.45));
                         // empty slots stop the track
                         let sq = Rect::new(
                             cell.center().x - 3.5,
@@ -435,13 +435,13 @@ pub fn draw(
             }
             // empty rows under the scenes
             for row in &l.ghost_rows {
-                p.rrect(l.cell(col, *row), 3.0, ghost_cell);
+                p.rrect(l.cell(col, *row), 1.0, ghost_cell);
             }
             // stop button
             let stop = Rect::new(col.head.x0, l.stop_row.0, col.head.x1, l.stop_row.1);
             let stopping =
                 tracks_of(doc, col.track).iter().any(|t| view.queued.get(t).is_some_and(|(q, _)| q.is_none()));
-            p.rrect(stop, 3.0, c.bg_surface.alpha(0.6));
+            p.rrect(stop, 1.0, c.bg_surface.alpha(0.6));
             let sq =
                 Rect::new(stop.center().x - 4.5, stop.center().y - 4.5, stop.center().x + 4.5, stop.center().y + 4.5);
             let any_playing = tracks_of(doc, col.track).iter().any(|t| view.playing.contains_key(t));
@@ -462,7 +462,7 @@ pub fn draw(
         let clips: Vec<(TrackId, ClipId)> =
             l.cols.iter().filter_map(|col| doc.slots.get(&(*id, col.track)).map(|c| (col.track, *c))).collect();
         let on = !clips.is_empty() && clips.iter().all(|(t, c)| view.playing.get(t) == Some(c));
-        p.rrect(*cell, 3.0, if on { c.bg_control } else { c.bg_surface });
+        p.rrect(*cell, 1.0, if on { c.bg_control } else { c.bg_surface });
         let tri = Rect::new(cell.x0 + 8.0, cell.center().y - 5.0, cell.x0 + 18.0, cell.center().y + 5.0);
         icons::draw(p, Icon::Play, tri, if on { c.accent_primary } else { c.text_secondary });
         p.text_fit(cell.x0 + 28.0, cell.center().y, scene, &label, SCENE_W - 52.0);
@@ -470,7 +470,7 @@ pub fn draw(
     }
     // empty scene rows; the first adds a scene
     for (i, cell) in l.ghost_rows.iter().enumerate() {
-        p.rrect(*cell, 3.0, c.bg_surface.alpha(0.7));
+        p.rrect(*cell, 1.0, c.bg_surface.alpha(0.7));
         let gy = cell.center().y;
         if i == 0 {
             icons::draw(p, Icon::Plus, Rect::new(cell.x0 + 8.0, gy - 5.0, cell.x0 + 18.0, gy + 5.0), c.text_secondary);
@@ -479,7 +479,7 @@ pub fn draw(
         let n = (l.scenes.len() + i + 1).to_string();
         p.text(cell.x1 - 8.0, gy, &n, &TextStyle::mono(11.0, c.text_secondary.alpha(0.45)), Align::Right);
     }
-    p.rrect(l.stop_all, 3.0, c.bg_surface);
+    p.rrect(l.stop_all, 1.0, c.bg_surface);
     let sq =
         Rect::new(l.stop_all.x0 + 9.0, l.stop_all.center().y - 4.0, l.stop_all.x0 + 17.0, l.stop_all.center().y + 4.0);
     p.rect(sq, c.text_secondary);

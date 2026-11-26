@@ -1345,6 +1345,13 @@ impl App {
         if let Some((target, ty, _)) = shell::strip_buttons(&sl).into_iter().find(|(_, _, r)| r.contains(pt)) {
             return self.press_strip(sl, target, ty);
         }
+        // the status bar's detail-view selector: what the bottom panel shows
+        if sl.status.contains(pt) {
+            if let Some((v, _)) = shell::status_tabs(&sl).into_iter().find(|(_, r)| r.contains(pt)) {
+                return self.press_strip(sl, shell::StripTarget::Panel, v.editor());
+            }
+            return;
+        }
         let slot = sl.slot_at(pt);
         if let Some(s) = slot {
             self.focus = s;

@@ -204,7 +204,7 @@ pub fn draw_card(p: &mut Painter<'_>, th: &Theme, doc: &Document, clip: ClipId, 
     let col = th.track(cl.color.0);
     let u = uses(doc, clip);
     let faded = if u.unused() { 0.55 } else { 1.0 };
-    p.rrect(r, 4.0, col.mix(Rgba::hex(0x111111), 0.16));
+    p.rrect(r, 1.0, col.mix(Rgba::hex(0x111111), 0.16));
     p.clip(r, |p| {
         p.rect(Rect::new(r.x0, r.y0, r.x1, r.y0 + 16.0), col.alpha(faded));
         p.text_fit(
@@ -240,7 +240,7 @@ pub fn draw_card(p: &mut Painter<'_>, th: &Theme, doc: &Document, clip: ClipId, 
         p.text(r.x0 + 6.0, r.y1 - 7.0, &uses_label(u), &TextStyle::mono(9.5, ucol), Align::Left);
         p.text(r.x1 - 6.0, r.y1 - 7.0, &format!("{bars}b"), &TextStyle::mono(9.5, c.text_secondary), Align::Right);
     });
-    p.rrect_stroke(r.inset(-0.5), 4.0, 1.0, col.alpha(0.6 * faded));
+    p.rrect_stroke(r.inset(-0.5), 1.0, 1.0, col.alpha(0.6 * faded));
     if selected {
         p.rrect_stroke(r.inset(1.0), 5.0, 2.0, c.accent_primary);
     }

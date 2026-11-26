@@ -302,8 +302,8 @@ fn draw_body(p: &mut Painter<'_>, th: &Theme, doc: &Document, l: &MacroLayout, l
     for s in &l.sections {
         let g = &doc.grids[&s.grid];
         let col = kind_color(g.kind);
-        p.rrect(s.rect, 6.0, c.bg_base);
-        p.rrect_stroke(s.rect.inset(-0.5), 6.0, 1.0, c.border_default);
+        p.rect(s.rect, c.bg_base);
+        p.rect_stroke_px(s.rect, c.border_subtle);
         let hy = s.rect.y0 + 22.0;
         disclosure(p, Point::new(s.rect.x0 + 16.0, hy), s.folded, col);
         let title = match g.kind {
@@ -363,8 +363,8 @@ fn draw_body(p: &mut Painter<'_>, th: &Theme, doc: &Document, l: &MacroLayout, l
     }
     // track: fader and pan
     let tc = l.track_card;
-    p.rrect(tc, 6.0, c.bg_base);
-    p.rrect_stroke(tc.inset(-0.5), 6.0, 1.0, c.border_default);
+    p.rect(tc, c.bg_base);
+    p.rect_stroke_px(tc, c.border_subtle);
     let hy = tc.y0 + 22.0;
     let track_folded = l.fader.width() == 0.0;
     disclosure(p, Point::new(tc.x0 + 16.0, hy), track_folded, c.text_secondary);

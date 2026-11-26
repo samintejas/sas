@@ -188,6 +188,7 @@ the app: the device's rate).
 | outliner: chevron, m / s, click, double-click | fold a group (the arrangement folds with it), mute / solo, select, open the track |
 | browser: click the search field and type, enter, double-click or + | filter, add the first match / the item to the selected track (into the grid where it belongs) or add a track |
 | top bar: folder, gear, undo / redo, pulse | show the browser, open settings (also ctrl ,), undo / redo, audio settings |
+| status bar: clip / mixer (right end) | show that editor in the bottom panel, or collapse it when it already shows |
 | session: + scene, + track | add a scene or a track in the empty rows and columns |
 | a section heading in the inspector or a track heading in the clip bank | fold it away or back |
 | Ctrl+= / Ctrl+- / Ctrl+0 | interface scale up / down / back to 90% (a window opens a little under the display's scale so more fits) |

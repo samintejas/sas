@@ -21,7 +21,7 @@ use crate::paint::{Painter, TextStyle};
 use crate::panel::TABS_H;
 
 /// Gap between docked areas; the resize handles sit in it.
-pub const GAP: f64 = 4.0;
+pub const GAP: f64 = 2.0;
 /// How far either side of a gap a press grabs its handle.
 pub const GRAB: f64 = 3.0;
 /// Narrowest a sidebar can be; dragged below `SIDE_CLOSE` it closes.
@@ -439,11 +439,11 @@ mod tests {
         let mut d = Dock::default();
         d.drag(Handle::Left, Point::new(400.0, 300.0), 1440.0, 900.0);
         assert!(d.left_open);
-        assert_eq!(d.left_w, 396.0);
+        assert_eq!(d.left_w, 400.0 - GAP);
         d.drag(Handle::Left, Point::new(60.0, 300.0), 1440.0, 900.0);
         assert!(!d.left_open, "dragged narrow, it closes");
-        assert_eq!(d.left_w, 396.0, "and remembers its width");
-        d.drag(Handle::Panel, Point::new(500.0, 900.0 - 4.0 - 400.0), 1440.0, 900.0);
+        assert_eq!(d.left_w, 400.0 - GAP, "and remembers its width");
+        d.drag(Handle::Panel, Point::new(500.0, 900.0 - GAP - 400.0), 1440.0, 900.0);
         assert_eq!(d.panel_h, 400.0);
         d.drag(Handle::Panel, Point::new(500.0, 100.0), 1440.0, 900.0);
         assert_eq!(d.panel_h, 900.0 - crate::shell::TOPBAR_H - MAIN_MIN, "the main view keeps some room");

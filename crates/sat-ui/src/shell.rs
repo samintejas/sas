@@ -19,9 +19,9 @@ use crate::piano_roll::{self, RollGeom, RollView};
 use crate::steps::{self, StepGeom, StepView};
 
 /// Height of the top bar.
-pub const TOPBAR_H: f64 = 34.0;
+pub const TOPBAR_H: f64 = 30.0;
 /// Width of the icon strips at the window's left and right edges.
-pub const STRIP_W: f64 = 32.0;
+pub const STRIP_W: f64 = 0.0;
 /// Height of the status bar along the bottom.
 pub const STATUS_H: f64 = 22.0;
 
@@ -39,6 +39,10 @@ pub enum StripTarget {
 /// The left strip opens editors in the left sidebar and, at its foot, the
 /// bottom panel; the right strip opens editors in the right sidebar.
 pub fn strip_buttons(sl: &ShellLayout) -> Vec<(StripTarget, EditorType, Rect)> {
+    if sl.strip_left.width() < 8.0 {
+        // the control bar and status bar carry these now
+        return Vec::new();
+    }
     let b = |r: Rect, k: f64, from_bottom: bool| {
         let y = if from_bottom { r.y1 - 6.0 - (k + 1.0) * 30.0 } else { r.y0 + 6.0 + k * 30.0 };
         Rect::new(r.x0 + 4.0, y, r.x1 - 4.0, y + 26.0)
@@ -97,18 +101,38 @@ pub enum TopButton {
     Settings,
 }
 
+/// Height of a control in the control bar.
+const CTRL_H: f64 = 22.0;
+
+fn ctrl(cy: f64, x0: f64, x1: f64) -> Rect {
+    Rect::new(x0, cy - CTRL_H / 2.0, x1, cy + CTRL_H / 2.0)
+}
+
+/// The control bar's tempo and metre fields.
+pub fn fields(topbar: Rect) -> (Rect, Rect) {
+    let cy = topbar.center().y;
+    let x = topbar.x0 + 40.0;
+    (ctrl(cy, x, x + 74.0), ctrl(cy, x + 78.0, x + 124.0))
+}
+
+/// The control bar's position and loop-length fields.
+pub fn transport_fields(topbar: Rect) -> (Rect, Rect) {
+    let cy = topbar.center().y;
+    let m = topbar.center().x;
+    (ctrl(cy, m - 170.0, m - 72.0), ctrl(cy, m + 54.0, m + 116.0))
+}
+
 /// Where the top bar's other buttons are.
 pub fn top_buttons(topbar: Rect) -> [(TopButton, Rect); 5] {
     let cy = topbar.center().y;
-    let x = topbar.x0 + topbar.width() / 2.0 - 260.0 + 136.0 + 14.0 + 344.0;
-    let at = |x1: f64| Rect::new(x1 - 26.0, cy - 12.0, x1, cy + 12.0);
-    let rx = topbar.x1 - 8.0;
+    let rx = topbar.x1 - 6.0;
+    let metre = fields(topbar).1;
     [
-        (TopButton::Browser, Rect::new(topbar.x0 + 6.0, cy - 12.0, topbar.x0 + 32.0, cy + 12.0)),
-        (TopButton::Engine, Rect::new(x + 12.0, cy - 12.0, x + 36.0, cy + 12.0)),
-        (TopButton::Undo, at(rx - 68.0)),
-        (TopButton::Redo, at(rx - 34.0)),
-        (TopButton::Settings, at(rx)),
+        (TopButton::Browser, ctrl(cy, topbar.x0 + 6.0, topbar.x0 + 32.0)),
+        (TopButton::Engine, ctrl(cy, metre.x1 + 4.0, metre.x1 + 30.0)),
+        (TopButton::Undo, ctrl(cy, rx - 78.0, rx - 52.0)),
+        (TopButton::Redo, ctrl(cy, rx - 52.0, rx - 26.0)),
+        (TopButton::Settings, ctrl(cy, rx - 26.0, rx)),
     ]
 }
 
@@ -129,22 +153,24 @@ pub enum TransportButton {
 pub fn transport_buttons(topbar: Rect) -> [(TransportButton, Rect); 4] {
     use TransportButton::*;
     let cy = topbar.center().y;
-    let x0 = topbar.x0 + topbar.width() / 2.0 - 260.0;
-    let mut k = 0.0;
-    [Stop, Play, Record, Loop].map(|b| {
-        let x = x0 + 33.0 * k;
-        k += 1.0;
-        (b, Rect::new(x + 5.0, cy - 10.0, x + 29.0, cy + 10.0))
-    })
+    let m = topbar.center().x;
+    [
+        (Stop, ctrl(cy, m - 38.0, m - 12.0)),
+        (Play, ctrl(cy, m - 66.0, m - 40.0)),
+        (Record, ctrl(cy, m - 10.0, m + 16.0)),
+        (Loop, ctrl(cy, m + 24.0, m + 50.0)),
+    ]
 }
 
-/// Where the top bar's view buttons are.
+/// Where the top bar's view buttons are: session and arrange, then the
+/// selected track's three grids.
 pub fn view_buttons(topbar: Rect) -> [(ViewButton, Rect); 5] {
     use ViewButton::*;
-    let mut x = 160.0;
+    let cy = topbar.center().y;
+    let mut x = dock_buttons(topbar)[0].1.x0 - 12.0 - 5.0 * 26.0 - 6.0;
     [Session, Arrange, SourceGrid, Instrument, Fx].map(|b| {
-        let r = Rect::new(x, topbar.y0, x + 40.0, topbar.y1);
-        x += if b == Arrange { 52.0 } else { 40.0 };
+        let r = ctrl(cy, x, x + 26.0);
+        x += if b == Arrange { 32.0 } else { 26.0 };
         (b, r)
     })
 }
@@ -155,21 +181,20 @@ pub type DragClip = (sat_doc::ClipId, vello::kurbo::Point, Option<(Rect, bool)>)
 
 /// The top bar's layout toggles: left sidebar, bottom panel, right sidebar.
 pub fn dock_buttons(topbar: Rect) -> [(DockButton, Rect); 3] {
-    let rx = topbar.x1 - 12.0 - 3.0 * 34.0 - 10.0;
     let cy = topbar.center().y;
+    let x1 = top_buttons(topbar)[2].1.x0 - 12.0;
     let mut k = 3.0;
     [DockButton::Left, DockButton::Panel, DockButton::Right].map(|b| {
-        let x1 = rx - (k - 1.0) * 28.0;
+        let x = x1 - k * 26.0;
         k -= 1.0;
-        (b, Rect::new(x1 - 24.0, cy - 11.0, x1, cy + 11.0))
+        (b, ctrl(cy, x, x + 26.0))
     })
 }
 
 /// The top bar's search box, which opens the command palette.
 pub fn search_box(topbar: Rect) -> Rect {
-    let rx = dock_buttons(topbar)[0].1.x0 - 10.0;
-    let cy = topbar.center().y;
-    Rect::new(rx - 72.0, cy - 11.0, rx, cy + 11.0)
+    let x1 = view_buttons(topbar)[0].1.x0 - 12.0;
+    ctrl(topbar.center().y, x1 - 92.0, x1)
 }
 
 /// Everything the shell needs to draw a frame.
@@ -398,53 +423,97 @@ pub fn format_pos(doc: &Document, t: Ticks) -> String {
     format!("{:03}.{:02}.{:02}", bb.bar + 1, bb.beat + 1, bb.tick.0 / (PPQ / 4) + 1)
 }
 
-fn display(p: &mut Painter<'_>, th: &Theme, x: f64, cy: f64, label: &str, value: &str, w: f64) -> f64 {
-    let c = &th.c;
-    p.text(x, cy - 6.5, label, &TextStyle::mono(9.5, c.text_secondary), Align::Left);
-    p.text(x, cy + 6.0, value, &TextStyle::mono(12.5, c.accent_primary).medium(), Align::Left);
-    w
-}
-
-fn icon_button(p: &mut Painter<'_>, th: &Theme, r: Rect, icon: Icon, state: Option<Rgba>) {
-    match state {
-        Some(c) if c == th.c.accent_primary => {
-            p.rrect(r, 5.0, c);
-            icons::draw(p, icon, r.inset(-6.0), th.c.on_accent_primary);
-        }
-        Some(c) => {
-            p.rrect(r, 5.0, c.alpha(0.16));
-            p.rrect_stroke(r.inset(-0.5), 5.0, 1.0, c.alpha(0.5));
-            icons::draw(p, icon, r.inset(-6.0), c);
-        }
-        None => {
-            p.rrect(r, 5.0, th.c.bg_control);
-            p.rrect_stroke(r.inset(-0.5), 5.0, 1.0, th.c.border_default);
-            icons::draw(p, icon, r.inset(-6.0), th.c.text_strong);
-        }
-    }
-}
-
-fn topbar(p: &mut Painter<'_>, th: &Theme, f: &Frame<'_>, r: Rect) {
+/// A value field in the control bar: an inset box with the value, a dim
+/// unit after it.
+fn field(p: &mut Painter<'_>, th: &Theme, r: Rect, value: &str, unit: &str, lit: bool) {
     let c = &th.c;
     p.rect(r, c.bg_base);
-    p.hline(r.x0, r.x1, r.y1 - 1.0, c.border_default);
+    p.rect_stroke_px(r, c.border_subtle);
+    let col = if lit { c.accent_primary } else { c.text_max };
+    let st = TextStyle::mono(11.5, col);
+    if unit.is_empty() {
+        p.text(r.center().x, r.center().y, value, &st, Align::Center);
+    } else {
+        let us = TextStyle::sans(10.0, c.text_secondary);
+        let uw = p.text(r.x1 - 6.0, r.center().y, unit, &us, Align::Right);
+        p.text(r.x1 - 10.0 - uw, r.center().y, value, &st, Align::Right);
+    }
+}
+
+/// A flat control-bar button: lit with the accent when on, a step lighter
+/// under the pointer.
+fn bar_button(p: &mut Painter<'_>, th: &Theme, r: Rect, icon: Icon, on: Option<Rgba>, hover: bool) {
+    let c = &th.c;
+    let ink = match on {
+        Some(col) => {
+            p.rect(r, col.alpha(0.2));
+            col
+        }
+        None if hover => {
+            p.rect(r, c.bg_control);
+            c.text_max
+        }
+        None => c.text_strong,
+    };
+    icons::draw(p, icon, Rect::from_center_size(r.center(), (13.0, 13.0)), ink);
+}
+
+/// The control bar, in the manner of Live's: the browser and tempo on the
+/// left, the transport in the middle, the views, layout and edits on the
+/// right. Flat, one row, no frames around groups.
+fn topbar(p: &mut Painter<'_>, th: &Theme, f: &Frame<'_>, r: Rect) {
+    let c = &th.c;
+    p.rect(r, c.bg_surface);
+    p.hline(r.x0, r.x1, r.y1 - 1.0, c.bg_base);
     let cy = r.center().y;
+    let hover = |b: Rect| b.contains(f.pointer);
+    let sep = |p: &mut Painter<'_>, x: f64| p.vline(x, cy - 8.0, cy + 8.0, c.border_default);
     let tops = top_buttons(r);
     let browsing = f.dock.side_open(Side::Left) && f.dock.side_shows(Side::Left) == EditorType::Browser;
-    if browsing {
-        p.rrect(tops[0].1, 5.0, c.bg_raised);
+    bar_button(p, th, tops[0].1, Icon::Folder, browsing.then_some(c.accent_primary), hover(tops[0].1));
+    // tempo and metre
+    let t = &f.transport;
+    let bpm = f.doc.tempo_map().map(|m| m.bpm_at(t.playhead)).unwrap_or(120.0);
+    let sig = f.doc.meter_map().map(|m| m.sig_at(t.playhead)).unwrap_or(sat_doc::sat_time::TimeSig::FOUR_FOUR);
+    let (tempo, metre) = fields(r);
+    field(p, th, tempo, &format!("{bpm:.2}"), "bpm", false);
+    field(p, th, metre, &format!("{} / {}", sig.num, sig.den), "", false);
+    bar_button(p, th, tops[1].1, Icon::Pulse, None, hover(tops[1].1));
+    sep(p, tops[1].1.x1 + 8.0);
+    // transport: position, play, stop, record, loop, loop length
+    let (pos, looplen) = transport_fields(r);
+    field(p, th, pos, &format_pos(f.doc, t.playhead), "", t.playing);
+    let lp = f.doc.loop_range;
+    for (b, br) in transport_buttons(r) {
+        let (ic, on) = match b {
+            TransportButton::Play => (Icon::Play, t.playing.then_some(c.accent_success)),
+            TransportButton::Stop => (Icon::Stop, None),
+            TransportButton::Record => (Icon::Record, t.recording.then_some(c.accent_danger)),
+            TransportButton::Loop => (Icon::Loop, lp.enabled.then_some(c.accent_primary)),
+        };
+        if b == TransportButton::Record && on.is_none() {
+            if hover(br) {
+                p.rect(br, c.bg_control);
+            }
+            icons::draw(p, ic, Rect::from_center_size(br.center(), (13.0, 13.0)), c.accent_danger.alpha(0.8));
+        } else {
+            bar_button(p, th, br, ic, on, hover(br));
+        }
     }
-    let hover = |b: Rect| b.contains(f.pointer);
-    if hover(tops[0].1) && !browsing {
-        p.rrect(tops[0].1, 5.0, c.bg_control);
-    }
-    let col = if browsing { c.accent_primary } else { c.text_primary };
-    icons::draw(p, Icon::Folder, Rect::from_center_size(tops[0].1.center(), (15.0, 15.0)), col);
-    p.text(44.0, cy, "sat", &TextStyle::sans(15.0, c.text_max).medium(), Align::Left);
-    let nw = p.text(76.0, cy, f.name, &TextStyle::sans(13.0, c.text_secondary), Align::Left);
-    if f.edited {
-        p.circle(vello::kurbo::Point::new(76.0 + nw + 8.0, cy), 3.0, c.text_secondary);
-    }
+    let bars = f.doc.meter_map().map_or(0.0, |m| {
+        let a = m.bar_beat(lp.start);
+        let b = m.bar_beat(lp.end);
+        (b.bar - a.bar) as f64
+    });
+    let len = if bars >= 1.0 { format!("{bars:.0}") } else { "-".into() };
+    field(p, th, looplen, &len, "bars", lp.enabled);
+    // right: search, views, layout, edits, settings
+    let search = search_box(r);
+    p.rect(search, c.bg_base);
+    p.rect_stroke_px(search, c.border_subtle);
+    icons::draw(p, Icon::Search, Rect::new(search.x0 + 7.0, cy - 5.5, search.x0 + 18.0, cy + 5.5), c.text_secondary);
+    let k = if cfg!(target_os = "macos") { "cmd k" } else { "ctrl k" };
+    p.text(search.x1 - 7.0, cy, k, &TextStyle::mono(10.0, c.text_secondary), Align::Right);
     let active = match f.view {
         MainView::Arrange => ViewButton::Arrange,
         MainView::Session => ViewButton::Session,
@@ -454,60 +523,35 @@ fn topbar(p: &mut Painter<'_>, th: &Theme, f: &Frame<'_>, r: Rect) {
             _ => ViewButton::SourceGrid,
         },
     };
-    let icons = [Icon::Grid, Icon::Lines, Icon::Panel, Icon::Gear, Icon::Sliders];
-    for ((b, br), ic) in view_buttons(r).into_iter().zip(icons) {
-        let on = b == active;
-        icons::draw(p, ic, br.inset(-12.0), if on { c.text_max } else { c.text_secondary });
-        if on {
-            p.rect(Rect::new(br.x0 + 4.0, r.y1 - 2.0, br.x1 - 4.0, r.y1), c.accent_primary);
-        }
+    let views = view_buttons(r);
+    sep(p, views[0].1.x0 - 6.0);
+    for (b, br) in views {
+        let ty = match b {
+            ViewButton::Session => EditorType::Session,
+            ViewButton::Arrange => EditorType::Arrange,
+            ViewButton::SourceGrid => EditorType::SourceGrid,
+            ViewButton::Instrument => EditorType::InstrumentGrid,
+            ViewButton::Fx => EditorType::FxGrid,
+        };
+        bar_button(p, th, br, ty.icon(), (b == active).then_some(c.accent_primary), hover(br));
         if b == ViewButton::Arrange {
-            p.vline(br.x1 + 6.0, cy - 9.0, cy + 9.0, c.border_default);
+            sep(p, br.x1 + 3.0);
         }
     }
-    // transport
-    let w = r.width();
-    let mut x = w / 2.0 - 260.0;
-    let group = Rect::new(x, cy - 13.0, x + 136.0, cy + 13.0);
-    p.rrect(group, 6.0, c.bg_surface);
-    p.rrect_stroke(group.inset(-0.5), 6.0, 1.0, c.border_default);
-    let t = &f.transport;
-    let buttons = [
-        (Icon::Stop, None),
-        (Icon::Play, Some(c.accent_primary)),
-        (Icon::Record, t.recording.then_some(c.accent_danger)),
-        (Icon::Loop, f.doc.loop_range.enabled.then_some(Rgba::hex(0xc8c8c8))),
-    ];
-    for ((ic, state), (_, br)) in buttons.into_iter().zip(transport_buttons(r)) {
-        match (ic, state) {
-            (Icon::Record, s) => {
-                p.rrect(br, 5.0, if s.is_some() { c.accent_danger.alpha(0.18) } else { Rgba::new(0, 0, 0, 0) });
-                icons::draw(p, ic, br.inset(-5.0), c.accent_danger);
-            }
-            (Icon::Stop, _) => {
-                p.rrect(br, 5.0, c.bg_control);
-                icons::draw(p, ic, br.inset(-6.0), c.text_max);
-            }
-            (_, s) => icon_button(p, th, br, ic, s),
+    let docks = dock_buttons(r);
+    sep(p, docks[0].1.x0 - 6.0);
+    for (b, br) in docks {
+        let on = match b {
+            DockButton::Left => f.dock.side_open(Side::Left),
+            DockButton::Right => f.dock.side_open(Side::Right),
+            DockButton::Panel => f.dock.zoom != Some(Zoom::Main) && f.dock.panel_open,
+        };
+        if hover(br) {
+            p.rect(br, c.bg_control);
         }
-        x += 33.0;
+        dock::draw_glyph(p, b, br.inset(-2.0), on, if on { c.text_strong } else { c.text_secondary });
     }
-    x += 14.0;
-    let bpm = f.doc.tempo_map().map(|m| m.bpm_at(t.playhead)).unwrap_or(120.0);
-    let sig = f.doc.meter_map().map(|m| m.sig_at(t.playhead)).unwrap_or(sat_doc::sat_time::TimeSig::FOUR_FOUR);
-    let panel = Rect::new(x, cy - 14.0, x + 344.0, cy + 14.0);
-    p.rrect(panel, 6.0, c.bg_surface);
-    p.rrect_stroke(panel.inset(-0.5), 6.0, 1.0, c.border_default);
-    let mut dx = x + 10.0;
-    dx += display(p, th, dx, cy, "pos", &format_pos(f.doc, t.playhead), 96.0);
-    p.vline(dx - 6.0, cy - 10.0, cy + 10.0, c.border_default);
-    dx += display(p, th, dx, cy, "bpm", &format!("{bpm:.2}"), 90.0);
-    p.vline(dx - 6.0, cy - 10.0, cy + 10.0, c.border_default);
-    dx += display(p, th, dx, cy, "sig", &format!("{}/{}", sig.num, sig.den), 62.0);
-    p.vline(dx - 6.0, cy - 10.0, cy + 10.0, c.border_default);
-    display(p, th, dx, cy, "loop", if f.doc.loop_range.enabled { "on" } else { "off" }, 60.0);
-    icon_button(p, th, tops[1].1, Icon::Pulse, None);
-    // right side: undo, redo, settings
+    sep(p, tops[2].1.x0 - 6.0);
     for (b, br) in &tops[2..] {
         let ic = match b {
             TopButton::Undo => Icon::Undo,
@@ -515,40 +559,16 @@ fn topbar(p: &mut Painter<'_>, th: &Theme, f: &Frame<'_>, r: Rect) {
             _ => Icon::Gear,
         };
         let open = *b == TopButton::Settings && f.settings.is_some();
-        if open {
-            p.rrect(*br, 5.0, c.bg_raised);
-        } else if hover(*br) {
-            p.rrect(*br, 5.0, c.bg_control);
-        }
-        let col = if open || hover(*br) { c.text_max } else { c.text_secondary };
-        icons::draw(p, ic, Rect::from_center_size(br.center(), (16.0, 16.0)), col);
+        bar_button(p, th, *br, ic, open.then_some(c.accent_primary), hover(*br));
     }
-    for (b, br) in dock_buttons(r) {
-        let on = match b {
-            DockButton::Left => f.dock.side_open(Side::Left),
-            DockButton::Right => f.dock.side_open(Side::Right),
-            DockButton::Panel => f.dock.zoom != Some(Zoom::Main) && f.dock.panel_open,
-        };
-        dock::draw_glyph(p, b, br, on, if on { c.text_strong } else { c.text_secondary });
-    }
-    let search = search_box(r);
-    p.rrect(search, 5.0, c.bg_control);
-    p.rrect_stroke(search.inset(-0.5), 5.0, 1.0, c.border_default);
-    icons::draw(p, Icon::Search, Rect::new(search.x0 + 8.0, cy - 6.0, search.x0 + 20.0, cy + 6.0), c.text_secondary);
-    p.text(
-        search.x1 - 8.0,
-        cy,
-        if cfg!(target_os = "macos") { "cmd k" } else { "ctrl k" },
-        &TextStyle::mono(10.5, c.text_secondary),
-        Align::Right,
-    );
 }
 
 /// Draws a whole frame of `w`×`h` logical pixels into `scene`.
 pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: f64, h: f64) -> Drawn {
     let mut p = Painter { scene, fonts };
     let sl = ShellLayout::new(w, h, &f.dock);
-    p.rect(Rect::new(0.0, 0.0, w, h), th.c.bg_base);
+    // the window shows through the gaps between areas as thin dividers
+    p.rect(Rect::new(0.0, 0.0, w, h), th.c.bg_overlay);
     topbar(&mut p, th, f, sl.topbar);
     let al = ArrangeLayout::new(f.doc, f.arrange, sl.arrange);
     let mut gl = None;
@@ -706,6 +726,9 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
 /// Draws the edge strips' icons, the open ones lit.
 fn strips(p: &mut Painter<'_>, th: &Theme, f: &Frame<'_>, sl: &ShellLayout) {
     let c = &th.c;
+    if sl.strip_left.width() < 8.0 {
+        return;
+    }
     for r in [sl.strip_left, sl.strip_right] {
         p.rect(r, c.bg_base);
     }
@@ -756,6 +779,15 @@ fn hint(ty: EditorType) -> &'static str {
     }
 }
 
+/// The status bar's detail-view selector at its right end, as in Live:
+/// what the bottom panel shows.
+pub fn status_tabs(sl: &ShellLayout) -> [(PanelView, Rect); 2] {
+    let r = sl.status;
+    let (y0, y1) = (r.y0 + 3.0, r.y1 - 3.0);
+    let x1 = r.x1 - 6.0;
+    [(PanelView::Clip, Rect::new(x1 - 112.0, y0, x1 - 56.0, y1)), (PanelView::Mixer, Rect::new(x1 - 56.0, y0, x1, y1))]
+}
+
 /// Draws the status bar: hints for the area under the pointer, then the
 /// project and the audio device.
 fn status_bar(p: &mut Painter<'_>, th: &Theme, f: &Frame<'_>, sl: &ShellLayout) {
@@ -764,15 +796,36 @@ fn status_bar(p: &mut Painter<'_>, th: &Theme, f: &Frame<'_>, sl: &ShellLayout) 
     p.rect(r, c.bg_base);
     p.hline(r.x0, r.x1, r.y0, c.border_subtle);
     let cy = r.center().y;
-    let st = TextStyle::mono(10.5, c.text_secondary);
+    let st = TextStyle::sans(11.0, c.text_secondary);
     let keys = "ctrl space maximize · ctrl j panel · ctrl k commands";
-    let tracks = f.doc.tracks.values().filter(|t| t.kind == sat_doc::TrackKind::Track).count();
-    let right = format!("{tracks} tracks · {} clips · {} · {:.0}%", f.doc.clips.len(), f.status, f.ui_scale * 100.0);
-    let rw = p.text(r.x1 - 12.0, cy, &right, &st, Align::Right);
+    // the detail view: what the bottom panel shows
+    let tabs = status_tabs(sl);
+    for (v, tr) in tabs {
+        let on = sl.panel_open() && f.panel == v;
+        if on {
+            p.rect(tr, c.accent_primary.alpha(0.2));
+        } else if tr.contains(f.pointer) {
+            p.rect(tr, c.bg_control);
+        }
+        let col = if on { c.accent_primary } else { c.text_strong };
+        icons::draw(p, v.editor().icon(), Rect::new(tr.x0 + 7.0, cy - 5.0, tr.x0 + 17.0, cy + 5.0), col);
+        p.text(tr.x0 + 22.0, cy, v.editor().label(), &TextStyle::sans(11.0, col), Align::Left);
+    }
+    // the selected track, then the project and the device
+    let mut rx = tabs[0].1.x0 - 12.0;
+    if let Some(t) = f.arrange.selected_track.and_then(|t| f.doc.tracks.get(&t)) {
+        let w = p.text(rx, cy, &t.name, &TextStyle::sans(11.0, c.text_strong), Align::Right);
+        p.rect(Rect::new(rx - w - 14.0, cy - 4.0, rx - w - 6.0, cy + 4.0), th.track(t.color.0));
+        rx -= w + 26.0;
+        p.vline(rx + 6.0, cy - 6.0, cy + 6.0, c.border_default);
+    }
+    let edited = if f.edited { " •" } else { "" };
+    let right = format!("{}{edited} · {} · {:.0}%", f.name, f.status, f.ui_scale * 100.0);
+    let rw = p.text(rx, cy, &right, &st, Align::Right) + (r.x1 - rx) - 12.0;
     let slot = sl.slot_at(f.pointer).unwrap_or(f.focus);
     let ty = editor_in(f.doc, f.view, f.panel, &f.dock, slot);
     let x = r.x0 + 12.0;
-    let lw = p.text(x, cy, ty.label(), &TextStyle::mono(10.5, c.accent_primary), Align::Left);
+    let lw = p.text(x, cy, ty.label(), &TextStyle::sans(11.0, c.accent_primary).medium(), Align::Left);
     let room = r.x1 - 24.0 - rw - (x + lw + 10.0);
     let text = format!("{} · {keys}", hint(ty));
     p.text_fit(x + lw + 10.0, cy, &text, &st, room);

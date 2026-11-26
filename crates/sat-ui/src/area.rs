@@ -14,9 +14,9 @@ use crate::icons::{self, Icon};
 use crate::paint::{Align, Painter, TextStyle};
 
 /// Height of every area's header.
-pub const HEADER_H: f64 = 30.0;
+pub const HEADER_H: f64 = 26.0;
 /// Corner radius of an area.
-pub const RADIUS: f64 = 6.0;
+pub const RADIUS: f64 = 0.0;
 /// Height of a row in the editor-type menu.
 pub const MENU_ROW: f64 = 24.0;
 
@@ -121,16 +121,16 @@ impl EditorType {
 }
 
 /// Corner radius of buttons.
-pub const WIDGET_R: f64 = 4.0;
+pub const WIDGET_R: f64 = 2.0;
 
 /// The editor-type button in the header of an area at `r`: the editor's
 /// icon in a small box with a drop arrow, then its name. Its width comes
 /// from the name (Geist advances are about 0.56 em at 12 px), so hit testing
 /// needs no fonts.
 pub fn pill_rect(r: Rect, ty: EditorType) -> Rect {
-    let w = 36.0 + 8.0 + ty.label().chars().count() as f64 * 6.9;
+    let w = 24.0 + ty.label().chars().count() as f64 * 6.9 + 18.0;
     let cy = r.y0 + HEADER_H / 2.0;
-    Rect::new(r.x0 + 5.0, cy - 10.0, r.x0 + 5.0 + w, cy + 10.0)
+    Rect::new(r.x0 + 2.0, cy - 10.0, r.x0 + 2.0 + w, cy + 10.0)
 }
 
 /// Draws an area's region background.
@@ -179,14 +179,16 @@ pub fn header(p: &mut Painter<'_>, th: &Theme, r: Rect, ty: EditorType) -> (Rect
     let bar = Rect::new(r.x0, r.y0, r.x1, r.y0 + HEADER_H);
     p.rect(bar, header_color(th));
     p.hline(bar.x0, bar.x1, bar.y1 - 1.0, c.bg_base);
+    // the editor's icon and name, flat, with a small drop arrow: a click
+    // swaps what the area shows
     let pill = pill_rect(r, ty);
-    let boxed = Rect::new(pill.x0, pill.y0, pill.x0 + 36.0, pill.y1);
-    widget(p, th, boxed, false);
     let cy = pill.center().y;
-    icons::draw(p, ty.icon(), Rect::new(boxed.x0 + 6.0, cy - 6.0, boxed.x0 + 18.0, cy + 6.0), c.accent_primary);
-    icons::draw(p, Icon::ChevronDown, Rect::new(boxed.x1 - 13.0, cy - 4.0, boxed.x1 - 5.0, cy + 4.0), c.text_secondary);
-    p.text(boxed.x1 + 8.0, cy, ty.label(), &TextStyle::sans(12.0, c.text_max).medium(), Align::Left);
-    (bar, pill.x1 + 14.0)
+    icons::draw(p, ty.icon(), Rect::new(pill.x0 + 6.0, cy - 5.5, pill.x0 + 17.0, cy + 5.5), c.accent_primary);
+    let w = p.text(pill.x0 + 24.0, cy, ty.label(), &TextStyle::sans(11.5, c.text_max).medium(), Align::Left);
+    let ax = pill.x0 + 24.0 + w + 5.0;
+    icons::draw(p, Icon::ChevronDown, Rect::new(ax, cy - 3.5, ax + 7.0, cy + 3.5), c.text_secondary);
+    p.vline(pill.x1 + 4.0, bar.y0 + 6.0, bar.y1 - 6.0, c.border_subtle);
+    (bar, pill.x1 + 12.0)
 }
 
 /// Lightens the header of the area with focus (where the last press was),
@@ -200,7 +202,7 @@ pub fn focus(p: &mut Painter<'_>, th: &Theme, r: Rect) {
 /// Rounds an area's corners onto the gutter and outlines it. Drawn after the
 /// editor, so editors can paint edge to edge.
 pub fn finish(p: &mut Painter<'_>, th: &Theme, r: Rect) {
-    if r.width() < 2.0 * RADIUS || r.height() < 2.0 * RADIUS {
+    if RADIUS <= 0.0 || r.width() < 2.0 * RADIUS || r.height() < 2.0 * RADIUS {
         return;
     }
     let k = 0.5523 * RADIUS;
