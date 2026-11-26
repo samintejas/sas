@@ -43,7 +43,7 @@ pub fn strip_buttons(sl: &ShellLayout) -> Vec<(StripTarget, EditorType, Rect)> {
         let y = if from_bottom { r.y1 - 6.0 - (k + 1.0) * 30.0 } else { r.y0 + 6.0 + k * 30.0 };
         Rect::new(r.x0 + 4.0, y, r.x1 - 4.0, y + 26.0)
     };
-    let sides = [EditorType::Bank, EditorType::Outliner, EditorType::Inspector];
+    let sides = [EditorType::Browser, EditorType::Bank, EditorType::Outliner, EditorType::Inspector];
     let mut out = Vec::new();
     for (k, ty) in sides.iter().enumerate() {
         out.push((StripTarget::Side(Side::Left), *ty, b(sl.strip_left, k as f64, false)));
@@ -80,6 +80,36 @@ pub enum ViewButton {
     Instrument,
     /// Fx grid (later).
     Fx,
+}
+
+/// The top bar's other buttons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TopButton {
+    /// Show or hide the browser in the left sidebar.
+    Browser,
+    /// The audio engine: opens the audio settings.
+    Engine,
+    /// Undo.
+    Undo,
+    /// Redo.
+    Redo,
+    /// The settings window.
+    Settings,
+}
+
+/// Where the top bar's other buttons are.
+pub fn top_buttons(topbar: Rect) -> [(TopButton, Rect); 5] {
+    let cy = topbar.center().y;
+    let x = topbar.x0 + topbar.width() / 2.0 - 260.0 + 136.0 + 14.0 + 344.0;
+    let at = |x1: f64| Rect::new(x1 - 26.0, cy - 12.0, x1, cy + 12.0);
+    let rx = topbar.x1 - 8.0;
+    [
+        (TopButton::Browser, Rect::new(topbar.x0 + 6.0, cy - 12.0, topbar.x0 + 32.0, cy + 12.0)),
+        (TopButton::Engine, Rect::new(x + 12.0, cy - 12.0, x + 36.0, cy + 12.0)),
+        (TopButton::Undo, at(rx - 68.0)),
+        (TopButton::Redo, at(rx - 34.0)),
+        (TopButton::Settings, at(rx)),
+    ]
 }
 
 /// A transport button in the top bar.
@@ -198,6 +228,10 @@ pub struct Frame<'a> {
     pub palette: Option<&'a crate::palette::PaletteView>,
     /// The clip bank's scroll and selection.
     pub bank: &'a crate::bank::BankView,
+    /// The browser's search, folds and selection.
+    pub browser: &'a crate::browser::BrowserView,
+    /// The settings window, when open.
+    pub settings: Option<&'a crate::settings::SettingsView>,
     /// A clip dragged out of the bank: the clip, the pointer, and where it
     /// would land (and whether it can).
     pub drag_clip: Option<DragClip>,
@@ -232,6 +266,10 @@ pub struct Drawn {
     pub outline: Option<crate::outliner::OutlineLayout>,
     /// The clip bank, when a sidebar shows it.
     pub bank: Option<crate::bank::BankLayout>,
+    /// The browser, when a sidebar shows it.
+    pub browser: Option<crate::browser::BrowserLayout>,
+    /// The settings window, when open.
+    pub settings: Option<crate::settings::SettingsLayout>,
 }
 
 /// Rectangles of the shell's regions.
@@ -391,7 +429,17 @@ fn topbar(p: &mut Painter<'_>, th: &Theme, f: &Frame<'_>, r: Rect) {
     p.rect(r, c.bg_base);
     p.hline(r.x0, r.x1, r.y1 - 1.0, c.border_default);
     let cy = r.center().y;
-    icons::draw(p, Icon::Panel, Rect::new(10.0, cy - 7.0, 26.0, cy + 7.0), c.text_primary);
+    let tops = top_buttons(r);
+    let browsing = f.dock.side_open(Side::Left) && f.dock.side_shows(Side::Left) == EditorType::Browser;
+    if browsing {
+        p.rrect(tops[0].1, 5.0, c.bg_raised);
+    }
+    let hover = |b: Rect| b.contains(f.pointer);
+    if hover(tops[0].1) && !browsing {
+        p.rrect(tops[0].1, 5.0, c.bg_control);
+    }
+    let col = if browsing { c.accent_primary } else { c.text_primary };
+    icons::draw(p, Icon::Folder, Rect::from_center_size(tops[0].1.center(), (15.0, 15.0)), col);
     p.text(44.0, cy, "sat", &TextStyle::sans(15.0, c.text_max).medium(), Align::Left);
     let nw = p.text(76.0, cy, f.name, &TextStyle::sans(13.0, c.text_secondary), Align::Left);
     if f.edited {
@@ -458,12 +506,22 @@ fn topbar(p: &mut Painter<'_>, th: &Theme, f: &Frame<'_>, r: Rect) {
     dx += display(p, th, dx, cy, "sig", &format!("{}/{}", sig.num, sig.den), 62.0);
     p.vline(dx - 6.0, cy - 10.0, cy + 10.0, c.border_default);
     display(p, th, dx, cy, "loop", if f.doc.loop_range.enabled { "on" } else { "off" }, 60.0);
-    icon_button(p, th, Rect::new(panel.x1 + 12.0, cy - 12.0, panel.x1 + 36.0, cy + 12.0), Icon::Pulse, None);
-    // right side
-    let mut rx = w - 12.0;
-    for ic in [Icon::Gear, Icon::Redo, Icon::Undo] {
-        icons::draw(p, ic, Rect::new(rx - 22.0, cy - 8.0, rx - 6.0, cy + 8.0), c.text_secondary);
-        rx -= 34.0;
+    icon_button(p, th, tops[1].1, Icon::Pulse, None);
+    // right side: undo, redo, settings
+    for (b, br) in &tops[2..] {
+        let ic = match b {
+            TopButton::Undo => Icon::Undo,
+            TopButton::Redo => Icon::Redo,
+            _ => Icon::Gear,
+        };
+        let open = *b == TopButton::Settings && f.settings.is_some();
+        if open {
+            p.rrect(*br, 5.0, c.bg_raised);
+        } else if hover(*br) {
+            p.rrect(*br, 5.0, c.bg_control);
+        }
+        let col = if open || hover(*br) { c.text_max } else { c.text_secondary };
+        icons::draw(p, ic, Rect::from_center_size(br.center(), (16.0, 16.0)), col);
     }
     for (b, br) in dock_buttons(r) {
         let on = match b {
@@ -543,6 +601,7 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
     let mut mc = None;
     let mut bk = None;
     let mut ol = None;
+    let mut br = None;
     let on_screen = match f.view {
         MainView::Grid(g) => Some(g),
         MainView::Arrange | MainView::Session => None,
@@ -588,6 +647,10 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
                     mc = Some(crate::macros::draw(p, th, f.doc, track, on_screen, f.learn, scroll, folds, r))
                 });
             }
+            EditorType::Browser => {
+                let track = f.arrange.selected_track.and_then(|t| f.doc.tracks.get(&t)).map(|t| t.name.as_str());
+                p.clip(r, |p| br = Some(crate::browser::draw(p, th, f.browser, track, r)));
+            }
             EditorType::Outliner => {
                 let (folded, sel, scroll) = (&f.arrange.collapsed, f.arrange.selected_track, f.outline_scroll);
                 p.clip(r, |p| ol = Some(crate::outliner::draw(p, th, f.doc, folded, sel, scroll, r)));
@@ -620,6 +683,7 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
         Some(m)
     });
     let pl = f.palette.map(|v| crate::palette::draw(&mut p, th, f.doc, v, Rect::new(0.0, 0.0, w, h)));
+    let st = f.settings.map(|v| crate::settings::draw(&mut p, th, v, Rect::new(0.0, 0.0, w, h)));
     Drawn {
         shell: sl,
         arrange: al,
@@ -633,6 +697,8 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
         palette: pl,
         bank: bk,
         outline: ol,
+        browser: br,
+        settings: st,
         menu,
     }
 }
@@ -686,6 +752,7 @@ fn hint(ty: EditorType) -> &'static str {
         EditorType::Bank => "drag a clip onto its lane or a slot · double-click places it at the playhead · + new clip",
         EditorType::Inspector => "drag a macro · learn maps the next touched parameter · click a heading to fold it",
         EditorType::Outliner => "click selects · double-click opens the track · chevrons fold groups · m / s",
+        EditorType::Browser => "click the search field to type · double-click or + adds to the selected track",
     }
 }
 

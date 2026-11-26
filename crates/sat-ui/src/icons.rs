@@ -60,6 +60,8 @@ pub enum Icon {
     Keys,
     /// Up chevron.
     ChevronUp,
+    /// A folder (browser).
+    Folder,
 }
 
 /// Draws `icon` centred in `r`.
@@ -205,6 +207,24 @@ pub fn draw(p: &mut Painter<'_>, icon: Icon, r: Rect, c: Rgba) {
             for x in [-0.23, 0.23] {
                 p.rect(Rect::new(cx + (x - 0.1) * s, cy - 0.6 * s, cx + (x + 0.1) * s, cy + 0.05 * s), c);
             }
+        }
+        Icon::Folder => {
+            let mut b = BezPath::new();
+            b.move_to(pt(-0.7, -0.5));
+            b.line_to(pt(-0.2, -0.5));
+            b.line_to(pt(0.0, -0.3));
+            b.line_to(pt(0.7, -0.3));
+            b.line_to(pt(0.7, 0.55));
+            b.line_to(pt(-0.7, 0.55));
+            b.close_path();
+            p.scene.stroke(
+                &vello::kurbo::Stroke::new(1.1),
+                vello::kurbo::Affine::IDENTITY,
+                crate::paint::color(c),
+                None,
+                &b,
+            );
+            p.line(pt(-0.7, -0.1), pt(0.7, -0.1), 1.0, c);
         }
         Icon::ChevronUp => p.polyline(&[pt(-0.4, 0.2), pt(0.0, -0.2), pt(0.4, 0.2)], w, c),
         Icon::Pulse => {

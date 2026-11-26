@@ -57,6 +57,8 @@ pub enum EditorType {
     Inspector,
     /// The track tree.
     Outliner,
+    /// Everything that can be added: tracks, modules, effects.
+    Browser,
 }
 
 impl EditorType {
@@ -73,6 +75,7 @@ impl EditorType {
             EditorType::Bank => "clip bank",
             EditorType::Inspector => "inspector",
             EditorType::Outliner => "outliner",
+            EditorType::Browser => "browser",
         }
     }
 
@@ -89,6 +92,7 @@ impl EditorType {
             EditorType::Bank => Icon::Cards,
             EditorType::Inspector => Icon::Knob,
             EditorType::Outliner => Icon::Tree,
+            EditorType::Browser => Icon::Folder,
         }
     }
 
@@ -101,7 +105,7 @@ impl EditorType {
             EditorType::InstrumentGrid => "ctrl 4",
             EditorType::FxGrid => "ctrl 5",
             EditorType::Clip | EditorType::Mixer => "tab",
-            EditorType::Bank | EditorType::Inspector | EditorType::Outliner => "",
+            EditorType::Bank | EditorType::Inspector | EditorType::Outliner | EditorType::Browser => "",
         }
     }
 
@@ -111,7 +115,7 @@ impl EditorType {
         match slot {
             Slot::Main => &[Arrange, Session, SourceGrid, InstrumentGrid, FxGrid],
             Slot::Panel => &[Clip, Mixer],
-            Slot::Left | Slot::Right => &[Bank, Outliner, Inspector],
+            Slot::Left | Slot::Right => &[Browser, Bank, Outliner, Inspector],
         }
     }
 }

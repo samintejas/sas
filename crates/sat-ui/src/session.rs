@@ -144,6 +144,10 @@ pub enum SessionHit {
     StopAll,
     /// Every track plays the arrangement again.
     BackToArrangement,
+    /// The empty row under the last scene: add a scene.
+    AddScene,
+    /// The empty column after the last track: add a track.
+    AddTrack,
     /// Nothing.
     Nothing,
 }
@@ -163,6 +167,10 @@ pub struct SessionLayout {
     pub stop_all: Rect,
     /// "back to arrangement" (shown when some track follows the session).
     pub back: Rect,
+    /// Empty rows filling the space under the scenes: their scene cells.
+    pub ghost_rows: Vec<Rect>,
+    /// Empty columns filling the space after the tracks: their headers.
+    pub ghost_cols: Vec<Rect>,
 }
 
 impl SessionLayout {
@@ -172,7 +180,7 @@ impl SessionLayout {
         // below the area header
         let r = Rect::new(r.x0, (r.y0 + crate::area::HEADER_H).min(r.y1), r.x1, r.y1);
         let x0 = r.x0 + 8.0 + SCENE_W + GAP - view.scroll;
-        let cols = doc
+        let cols: Vec<Column> = doc
             .tracks_in_order()
             .into_iter()
             .filter(|t| matches!(doc.tracks[t].kind, TrackKind::Track | TrackKind::Group))
@@ -196,10 +204,28 @@ impl SessionLayout {
                 (s.id, Rect::new(r.x0 + 8.0, y, r.x0 + 8.0 + SCENE_W, y + ROW_H))
             })
             .collect();
-        let sy = y0 + scenes.len() as f64 * (ROW_H + GAP);
+        // the stop row sits at the foot of the view, empty rows above it
+        let after = y0 + scenes.len() as f64 * (ROW_H + GAP);
+        let sy = after.max(r.y1 - 8.0 - ROW_H);
+        let n_ghost = ((sy - after) / (ROW_H + GAP)).floor().max(0.0) as usize;
+        let ghost_rows = (0..n_ghost)
+            .map(|i| {
+                let y = after + i as f64 * (ROW_H + GAP);
+                Rect::new(r.x0 + 8.0, y, r.x0 + 8.0 + SCENE_W, y + ROW_H)
+            })
+            .collect();
         let stop_all = Rect::new(r.x0 + 8.0, sy, r.x0 + 8.0 + SCENE_W, sy + ROW_H);
-        let back = back_button(full);
-        SessionLayout { area: r, cols, scenes, stop_row: (sy, sy + ROW_H), stop_all, back }
+        // and empty columns out to the right edge
+        let gx = x0 + cols.len() as f64 * (COL_W + GAP);
+        let mut ghost_cols = Vec::new();
+        let mut x = gx;
+        while x < r.x1 {
+            ghost_cols.push(Rect::new(x, r.y0 + 8.0, x + COL_W, r.y0 + 8.0 + HEAD_H));
+            x += COL_W + GAP;
+        }
+        // "back to arrangement" goes in the header, clear of the stop row
+        let back = Rect::new(full.x1 - 168.0, full.y0 + 5.0, full.x1 - 10.0, full.y0 + crate::area::HEADER_H - 5.0);
+        SessionLayout { area: r, cols, scenes, stop_row: (sy, sy + ROW_H), stop_all, back, ghost_rows, ghost_cols }
     }
 
     /// The cell of column `col` in the row spanning `y` (top, bottom).
@@ -217,6 +243,12 @@ impl SessionLayout {
         }
         if let Some((s, _)) = self.scenes.iter().find(|(_, r)| r.contains(pt)) {
             return SessionHit::Scene(*s);
+        }
+        if self.ghost_rows.first().is_some_and(|r| r.contains(pt)) {
+            return SessionHit::AddScene;
+        }
+        if self.ghost_cols.first().is_some_and(|r| r.contains(pt)) {
+            return SessionHit::AddTrack;
         }
         if pt.x < self.stop_all.x1 + GAP {
             return SessionHit::Nothing;
@@ -273,14 +305,31 @@ pub fn draw(
     let (bar, hx) = crate::area::header(p, th, r, crate::area::EditorType::Session);
     let playing = view.playing.len();
     let note = format!("{} scenes · {} tracks · {playing} playing", doc.scenes.len(), l.cols.len());
-    crate::area::note(p, th, hx, bar.center().y, &note, r.x1 - 12.0 - hx);
+    crate::area::note(p, th, hx, bar.center().y, &note, r.x1 - 180.0 - hx);
     let r = l.area;
     let small = TextStyle::mono(11.0, c.text_secondary);
     let label = TextStyle::mono(11.5, c.text_strong);
     // a slow blink for queued launches, from the playhead
     let blink = (transport.playhead.0 / (sat_doc::sat_time::PPQ / 2)) % 2 == 0;
     let cells = Rect::new(l.stop_all.x1 + GAP, r.y0, r.x1, r.y1);
+    let ghost_cell = c.bg_surface.alpha(0.5);
     p.clip(cells, |p| {
+        // empty columns past the last track; the first adds one
+        for (i, h) in l.ghost_cols.iter().enumerate() {
+            p.rrect(*h, 4.0, c.bg_surface.alpha(0.7));
+            if i == 0 {
+                let hy = h.center().y - 1.0;
+                icons::draw(p, Icon::Plus, Rect::new(h.x0 + 8.0, hy - 5.0, h.x0 + 18.0, hy + 5.0), c.text_secondary);
+                p.text(h.x0 + 26.0, hy, "track", &small, Align::Left);
+            }
+            for (_, row) in &l.scenes {
+                p.rrect(Rect::new(h.x0, row.y0, h.x1, row.y1), 3.0, ghost_cell);
+            }
+            for row in &l.ghost_rows {
+                p.rrect(Rect::new(h.x0, row.y0, h.x1, row.y1), 3.0, ghost_cell);
+            }
+            p.rrect(Rect::new(h.x0, l.stop_row.0, h.x1, l.stop_row.1), 3.0, ghost_cell);
+        }
         for col in &l.cols {
             let tr = &doc.tracks[&col.track];
             let tcol = th.track(tr.color.0);
@@ -384,6 +433,10 @@ pub fn draw(
                     }
                 }
             }
+            // empty rows under the scenes
+            for row in &l.ghost_rows {
+                p.rrect(l.cell(col, *row), 3.0, ghost_cell);
+            }
             // stop button
             let stop = Rect::new(col.head.x0, l.stop_row.0, col.head.x1, l.stop_row.1);
             let stopping =
@@ -415,24 +468,24 @@ pub fn draw(
         p.text_fit(cell.x0 + 28.0, cell.center().y, scene, &label, SCENE_W - 52.0);
         p.text(cell.x1 - 8.0, cell.center().y, &(i + 1).to_string(), &small, Align::Right);
     }
+    // empty scene rows; the first adds a scene
+    for (i, cell) in l.ghost_rows.iter().enumerate() {
+        p.rrect(*cell, 3.0, c.bg_surface.alpha(0.7));
+        let gy = cell.center().y;
+        if i == 0 {
+            icons::draw(p, Icon::Plus, Rect::new(cell.x0 + 8.0, gy - 5.0, cell.x0 + 18.0, gy + 5.0), c.text_secondary);
+            p.text(cell.x0 + 28.0, gy, "scene", &small, Align::Left);
+        }
+        let n = (l.scenes.len() + i + 1).to_string();
+        p.text(cell.x1 - 8.0, gy, &n, &TextStyle::mono(11.0, c.text_secondary.alpha(0.45)), Align::Right);
+    }
     p.rrect(l.stop_all, 3.0, c.bg_surface);
     let sq =
         Rect::new(l.stop_all.x0 + 9.0, l.stop_all.center().y - 4.0, l.stop_all.x0 + 17.0, l.stop_all.center().y + 4.0);
     p.rect(sq, c.text_secondary);
     p.text(l.stop_all.x0 + 28.0, l.stop_all.center().y, "stop all", &label, Align::Left);
-    if doc.scenes.is_empty() {
-        p.text(r.center().x, r.center().y, "no scenes yet", &small, Align::Center);
-    }
     if !view.following.is_empty() {
-        p.rrect(l.back, 5.0, c.accent_primary.alpha(0.18));
-        p.rrect_stroke(l.back.inset(-0.5), 5.0, 1.0, c.accent_primary);
-        p.text(
-            l.back.center().x,
-            l.back.center().y,
-            "back to arrangement",
-            &TextStyle::mono(11.5, c.accent_primary),
-            Align::Center,
-        );
+        crate::area::button(p, th, l.back, "back to arrangement", true);
     }
     l
 }
@@ -479,5 +532,12 @@ mod tests {
         assert_eq!(l.hit(doc, &v, l.back.center()), SessionHit::BackToArrangement);
         v.clear();
         assert!(v.playing.is_empty() && v.following.is_empty());
+        // empty rows and columns fill the rest; the first of each adds one
+        assert!(!l.ghost_rows.is_empty() && !l.ghost_cols.is_empty());
+        assert_eq!(l.hit(doc, &v, l.ghost_rows[0].center()), SessionHit::AddScene);
+        assert_eq!(l.hit(doc, &v, l.ghost_cols[0].center()), SessionHit::AddTrack);
+        assert!(l.ghost_cols.last().unwrap().x1 >= 1400.0, "columns reach the right edge");
+        assert_eq!(l.stop_row.1, 600.0 - 8.0, "the stop row sits at the foot");
+        assert!(l.ghost_rows.last().unwrap().y1 <= l.stop_row.0);
     }
 }

@@ -74,6 +74,8 @@ fn renders_the_arrange_view() {
         session: &sat_ui::session::SessionView::default(),
         palette: None,
         bank: &sat_ui::bank::BankView::default(),
+        browser: &sat_ui::browser::BrowserView::default(),
+        settings: None,
         drag_clip: None,
     };
     let (w, h) = (1280u32, 800u32);
@@ -143,6 +145,8 @@ fn renders_the_mixer() {
         session: &sat_ui::session::SessionView::default(),
         palette: None,
         bank: &sat_ui::bank::BankView::default(),
+        browser: &sat_ui::browser::BrowserView::default(),
+        settings: None,
         drag_clip: None,
     };
     let (w, h) = (1280u32, 800u32);

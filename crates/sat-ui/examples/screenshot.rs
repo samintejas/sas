@@ -35,9 +35,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let words = std::env::var("SAT_DOCK").unwrap_or_default();
     let has = |w: &str| words.split(',').any(|x| x.trim() == w);
+    // SAT_SETTINGS=interface|audio|editing|keys draws the settings window open
+    let settings = std::env::var("SAT_SETTINGS").ok().map(|s| sat_ui::settings::SettingsView {
+        section: sat_ui::settings::Section::ALL.into_iter().find(|x| x.label() == s).unwrap_or_default(),
+        ui_scale: 0.9,
+        snap: Some(sat_doc::sat_time::Ticks(sat_doc::sat_time::PPQ * 4)),
+        note_len: sat_doc::sat_time::Ticks(sat_doc::sat_time::PPQ / 4),
+        device: "built-in output".into(),
+        sample_rate: 48000.0,
+        latency_ms: 10.7,
+    });
     let dock = Dock {
         left_open: !has("noleft"),
-        left_shows: if has("outliner") { sat_ui::area::EditorType::Outliner } else { sat_ui::area::EditorType::Bank },
+        left_shows: if has("outliner") {
+            sat_ui::area::EditorType::Outliner
+        } else if has("browser") {
+            sat_ui::area::EditorType::Browser
+        } else {
+            sat_ui::area::EditorType::Bank
+        },
         right_open: has("right") || view == "macros",
         panel_open: !has("collapsed"),
         roll_h: if has("tall") { 480.0 } else { sat_ui::dock::PANEL_H },
@@ -54,7 +70,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(c) = demo.doc.clips.values().find(|c| c.name == view) {
         demo.selected = c.id;
     }
-    let theme = sat_theme::Theme::dark();
+    let theme =
+        if std::env::var_os("SAT_LIGHT").is_some() { sat_theme::Theme::light() } else { sat_theme::Theme::dark() };
     let mut fonts = Fonts::new();
     let mut scene = vello::Scene::new();
     let state = ArrangeState {
@@ -129,6 +146,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         session: &session,
         palette: palette.as_ref(),
         bank: &sat_ui::bank::BankView::default(),
+        browser: &sat_ui::browser::BrowserView {
+            query: std::env::var("SAT_BROWSER_QUERY").unwrap_or_default(),
+            typing: std::env::var_os("SAT_BROWSER_QUERY").is_some(),
+            selected: Some(sat_ui::browser::SYNTH_TRACK),
+            ..Default::default()
+        },
+        settings: settings.as_ref(),
         drag_clip: None,
     };
     let t = std::time::Instant::now();
