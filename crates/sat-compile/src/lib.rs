@@ -85,6 +85,19 @@ pub struct Compiled {
     meters: HashMap<TrackId, Arc<Meter>>,
     /// The instrument node of each track that can launch clips.
     players: HashMap<TrackId, NodeId>,
+    /// The audio-clip player of each track that has one.
+    audio: HashMap<TrackId, NodeId>,
+    /// Each track's strip.
+    strips: HashMap<TrackId, NodeId>,
+}
+
+/// What a track takes from the launcher or the arrangement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SourcePart {
+    /// Its notes and audio.
+    Clips,
+    /// Its automation.
+    Automation,
 }
 
 /// The engine's key for a clip.
@@ -98,6 +111,21 @@ impl Compiled {
     pub fn launch(&self, track: TrackId, clip: Option<ClipId>, at: i64) -> Option<Command> {
         let node = *self.players.get(&track)?;
         Some(Command::Launch { node, clip: clip.map(clip_key), at })
+    }
+
+    /// The instrument node of `track`, if it plays notes.
+    pub fn player(&self, track: TrackId) -> Option<NodeId> {
+        self.players.get(&track).copied()
+    }
+
+    /// The commands that hand `track`'s clips or automation to the launcher
+    /// (`launcher`) from timeline sample `at`, or back to the arrangement.
+    pub fn source(&self, track: TrackId, part: SourcePart, launcher: bool, at: i64) -> Vec<Command> {
+        let nodes: Vec<NodeId> = match part {
+            SourcePart::Clips => self.players.get(&track).into_iter().chain(self.audio.get(&track)).copied().collect(),
+            SourcePart::Automation => self.strips.get(&track).copied().into_iter().collect(),
+        };
+        nodes.into_iter().map(|node| Command::Source { node, launcher, at }).collect()
     }
 
     /// The command that starts (`on`) or releases a note played live on
@@ -780,6 +808,8 @@ fn compile_inner(
     let mut params: HashMap<ParamTarget, (NodeId, Param, Conv)> = HashMap::new();
     let mut meters: HashMap<TrackId, Arc<Meter>> = HashMap::new();
     let mut players: HashMap<TrackId, NodeId> = HashMap::new();
+    let mut audio_nodes: HashMap<TrackId, NodeId> = HashMap::new();
+    let mut strips: HashMap<TrackId, NodeId> = HashMap::new();
     let mut tapped: Option<NodeId> = None;
     // inputs of every bus: track strips, group strips and sends
     #[allow(clippy::type_complexity)]
@@ -828,6 +858,7 @@ fn compile_inner(
                 let segs = audio_segments(doc, t, &tempo, sample_rate, sounds);
                 let audio = (!segs.is_empty()).then(|| {
                     let id = nid(t, SALT_AUDIO);
+                    audio_nodes.insert(t, id);
                     b.node(id, NodeKind::Audio(Box::new(AudioPlayer::new(segs))), vec![]);
                     id
                 });
@@ -897,6 +928,7 @@ fn compile_inner(
         )
         .with_pan_lane(lane_automation(doc, &ParamTarget::Pan(t), &tempo, sample_rate))
         .with_meter(meter);
+        strips.insert(t, strip_id);
         b.node(strip_id, NodeKind::Strip(Box::new(strip)), pre.map(|p| vec![(p, 1.0)]).unwrap_or_default());
         params.insert(ParamTarget::Gain(t), (strip_id, Param::GainDb, Conv::Same));
         params.insert(ParamTarget::Pan(t), (strip_id, Param::Pan, Conv::Same));
@@ -955,7 +987,7 @@ fn compile_inner(
         None => nid(doc.master, SALT_STRIP),
     };
     let schedule = b.build(output).map_err(CompileError::Schedule)?;
-    Ok(Compiled { schedule, output, tempo, params, macros, meters, players })
+    Ok(Compiled { schedule, output, tempo, params, macros, meters, players, audio: audio_nodes, strips })
 }
 
 #[cfg(test)]

@@ -48,7 +48,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use sat_compile::Compiled;
+use sat_compile::{Compiled, SourcePart};
 use sat_doc::sat_time::Ticks;
 use sat_doc::{
     Breakpoint, CableId, ClipId, Document, Endpoint, GridKind, History, LaneId, ModuleId, Note, Op, ParamTarget,
@@ -57,7 +57,7 @@ use sat_doc::{
 use sat_engine::{Command, EngineHandle};
 use sat_modules::{Editor, PortKind, drum};
 use sat_ui::area::{EditorType, MenuLayout, Slot};
-use sat_ui::arrange::{ArrangeLayout, ArrangeState, Hit, RowKind, TransportView, header_controls};
+use sat_ui::arrange::{ArrangeLayout, ArrangeState, Hit, RowKind, TransportView};
 use sat_ui::arrange_edit::{self, Span};
 use sat_ui::automation;
 use sat_ui::bank::{BankHit, BankLayout, BankView};
@@ -71,7 +71,7 @@ use sat_ui::palette::{self, Action, PaletteLayout, PaletteView};
 use sat_ui::panel::{self, PanelView};
 use sat_ui::piano_roll::{self, RollGeom, RollHit, RollView, Tool, clip_notes, next_snap};
 use sat_ui::roll_edit::{self, Edited};
-use sat_ui::session::{SessionHit, SessionLayout, SessionView};
+use sat_ui::session::{Part, SessionHit, SessionView};
 use sat_ui::settings::{Section, SettingsHit, SettingsLayout, SettingsView};
 use sat_ui::shell::{self, Frame, MainView, ShellLayout, TopButton, TransportButton, ViewButton};
 use sat_ui::steps::{StepGeom, StepHit, StepView};
@@ -437,7 +437,6 @@ struct App {
     grid_layout: Option<GridLayout>,
     /// What the session is playing and queued.
     session: SessionView,
-    session_layout: Option<SessionLayout>,
     /// The clip bank's scroll and selection.
     bank: BankView,
     bank_layout: Option<BankLayout>,
@@ -816,7 +815,6 @@ impl App {
             self.macro_scroll = self.macro_scroll.min(m.max_scroll);
         }
         self.macro_layout = drawn.macros;
-        self.session_layout = drawn.session;
         self.palette_layout = drawn.palette;
         self.menu_layout = drawn.menu;
         if let Some(o) = &drawn.outline {
@@ -1071,14 +1069,8 @@ impl App {
         }
     }
 
-    fn press_session(&mut self, pt: Point, double: bool) {
-        let Some(l) = &self.session_layout else { return };
-        let hit = l.hit(self.history.doc(), &self.session, pt);
-        self.session_hit(hit, double);
-    }
-
-    /// Acts on a press in the session view or the launcher beside the arrangement.
-    fn session_hit(&mut self, hit: SessionHit, double: bool) {
+    /// Acts on a press in the clip launcher beside the arrangement.
+    fn session_hit(&mut self, hit: SessionHit) {
         let doc = self.history.doc();
         let columns: Vec<TrackId> =
             doc.tracks_in_order().into_iter().filter(|t| doc.tracks[t].kind == TrackKind::Track).collect();
@@ -1097,16 +1089,8 @@ impl App {
                 self.select_clip(c);
                 return;
             }
-            SessionHit::Track(t) => {
-                self.arrange.selected_track = Some(t);
-                if double {
-                    self.open_track(t);
-                }
-                return;
-            }
             SessionHit::BackToArrangement => return self.back_to_arrangement(),
             SessionHit::AddScene => return self.add_scene(),
-            SessionHit::AddTrack => return self.add_track(sat_doc::TrackKind::Track),
             SessionHit::Nothing => return,
         };
         if let SessionHit::Launch(_, c) = hit {
@@ -1128,10 +1112,42 @@ impl App {
             if let Some(cmd) = self.playback.compiled.launch(t, clip, sample) {
                 self.playback.send(cmd);
                 self.session.queued.insert(t, (clip, at));
+                // the track's arrangement audio goes quiet when the launch lands
+                for cmd in self.playback.compiled.source(t, SourcePart::Clips, true, sample) {
+                    if !matches!(cmd, Command::Source { node, .. } if Some(node) == self.playback.compiled.player(t)) {
+                        self.playback.send(cmd);
+                    }
+                }
             }
         }
         if !was_playing && self.session.queued.values().any(|(c, _)| c.is_some()) {
             self.playback.toggle();
+        }
+    }
+
+    /// Flips one half of a track's source switch: its clips or its
+    /// automation between the launcher and the arrangement. Clips handed
+    /// to the launcher with nothing launched are silent; back to the
+    /// arrangement, the track plays its arrangement clips again.
+    fn toggle_source(&mut self, t: TrackId, part: Part) {
+        let (set, sp) = match part {
+            Part::Clips => (&mut self.session.following, SourcePart::Clips),
+            Part::Automation => (&mut self.session.auto, SourcePart::Automation),
+        };
+        let launcher = !set.contains(&t);
+        if launcher {
+            set.insert(t);
+        } else {
+            set.remove(&t);
+        }
+        if part == Part::Clips && !launcher {
+            self.session.playing.remove(&t);
+            self.session.queued.remove(&t);
+            self.session.started.remove(&t);
+        }
+        let at = self.playback.compiled.sample(self.playback.playhead());
+        for cmd in self.playback.compiled.source(t, sp, launcher, at) {
+            self.playback.send(cmd);
         }
     }
 
@@ -1413,7 +1429,6 @@ impl App {
                 match h {
                     Handle::Panel => self.dock.toggle_panel(),
                     Handle::Left => self.dock.set_side(Side::Left, false),
-                    Handle::Right => self.dock.set_side(Side::Right, false),
                 }
             } else {
                 self.dock_drag = Some(h);
@@ -1437,7 +1452,6 @@ impl App {
         self.panel_focus = slot == Some(Slot::Panel);
         let side = match slot {
             Some(Slot::Left) => Some(Side::Left),
-            Some(Slot::Right) => Some(Side::Right),
             _ => None,
         };
         self.bank_focus = side.is_some_and(|s| self.dock.side_shows(s) == EditorType::Bank);
@@ -1501,7 +1515,6 @@ impl App {
             }
             match shell::view_buttons(sl.topbar).into_iter().find(|(_, r)| r.contains(pt)).map(|(b, _)| b) {
                 Some(ViewButton::Arrange) => self.view = MainView::Arrange,
-                Some(ViewButton::Session) => self.view = MainView::Session,
                 Some(ViewButton::SourceGrid) => self.open_grid(self.arrange.selected_track, GridKind::Source),
                 Some(ViewButton::Instrument) => self.open_grid(self.arrange.selected_track, GridKind::Instrument),
                 Some(ViewButton::Fx) => self.open_grid(self.arrange.selected_track, GridKind::Fx),
@@ -1518,18 +1531,15 @@ impl App {
             return self.press_grid(pt, double);
         }
         if let Some(sl) = self.shell
-            && !self.session.following.is_empty()
+            && self.session.any_launcher()
             && sat_ui::session::back_button(sl.arrange).contains(pt)
         {
             return self.back_to_arrangement();
         }
-        if self.view == MainView::Session {
-            return self.press_session(pt, double);
-        }
         let Some(layout) = &self.layout else { return };
         match layout.hit_with(Some(self.history.doc()), pt) {
             Hit::Launcher => self.arrange.launcher = !self.arrange.launcher,
-            Hit::Session(h) => self.session_hit(h, double),
+            Hit::Session(h) => self.session_hit(h),
             Hit::Clip { placement, clip } => {
                 self.select_clip(clip);
                 self.arrange.selected_placement = Some(placement);
@@ -1568,21 +1578,7 @@ impl App {
                 self.history.begin_gesture("fade");
                 self.audio_drag = Some(AudioDrag::Fade { clip, origin, out });
             }
-            Hit::Mute(t) => self.toggle_flag(t, TrackFlag::Mute),
-            Hit::Solo(t) => self.toggle_flag(t, TrackFlag::Solo),
-            Hit::Arm(t) => self.toggle_flag(t, TrackFlag::Arm),
-            Hit::Monitor(t, monitor) => {
-                if self.history.doc().tracks[&t].monitor != monitor {
-                    self.input_failed = false;
-                    self.edit("monitor", vec![Op::SetMonitor { id: t, monitor }]);
-                }
-            }
-            Hit::Fader(t) => {
-                let row = layout.rows.iter().find(|r| r.track == t).copied();
-                if let Some(f) = row.and_then(|r| header_controls(&r, layout.headers).fader) {
-                    self.begin_drag(ParamTarget::Gain(t), Axis::Horizontal { travel: f.x1 - f.x0 }, double);
-                }
-            }
+            Hit::Source(t, part) => self.toggle_source(t, part),
             Hit::Header(t) if double && !self.on_group_chevron(t, pt) => self.open_track(t),
             Hit::Header(t) => {
                 self.arrange.selected_track = Some(t);
@@ -1833,6 +1829,15 @@ impl App {
         match self.view {
             MainView::Arrange => {
                 let l = self.layout.as_ref()?;
+                if let Some(lr) = l.launcher
+                    && lr.contains(pt)
+                {
+                    // a slot in the launcher
+                    let row = l.row_at(pt.y).filter(|r| r.kind == RowKind::Track)?;
+                    let i = l.scene_heads.iter().position(|(_, h)| (h.x0..h.x1).contains(&pt.x))?;
+                    let cell = l.slot_rect(row, i)?;
+                    return Some((cell, row.track == c.track, Drop::Slot(l.scene_heads[i].0, row.track)));
+                }
                 if !l.timeline.contains(pt) {
                     return None;
                 }
@@ -1841,12 +1846,6 @@ impl App {
                 let start = arrange_edit::snap_round(l.tick_at(pt.x - 20.0), self.arrange.snap).max(Ticks::ZERO);
                 let r = Rect::new(l.x_of(start), row.y + 4.0, l.x_of(start + c.length), row.y + row.h - 4.0);
                 Some((r, row.track == c.track, Drop::Arrange(start)))
-            }
-            MainView::Session => {
-                let l = self.session_layout.as_ref()?;
-                let col = l.cols.iter().find(|k| !k.group && (k.head.x0..k.head.x1).contains(&pt.x))?;
-                let (scene, row) = l.scenes.iter().find(|(_, r)| (r.y0..r.y1).contains(&pt.y))?;
-                Some((l.cell(col, *row), col.track == c.track, Drop::Slot(*scene, col.track)))
             }
             MainView::Grid(_) => None,
         }
@@ -2008,6 +2007,17 @@ impl App {
             }
             MixHit::Mute(t) => self.toggle_flag(t, TrackFlag::Mute),
             MixHit::Solo(t) => self.toggle_flag(t, TrackFlag::Solo),
+            MixHit::Arm(t) => self.toggle_flag(t, TrackFlag::Arm),
+            MixHit::Monitor(t) => {
+                use sat_doc::Monitor;
+                let next = match self.history.doc().tracks[&t].monitor {
+                    Monitor::In => Monitor::Auto,
+                    Monitor::Auto => Monitor::Off,
+                    Monitor::Off => Monitor::In,
+                };
+                self.input_failed = false;
+                self.edit("monitor", vec![Op::SetMonitor { id: t, monitor: next }]);
+            }
             MixHit::Grid(t, kind) => self.open_grid(Some(t), kind),
             MixHit::Strip(t) if double => self.open_track(t),
             MixHit::Strip(t) => self.select_track(t),
@@ -2290,7 +2300,7 @@ impl App {
         if self.view != MainView::Grid(g) {
             self.grid = GridView::default();
         }
-        self.grid.back_label = if self.prev_view == MainView::Session { "session" } else { "arrange" };
+        self.grid.back_label = "arrange";
         self.view = MainView::Grid(g);
     }
 
@@ -2673,7 +2683,6 @@ impl App {
     /// Runs a palette entry.
     fn run(&mut self, a: Action) {
         match a {
-            Action::Session => self.view = MainView::Session,
             Action::Arrange => self.view = MainView::Arrange,
             Action::Grid(t, kind) => self.open_grid(Some(t), kind),
             Action::Select(t) => self.select_track(t),
@@ -2922,7 +2931,6 @@ impl App {
         let track = self.arrange.selected_track;
         match (slot, ty) {
             (Slot::Main, EditorType::Arrange) => self.view = MainView::Arrange,
-            (Slot::Main, EditorType::Session) => self.view = MainView::Session,
             (Slot::Main, EditorType::SourceGrid) => self.open_grid(track, GridKind::Source),
             (Slot::Main, EditorType::InstrumentGrid) => self.open_grid(track, GridKind::Instrument),
             (Slot::Main, EditorType::FxGrid) => self.open_grid(track, GridKind::Fx),
@@ -2935,7 +2943,6 @@ impl App {
                 self.dock.open_panel();
             }
             (Slot::Left, t) => self.dock.set_side_shows(Side::Left, t),
-            (Slot::Right, t) => self.dock.set_side_shows(Side::Right, t),
             _ => {}
         }
     }
@@ -2944,7 +2951,6 @@ impl App {
     fn toggle_dock(&mut self, b: DockButton) {
         match b {
             DockButton::Left => self.dock.toggle_side(Side::Left),
-            DockButton::Right => self.dock.toggle_side(Side::Right),
             DockButton::Panel => self.dock.toggle_panel(),
         }
     }
@@ -3016,16 +3022,9 @@ impl App {
         let ctrl = self.mods.control_key() || self.mods.super_key();
         match key {
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("b") => {
-                let side = if self.mods.alt_key() { Side::Right } else { Side::Left };
-                return self.dock.toggle_side(side);
+                return self.dock.toggle_side(Side::Left);
             }
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("j") => return self.dock.toggle_panel(),
-            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("u") => {
-                // the clip launcher beside the arrangement
-                self.arrange.launcher = !self.arrange.launcher;
-                self.view = MainView::Arrange;
-                return;
-            }
             // interface scale, like a browser's zoom
             Key::Character(c) if ctrl && matches!(c.as_str(), "=" | "+" | "-" | "0") => {
                 self.ui_scale = match c.as_str() {
@@ -3072,7 +3071,11 @@ impl App {
                 self.dock.open_panel();
             }
             Key::Character(c) if ctrl && matches!(c.as_str(), "1" | "2" | "3" | "4" | "5") => match c.as_str() {
-                "1" => self.view = MainView::Session,
+                "1" => {
+                    // the clip launcher beside the arrangement
+                    self.arrange.launcher = !self.arrange.launcher || self.view != MainView::Arrange;
+                    self.view = MainView::Arrange;
+                }
                 "2" => self.view = MainView::Arrange,
                 "3" => self.open_grid(self.arrange.selected_track, GridKind::Source),
                 "4" => self.open_grid(self.arrange.selected_track, GridKind::Instrument),
@@ -3118,7 +3121,6 @@ impl App {
         }
         let side = match self.shell.and_then(|sl| sl.slot_at(self.cursor)) {
             Some(Slot::Left) => Some(Side::Left),
-            Some(Slot::Right) => Some(Side::Right),
             _ => None,
         };
         if let Some(side) = side {
@@ -3487,7 +3489,6 @@ fn main() {
         grid: GridView::default(),
         grid_layout: None,
         session: SessionView::default(),
-        session_layout: None,
         bank: BankView::default(),
         bank_layout: None,
         browser: BrowserView::default(),

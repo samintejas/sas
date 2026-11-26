@@ -72,6 +72,10 @@ pub struct StripLayout {
     pub mute: Option<Rect>,
     /// Solo button (not on master).
     pub solo: Option<Rect>,
+    /// Record-arm button (tracks only).
+    pub arm: Option<Rect>,
+    /// Input monitoring button: in, auto, off (tracks only).
+    pub monitor: Option<Rect>,
     /// Buttons that open the track's grids (source, instrument, fx: those it has).
     pub grids: Vec<(GridKind, Rect)>,
 }
@@ -105,6 +109,10 @@ pub enum MixHit {
     Mute(TrackId),
     /// A solo button.
     Solo(TrackId),
+    /// A record-arm button.
+    Arm(TrackId),
+    /// An input monitoring button: steps through in, auto and off.
+    Monitor(TrackId),
     /// A button that opens one of the track's grids.
     Grid(TrackId, GridKind),
     /// Elsewhere on a strip.
@@ -148,7 +156,20 @@ fn strip_layout(doc: &Document, t: TrackId, kind: StripKind, rect: Rect, rets: &
         knobs.push((Rect::new(cx - KNOB / 2.0, ky, cx + KNOB / 2.0, ky + KNOB), Knob::Pan));
     }
     let buttons_y0 = inner.y1 - 24.0;
-    let readout = Rect::new(inner.x0, buttons_y0 - 18.0, inner.x1, buttons_y0 - 4.0);
+    // tracks get a row for record arm and input monitoring above mute and solo
+    let records = tr.kind == TrackKind::Track;
+    let rec_y0 = buttons_y0 - 24.0;
+    let (arm, monitor) = if records {
+        let w = 26.0;
+        (
+            Some(Rect::new(inner.x0, rec_y0, inner.x0 + w, rec_y0 + 20.0)),
+            Some(Rect::new(inner.x0 + w + 3.0, rec_y0, inner.x1, rec_y0 + 20.0)),
+        )
+    } else {
+        (None, None)
+    };
+    let top = if records { rec_y0 } else { buttons_y0 };
+    let readout = Rect::new(inner.x0, top - 18.0, inner.x1, top - 4.0);
     // a row of buttons that open the track's grids
     let gy = ky + KNOB + 20.0;
     let kinds = crate::grid::grid_kinds(doc, t);
@@ -178,7 +199,7 @@ fn strip_layout(doc: &Document, t: TrackId, kind: StripKind, rect: Rect, rets: &
             Some(Rect::new(mid + 1.5, buttons_y0, inner.x1, inner.y1)),
         )
     };
-    StripLayout { track: t, kind, rect, knobs, fader, meter, readout, mute, solo, grids }
+    StripLayout { track: t, kind, rect, knobs, fader, meter, readout, mute, solo, arm, monitor, grids }
 }
 
 impl MixerLayout {
@@ -248,6 +269,12 @@ impl MixerLayout {
         }
         if s.solo.is_some_and(|r| r.contains(pt)) {
             return MixHit::Solo(t);
+        }
+        if s.arm.is_some_and(|r| r.contains(pt)) {
+            return MixHit::Arm(t);
+        }
+        if s.monitor.is_some_and(|r| r.contains(pt)) {
+            return MixHit::Monitor(t);
         }
         // knobs are small: accept the label below them too
         if let Some((_, k)) =
@@ -421,6 +448,23 @@ fn draw_strip(
     );
 
     // buttons
+    if let Some(a) = s.arm {
+        controls::toggle(p, th, a, "", tr.armed.then_some(On::Solid(c.accent_danger)));
+        if tr.armed {
+            p.circle(a.center(), 3.5, c.on_accent_danger);
+        } else {
+            p.circle_stroke(a.center(), 4.0, 1.0, c.text_primary);
+        }
+    }
+    if let Some(m) = s.monitor {
+        let label = match tr.monitor {
+            Monitor::In => "in",
+            Monitor::Auto => "auto",
+            Monitor::Off => "off",
+        };
+        let on = tr.monitor == Monitor::In || (tr.monitor == Monitor::Auto && tr.armed);
+        controls::toggle(p, th, m, label, on.then_some(On::Solid(c.accent_info)));
+    }
     if let (Some(m), Some(so)) = (s.mute, s.solo) {
         controls::toggle(p, th, m, "m", tr.mixer.mute.then_some(On::Solid(Rgba::hex(0xf0b14a))));
         controls::toggle(p, th, so, "s", tr.mixer.solo.then_some(On::Solid(Rgba::hex(0x6aa8ff))));

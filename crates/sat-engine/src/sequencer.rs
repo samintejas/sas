@@ -117,6 +117,11 @@ impl Sequencer {
         self.crel = None;
     }
 
+    /// Whether the session has taken over (or a launch is waiting to).
+    pub(crate) fn following(&self) -> bool {
+        self.session || self.pending.is_some()
+    }
+
     /// The key of the playing clip, if any.
     pub fn playing(&self) -> Option<u64> {
         self.playing.and_then(|(i, _)| self.clips.get(i)).map(|c| c.key)

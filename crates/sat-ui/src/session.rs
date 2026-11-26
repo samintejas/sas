@@ -1,29 +1,20 @@
-//! The session view: a clip launcher. Scenes are rows, tracks (and groups)
-//! are columns; a cell holds the clip in that session slot. Launching is
+//! The session: clips in slots, launched from the clip launcher beside the
+//! arrangement (a column per scene, a slot per track row). Launching is
 //! quantised to the next bar; a track that has launched a clip follows the
-//! session until the set goes back to the arrangement.
+//! session, overriding its arrangement clips (its automation still plays)
+//! until the set goes back to the arrangement.
 
 use std::collections::{HashMap, HashSet};
 
 use sat_doc::sat_time::Ticks;
 use sat_doc::*;
 use sat_theme::{Rgba, Theme};
-use vello::kurbo::{Point, Rect};
+use vello::kurbo::Rect;
 
 use crate::arrange::TransportView;
 use crate::icons::{self, Icon};
 use crate::paint::{Align, Painter, TextStyle};
 
-/// Width of the scene column.
-pub const SCENE_W: f64 = 132.0;
-/// Width of a track column.
-pub const COL_W: f64 = 112.0;
-/// Height of the header row.
-pub const HEAD_H: f64 = 34.0;
-/// Height of a scene row.
-pub const ROW_H: f64 = 30.0;
-/// Gap between cells.
-pub const GAP: f64 = 4.0;
 /// Width of a cell's launch triangle area.
 pub const PLAY_W: f64 = 22.0;
 
@@ -34,12 +25,13 @@ pub struct SessionView {
     pub playing: HashMap<TrackId, ClipId>,
     /// Launches (a clip, or a stop) waiting for their bar.
     pub queued: HashMap<TrackId, (Option<ClipId>, Ticks)>,
-    /// Tracks following the session instead of the arrangement.
+    /// Tracks whose clips come from the launcher instead of the arrangement.
     pub following: HashSet<TrackId>,
+    /// Tracks whose automation comes from the launcher (the arrangement's
+    /// lanes are ignored) instead of the arrangement.
+    pub auto: HashSet<TrackId>,
     /// When each playing clip started.
     pub started: HashMap<TrackId, Ticks>,
-    /// Horizontal scroll, in px.
-    pub scroll: f64,
 }
 
 impl SessionView {
@@ -77,11 +69,17 @@ impl SessionView {
         changed
     }
 
+    /// Whether any track takes its clips or automation from the launcher.
+    pub fn any_launcher(&self) -> bool {
+        !self.following.is_empty() || !self.auto.is_empty() || !self.queued.is_empty()
+    }
+
     /// Back to the arrangement: nothing plays or waits.
     pub fn clear(&mut self) {
         self.playing.clear();
         self.queued.clear();
         self.following.clear();
+        self.auto.clear();
         self.started.clear();
     }
 }
@@ -98,34 +96,34 @@ pub fn launch_tick(doc: &Document, playhead: Ticks, playing: bool) -> Ticks {
     if l.enabled && playhead < l.end && next >= l.end { l.start } else { next }
 }
 
-/// Where "back to arrangement" sits in the main area `r` (both views show
-/// it while some track follows the session).
+/// Where "back to arrangement" sits in the arrange toolbar of the main
+/// area `r`, left of the launcher button (shown while any track takes its
+/// clips or automation from the launcher): the global switch back.
 pub fn back_button(r: Rect) -> Rect {
-    Rect::new(r.x1 - 196.0, r.y1 - 40.0, r.x1 - 12.0, r.y1 - 12.0)
+    let lb = crate::arrange::launcher_button(r);
+    Rect::new(lb.x0 - 8.0 - 150.0, lb.y0, lb.x0 - 8.0, lb.y1)
 }
 
 /// Draws "back to arrangement" in the main area `r`.
 pub fn draw_back(p: &mut Painter<'_>, th: &Theme, r: Rect) {
     let c = &th.c;
     let b = back_button(r);
-    p.rrect(b, 5.0, c.bg_base);
-    p.rrect(b, 5.0, c.accent_primary.alpha(0.18));
-    p.rrect_stroke(b.inset(-0.5), 5.0, 1.0, c.accent_primary);
-    p.text(b.center().x, b.center().y, "back to arrangement", &TextStyle::mono(11.5, c.accent_primary), Align::Center);
+    p.rrect(b, 4.0, c.bg_base);
+    p.rrect(b, 4.0, c.accent_primary.alpha(0.18));
+    p.rrect_stroke(b.inset(-0.5), 4.0, 1.0, c.accent_primary);
+    p.text(b.center().x, b.center().y, "back to arrangement", &TextStyle::mono(11.0, c.accent_primary), Align::Center);
 }
 
-/// A column: a track or a group.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Column {
-    /// The track or group.
-    pub track: TrackId,
-    /// Its header.
-    pub head: Rect,
-    /// Whether it is a group (its cells launch its tracks).
-    pub group: bool,
+/// What a track takes from the launcher or the arrangement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Part {
+    /// Its notes and audio.
+    Clips,
+    /// Its automation.
+    Automation,
 }
 
-/// What is under a point in the session view.
+/// What is under a point in the clip launcher.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SessionHit {
     /// A scene's launch cell.
@@ -138,142 +136,14 @@ pub enum SessionHit {
     Group(TrackId, SceneId),
     /// An empty slot or a stop button: stop that track (or group).
     Stop(TrackId),
-    /// A column header: select the track.
-    Track(TrackId),
     /// Stop every clip.
     StopAll,
     /// Every track plays the arrangement again.
     BackToArrangement,
-    /// The empty row under the last scene: add a scene.
+    /// Add a scene.
     AddScene,
-    /// The empty column after the last track: add a track.
-    AddTrack,
     /// Nothing.
     Nothing,
-}
-
-/// The session view's geometry.
-#[derive(Debug, Clone)]
-pub struct SessionLayout {
-    /// The whole view.
-    pub area: Rect,
-    /// Columns, left to right.
-    pub cols: Vec<Column>,
-    /// Scene rows: id and the scene cell.
-    pub scenes: Vec<(SceneId, Rect)>,
-    /// The stop row's y range.
-    pub stop_row: (f64, f64),
-    /// "stop all".
-    pub stop_all: Rect,
-    /// "back to arrangement" (shown when some track follows the session).
-    pub back: Rect,
-    /// Empty rows filling the space under the scenes: their scene cells.
-    pub ghost_rows: Vec<Rect>,
-    /// Empty columns filling the space after the tracks: their headers.
-    pub ghost_cols: Vec<Rect>,
-}
-
-impl SessionLayout {
-    /// Lays out the session view of `doc` in `r`.
-    pub fn new(doc: &Document, view: &SessionView, r: Rect) -> SessionLayout {
-        let full = r;
-        // below the area header
-        let r = Rect::new(r.x0, (r.y0 + crate::area::HEADER_H).min(r.y1), r.x1, r.y1);
-        let x0 = r.x0 + 8.0 + SCENE_W + GAP - view.scroll;
-        let cols: Vec<Column> = doc
-            .tracks_in_order()
-            .into_iter()
-            .filter(|t| matches!(doc.tracks[t].kind, TrackKind::Track | TrackKind::Group))
-            .enumerate()
-            .map(|(i, t)| {
-                let x = x0 + i as f64 * (COL_W + GAP);
-                Column {
-                    track: t,
-                    head: Rect::new(x, r.y0 + 8.0, x + COL_W, r.y0 + 8.0 + HEAD_H),
-                    group: doc.tracks[&t].kind == TrackKind::Group,
-                }
-            })
-            .collect();
-        let y0 = r.y0 + 8.0 + HEAD_H + GAP;
-        let scenes: Vec<(SceneId, Rect)> = doc
-            .scenes
-            .iter()
-            .enumerate()
-            .map(|(i, s)| {
-                let y = y0 + i as f64 * (ROW_H + GAP);
-                (s.id, Rect::new(r.x0 + 8.0, y, r.x0 + 8.0 + SCENE_W, y + ROW_H))
-            })
-            .collect();
-        // the stop row sits at the foot of the view, empty rows above it
-        let after = y0 + scenes.len() as f64 * (ROW_H + GAP);
-        let sy = after.max(r.y1 - 8.0 - ROW_H);
-        let n_ghost = ((sy - after) / (ROW_H + GAP)).floor().max(0.0) as usize;
-        let ghost_rows = (0..n_ghost)
-            .map(|i| {
-                let y = after + i as f64 * (ROW_H + GAP);
-                Rect::new(r.x0 + 8.0, y, r.x0 + 8.0 + SCENE_W, y + ROW_H)
-            })
-            .collect();
-        let stop_all = Rect::new(r.x0 + 8.0, sy, r.x0 + 8.0 + SCENE_W, sy + ROW_H);
-        // and empty columns out to the right edge
-        let gx = x0 + cols.len() as f64 * (COL_W + GAP);
-        let mut ghost_cols = Vec::new();
-        let mut x = gx;
-        while x < r.x1 {
-            ghost_cols.push(Rect::new(x, r.y0 + 8.0, x + COL_W, r.y0 + 8.0 + HEAD_H));
-            x += COL_W + GAP;
-        }
-        // "back to arrangement" goes in the header, clear of the stop row
-        let back = Rect::new(full.x1 - 168.0, full.y0 + 5.0, full.x1 - 10.0, full.y0 + crate::area::HEADER_H - 5.0);
-        SessionLayout { area: r, cols, scenes, stop_row: (sy, sy + ROW_H), stop_all, back, ghost_rows, ghost_cols }
-    }
-
-    /// The cell of column `col` in the row spanning `y` (top, bottom).
-    pub fn cell(&self, col: &Column, row: Rect) -> Rect {
-        Rect::new(col.head.x0, row.y0, col.head.x1, row.y1)
-    }
-
-    /// What is under `pt`.
-    pub fn hit(&self, doc: &Document, view: &SessionView, pt: Point) -> SessionHit {
-        if !view.following.is_empty() && self.back.contains(pt) {
-            return SessionHit::BackToArrangement;
-        }
-        if self.stop_all.contains(pt) {
-            return SessionHit::StopAll;
-        }
-        if let Some((s, _)) = self.scenes.iter().find(|(_, r)| r.contains(pt)) {
-            return SessionHit::Scene(*s);
-        }
-        if self.ghost_rows.first().is_some_and(|r| r.contains(pt)) {
-            return SessionHit::AddScene;
-        }
-        if self.ghost_cols.first().is_some_and(|r| r.contains(pt)) {
-            return SessionHit::AddTrack;
-        }
-        if pt.x < self.stop_all.x1 + GAP {
-            return SessionHit::Nothing;
-        }
-        let Some(col) = self.cols.iter().find(|c| (c.head.x0..c.head.x1).contains(&pt.x)) else {
-            return SessionHit::Nothing;
-        };
-        if col.head.contains(pt) {
-            return SessionHit::Track(col.track);
-        }
-        if (self.stop_row.0..self.stop_row.1).contains(&pt.y) {
-            return SessionHit::Stop(col.track);
-        }
-        let Some((scene, row)) = self.scenes.iter().find(|(_, r)| (r.y0..r.y1).contains(&pt.y)) else {
-            return SessionHit::Nothing;
-        };
-        if col.group {
-            return SessionHit::Group(col.track, *scene);
-        }
-        match doc.slots.get(&(*scene, col.track)) {
-            Some(c) if pt.x < self.cell(col, *row).x0 + PLAY_W => SessionHit::Launch(col.track, *c),
-            Some(c) => SessionHit::Select(*c),
-            None => SessionHit::Stop(col.track),
-        }
-    }
 }
 
 /// The tracks a column launches: itself, or a group's tracks (all depths).
@@ -287,143 +157,6 @@ pub fn tracks_of(doc: &Document, col: TrackId) -> Vec<TrackId> {
         Some(_) => vec![col],
         None => Vec::new(),
     }
-}
-
-/// Draws the session view and returns its layout.
-pub fn draw(
-    p: &mut Painter<'_>,
-    th: &Theme,
-    doc: &Document,
-    view: &SessionView,
-    selected_clip: Option<ClipId>,
-    transport: &TransportView,
-    r: Rect,
-) -> SessionLayout {
-    let l = SessionLayout::new(doc, view, r);
-    let c = &th.c;
-    p.rect(r, c.bg_base);
-    let (bar, hx) = crate::area::header(p, th, r, crate::area::EditorType::Session);
-    let playing = view.playing.len();
-    let note = format!("{} scenes · {} tracks · {playing} playing", doc.scenes.len(), l.cols.len());
-    crate::area::note(p, th, hx, bar.center().y, &note, r.x1 - 180.0 - hx);
-    let r = l.area;
-    let small = TextStyle::mono(11.0, c.text_secondary);
-    let label = TextStyle::mono(11.5, c.text_strong);
-    // a slow blink for queued launches, from the playhead
-    let blink = (transport.playhead.0 / (sat_doc::sat_time::PPQ / 2)) % 2 == 0;
-    let cells = Rect::new(l.stop_all.x1 + GAP, r.y0, r.x1, r.y1);
-    let ghost_cell = c.bg_surface.alpha(0.5);
-    p.clip(cells, |p| {
-        // empty columns past the last track; the first adds one
-        for (i, h) in l.ghost_cols.iter().enumerate() {
-            p.rrect(*h, 1.0, c.bg_surface.alpha(0.7));
-            if i == 0 {
-                let hy = h.center().y - 1.0;
-                icons::draw(p, Icon::Plus, Rect::new(h.x0 + 8.0, hy - 5.0, h.x0 + 18.0, hy + 5.0), c.text_secondary);
-                p.text(h.x0 + 26.0, hy, "track", &small, Align::Left);
-            }
-            for (_, row) in &l.scenes {
-                p.rrect(Rect::new(h.x0, row.y0, h.x1, row.y1), 1.0, ghost_cell);
-            }
-            for row in &l.ghost_rows {
-                p.rrect(Rect::new(h.x0, row.y0, h.x1, row.y1), 1.0, ghost_cell);
-            }
-            p.rrect(Rect::new(h.x0, l.stop_row.0, h.x1, l.stop_row.1), 1.0, ghost_cell);
-        }
-        for col in &l.cols {
-            let tr = &doc.tracks[&col.track];
-            let tcol = th.track(tr.color.0);
-            // header
-            p.rrect(col.head, 1.0, c.bg_surface);
-            p.rect(Rect::new(col.head.x0, col.head.y1 - 3.0, col.head.x1, col.head.y1), tcol);
-            p.text_fit(col.head.x0 + 8.0, col.head.center().y - 1.0, &tr.name, &label, COL_W - 50.0);
-            if col.group {
-                p.text(col.head.x1 - 8.0, col.head.center().y - 1.0, "group", &small, Align::Right);
-            }
-            let follows = tracks_of(doc, col.track).iter().any(|t| view.following.contains(t));
-            for (scene, row) in &l.scenes {
-                let cell = l.cell(col, *row);
-                if col.group {
-                    // a summary of its tracks' clips in this scene
-                    p.rrect(cell, 1.0, c.bg_surface.alpha(0.6));
-                    let kids: Vec<TrackId> = tracks_of(doc, col.track);
-                    let n = kids.len().max(1) as f64;
-                    let w = (cell.width() - 30.0) / n;
-                    for (i, k) in kids.iter().enumerate() {
-                        let x = cell.x0 + 24.0 + i as f64 * w;
-                        if let Some(clip) = doc.slots.get(&(*scene, *k)).and_then(|c| doc.clips.get(c)) {
-                            let on = view.playing.get(k) == Some(&clip.id);
-                            let col = th.track(clip.color.0).alpha(if on { 1.0 } else { 0.55 });
-                            p.rect(Rect::new(x, cell.center().y - 3.0, x + w - 2.0, cell.center().y + 3.0), col);
-                        }
-                    }
-                    icons::draw(
-                        p,
-                        Icon::Play,
-                        Rect::new(cell.x0 + 7.0, cell.center().y - 5.0, cell.x0 + 17.0, cell.center().y + 5.0),
-                        c.text_secondary,
-                    );
-                    continue;
-                }
-                let clip = doc.slots.get(&(*scene, col.track)).and_then(|id| doc.clips.get(id));
-                let slot = Slot { track: col.track, clip, follows, blink };
-                draw_slot(p, th, view, selected_clip, transport, &slot, cell);
-            }
-            // empty rows under the scenes
-            for row in &l.ghost_rows {
-                p.rrect(l.cell(col, *row), 1.0, ghost_cell);
-            }
-            // stop button
-            let stop = Rect::new(col.head.x0, l.stop_row.0, col.head.x1, l.stop_row.1);
-            let stopping =
-                tracks_of(doc, col.track).iter().any(|t| view.queued.get(t).is_some_and(|(q, _)| q.is_none()));
-            p.rrect(stop, 1.0, c.bg_surface.alpha(0.6));
-            let sq =
-                Rect::new(stop.center().x - 4.5, stop.center().y - 4.5, stop.center().x + 4.5, stop.center().y + 4.5);
-            let any_playing = tracks_of(doc, col.track).iter().any(|t| view.playing.contains_key(t));
-            let scol = if stopping && blink {
-                c.accent_primary
-            } else if any_playing {
-                c.text_max
-            } else {
-                c.text_secondary.alpha(0.6)
-            };
-            p.rect(sq, scol);
-        }
-    });
-    // scene column
-    for (i, (id, cell)) in l.scenes.iter().enumerate() {
-        let scene = doc.scenes.iter().find(|s| s.id == *id).map_or("", |s| s.name.as_str());
-        // a scene reads as playing when every clip it holds is playing
-        let clips: Vec<(TrackId, ClipId)> =
-            l.cols.iter().filter_map(|col| doc.slots.get(&(*id, col.track)).map(|c| (col.track, *c))).collect();
-        let on = !clips.is_empty() && clips.iter().all(|(t, c)| view.playing.get(t) == Some(c));
-        p.rrect(*cell, 1.0, if on { c.bg_control } else { c.bg_surface });
-        let tri = Rect::new(cell.x0 + 8.0, cell.center().y - 5.0, cell.x0 + 18.0, cell.center().y + 5.0);
-        icons::draw(p, Icon::Play, tri, if on { c.accent_primary } else { c.text_secondary });
-        p.text_fit(cell.x0 + 28.0, cell.center().y, scene, &label, SCENE_W - 52.0);
-        p.text(cell.x1 - 8.0, cell.center().y, &(i + 1).to_string(), &small, Align::Right);
-    }
-    // empty scene rows; the first adds a scene
-    for (i, cell) in l.ghost_rows.iter().enumerate() {
-        p.rrect(*cell, 1.0, c.bg_surface.alpha(0.7));
-        let gy = cell.center().y;
-        if i == 0 {
-            icons::draw(p, Icon::Plus, Rect::new(cell.x0 + 8.0, gy - 5.0, cell.x0 + 18.0, gy + 5.0), c.text_secondary);
-            p.text(cell.x0 + 28.0, gy, "scene", &small, Align::Left);
-        }
-        let n = (l.scenes.len() + i + 1).to_string();
-        p.text(cell.x1 - 8.0, gy, &n, &TextStyle::mono(11.0, c.text_secondary.alpha(0.45)), Align::Right);
-    }
-    p.rrect(l.stop_all, 1.0, c.bg_surface);
-    let sq =
-        Rect::new(l.stop_all.x0 + 9.0, l.stop_all.center().y - 4.0, l.stop_all.x0 + 17.0, l.stop_all.center().y + 4.0);
-    p.rect(sq, c.text_secondary);
-    p.text(l.stop_all.x0 + 28.0, l.stop_all.center().y, "stop all", &label, Align::Left);
-    if !view.following.is_empty() {
-        crate::area::button(p, th, l.back, "back to arrangement", true);
-    }
-    l
 }
 
 /// One session slot to draw: its track, the clip in it, whether the track
@@ -530,39 +263,21 @@ mod tests {
     }
 
     #[test]
-    fn hits_and_queue_promotion() {
+    fn queued_launches_play_on_their_bar() {
         let d = crate::demo::demo();
         let doc = &d.doc;
         let mut v = SessionView::default();
-        let l = SessionLayout::new(doc, &v, Rect::new(0.0, 0.0, 1400.0, 600.0));
-        let (s1, row) = l.scenes[0];
-        assert_eq!(l.hit(doc, &v, row.center()), SessionHit::Scene(s1));
-        assert_eq!(l.hit(doc, &v, l.stop_all.center()), SessionHit::StopAll);
+        let s1 = doc.scenes[0].id;
         let drums = doc.tracks.values().find(|t| t.name == "drums").unwrap().id;
-        let col = *l.cols.iter().find(|c| c.track == drums).unwrap();
-        let cell = l.cell(&col, row);
         let clip = doc.slots[&(s1, drums)];
-        assert_eq!(l.hit(doc, &v, Point::new(cell.x0 + 5.0, cell.center().y)), SessionHit::Launch(drums, clip));
-        assert_eq!(l.hit(doc, &v, Point::new(cell.x1 - 5.0, cell.center().y)), SessionHit::Select(clip));
-        assert_eq!(l.hit(doc, &v, Point::new(cell.center().x, l.stop_row.0 + 2.0)), SessionHit::Stop(drums));
-        let rhythm = l.cols.iter().find(|c| c.group).unwrap();
-        assert_eq!(l.hit(doc, &v, l.cell(rhythm, row).center()), SessionHit::Group(rhythm.track, s1));
-        assert!(tracks_of(doc, rhythm.track).contains(&drums));
-        // a queued launch plays once its bar comes
         v.queued.insert(drums, (Some(clip), Ticks::quarters(4)));
         assert!(!v.advance(doc, Ticks::quarters(2)));
         assert!(v.advance(doc, Ticks::quarters(4)));
         assert_eq!(v.playing.get(&drums), Some(&clip));
         assert!(v.following.contains(&drums));
-        assert_eq!(l.hit(doc, &v, l.back.center()), SessionHit::BackToArrangement);
+        let rhythm = doc.tracks.values().find(|t| t.kind == TrackKind::Group).unwrap().id;
+        assert!(tracks_of(doc, rhythm).contains(&drums));
         v.clear();
         assert!(v.playing.is_empty() && v.following.is_empty());
-        // empty rows and columns fill the rest; the first of each adds one
-        assert!(!l.ghost_rows.is_empty() && !l.ghost_cols.is_empty());
-        assert_eq!(l.hit(doc, &v, l.ghost_rows[0].center()), SessionHit::AddScene);
-        assert_eq!(l.hit(doc, &v, l.ghost_cols[0].center()), SessionHit::AddTrack);
-        assert!(l.ghost_cols.last().unwrap().x1 >= 1400.0, "columns reach the right edge");
-        assert_eq!(l.stop_row.1, 600.0 - 8.0, "the stop row sits at the foot");
-        assert!(l.ghost_rows.last().unwrap().y1 <= l.stop_row.0);
     }
 }

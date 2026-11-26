@@ -72,6 +72,16 @@ pub enum Command {
     },
     /// Every track plays the arrangement again.
     BackToArrangement,
+    /// Hands one of a track's nodes (instrument, audio player or strip) to
+    /// the launcher from timeline sample `at`, or back to the arrangement.
+    Source {
+        /// The node.
+        node: NodeId,
+        /// Launcher (true) or arrangement (false).
+        launcher: bool,
+        /// When, in timeline samples (the hand-over to the launcher).
+        at: i64,
+    },
     /// Recording started or stopped (tracks monitoring on auto hear their
     /// input while recording).
     SetRecording(bool),
@@ -232,6 +242,9 @@ impl Engine {
                     self.sched.launch(node, clip, at);
                 }
                 Command::BackToArrangement => self.sched.back_to_arrangement(),
+                Command::Source { node, launcher, at } => {
+                    self.sched.source(node, launcher, at);
+                }
                 Command::SetRecording(on) => self.recording = on,
                 Command::Live { node, pitch, velocity, on } => {
                     self.sched.live(node, pitch, velocity, on);

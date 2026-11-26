@@ -1,19 +1,19 @@
 //! Renders the demo project to a PNG without a window.
 //!
-//! `cargo run -p sat-ui --example screenshot -- out.png [scale] [clip|mixer|macros|<clip name>] [grid|instrument|fx|session]`
+//! `cargo run -p sat-ui --example screenshot -- out.png [scale] [clip|mixer|macros|<clip name>] [grid|instrument|fx]`
 //!
 //! A clip name selects that clip and shows it in the bottom panel. A fourth
 //! argument `grid` shows the selected clip's source grid instead of the arrangement.
 //! `SAT_PALETTE=<query>` draws the command palette open with that query.
 //! `SAT_GRID_MENU=1` draws a grid view with its add-module menu open.
-//! `SAT_DOCK=<words>` sets the docked areas: `noleft`, `right` (the inspector;
-//! `macros` also opens it), `collapsed`, `max` (panel maximized), `focus`
+//! `SAT_DOCK=<words>` sets the docked areas: `noleft`, `right` (the inspector in the
+//! sidebar; `macros` also shows it), `collapsed`, `max` (panel maximized), `focus`
 //! (main view zoomed), `tall` (a 480 px panel). The panel is drawn at the
 //! height of the editor it shows (`tall` sets the piano roll's).
 //! `SAT_MENU=main|panel|left` draws that area's editor-type menu open.
 //! `SAT_DOCK=outliner` puts the outliner in the left sidebar; `SAT_FOLDS=<mask>`
 //! folds inspector sections; `SAT_UI_SCALE` sets the interface scale (0.9).
-//! `SAT_LAUNCHER=1` shows the clip launcher beside the arrangement;
+//! `SAT_LAUNCHER=0` hides the clip launcher beside the arrangement (shown, with the verse playing, by default);
 //! `SAT_TRACK_H` and `SAT_PX_PER_BAR` set the arrange zoom.
 //! `SAT_KEY=<root>,<scale>` sets the project key (indexes into the scale
 //! lists); `SAT_ROLL=<words>` sets the piano roll: `fold`, `inkey`, `menu`
@@ -52,14 +52,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let dock = Dock {
         left_open: !has("noleft"),
-        left_shows: if has("outliner") {
+        left_shows: if has("right") || view == "macros" {
+            sat_ui::area::EditorType::Inspector
+        } else if has("outliner") {
             sat_ui::area::EditorType::Outliner
         } else if has("browser") {
             sat_ui::area::EditorType::Browser
         } else {
             sat_ui::area::EditorType::Bank
         },
-        right_open: has("right") || view == "macros",
         panel_open: !has("collapsed"),
         roll_h: if has("tall") { 480.0 } else { sat_ui::dock::PANEL_H },
         zoom: if has("max") {
@@ -101,7 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut scene = vello::Scene::new();
     // SAT_LAUNCHER=1 shows the clip launcher beside the arrangement (with
     // the verse playing); SAT_TRACK_H sets the track height
-    let launcher = std::env::var_os("SAT_LAUNCHER").is_some();
+    let launcher = std::env::var("SAT_LAUNCHER").map_or(true, |v| v != "0");
     let state = ArrangeState {
         selected_clip: Some(demo.selected),
         selected_track: Some(demo.doc.clips[&demo.selected].track),
@@ -113,15 +114,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let view = match args.next().as_deref() {
         Some("grid") => MainView::Grid(demo.doc.tracks[&demo.doc.clips[&demo.selected].track].source_grid.unwrap()),
         Some("fx") => MainView::Grid(demo.doc.tracks[&demo.doc.clips[&demo.selected].track].fx_grids[0]),
-        Some("session") => MainView::Session,
         Some("instrument") => {
             MainView::Grid(demo.doc.tracks[&demo.doc.clips[&demo.selected].track].instrument_grid.unwrap())
         }
         _ => MainView::Arrange,
     };
-    // in the session view, the verse playing and the break queued on the drums
+    // in the clip launcher, the verse playing and the break queued on the drums
     let mut session = sat_ui::session::SessionView::default();
-    if view == MainView::Session || launcher {
+    if launcher {
         let verse = demo.doc.scenes[1].id;
         for ((scene, track), clip) in demo.doc.slots.iter() {
             if *scene == verse {

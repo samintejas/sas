@@ -37,7 +37,7 @@ pub enum StripTarget {
 /// The icons in the edge strips: each opens an editor in its space (or
 /// closes it when it is already open there), like Blender's editor tabs.
 /// The left strip opens editors in the left sidebar and, at its foot, the
-/// bottom panel; the right strip opens editors in the right sidebar.
+/// bottom panel.
 pub fn strip_buttons(sl: &ShellLayout) -> Vec<(StripTarget, EditorType, Rect)> {
     if sl.strip_left.width() < 8.0 {
         // the control bar and status bar carry these now
@@ -51,7 +51,6 @@ pub fn strip_buttons(sl: &ShellLayout) -> Vec<(StripTarget, EditorType, Rect)> {
     let mut out = Vec::new();
     for (k, ty) in sides.iter().enumerate() {
         out.push((StripTarget::Side(Side::Left), *ty, b(sl.strip_left, k as f64, false)));
-        out.push((StripTarget::Side(Side::Right), *ty, b(sl.strip_right, k as f64, false)));
     }
     for (k, ty) in [EditorType::Mixer, EditorType::Clip].iter().enumerate() {
         out.push((StripTarget::Panel, *ty, b(sl.strip_left, k as f64, true)));
@@ -67,15 +66,11 @@ pub enum MainView {
     Arrange,
     /// One of a track's grids.
     Grid(GridId),
-    /// The session's clip launcher.
-    Session,
 }
 
 /// The view buttons in the top bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewButton {
-    /// Session view.
-    Session,
     /// Arrange view.
     Arrange,
     /// The selected track's source grid.
@@ -162,13 +157,13 @@ pub fn transport_buttons(topbar: Rect) -> [(TransportButton, Rect); 4] {
     ]
 }
 
-/// Where the top bar's view buttons are: session and arrange, then the
-/// selected track's three grids.
-pub fn view_buttons(topbar: Rect) -> [(ViewButton, Rect); 5] {
+/// Where the top bar's view buttons are: arrange, then the selected
+/// track's three grids.
+pub fn view_buttons(topbar: Rect) -> [(ViewButton, Rect); 4] {
     use ViewButton::*;
     let cy = topbar.center().y;
-    let mut x = dock_buttons(topbar)[0].1.x0 - 12.0 - 5.0 * 26.0 - 6.0;
-    [Session, Arrange, SourceGrid, Instrument, Fx].map(|b| {
+    let mut x = dock_buttons(topbar)[0].1.x0 - 12.0 - 4.0 * 26.0 - 6.0;
+    [Arrange, SourceGrid, Instrument, Fx].map(|b| {
         let r = ctrl(cy, x, x + 26.0);
         x += if b == Arrange { 32.0 } else { 26.0 };
         (b, r)
@@ -179,12 +174,12 @@ pub fn view_buttons(topbar: Rect) -> [(ViewButton, Rect); 5] {
 /// would land (and whether it can).
 pub type DragClip = (sat_doc::ClipId, vello::kurbo::Point, Option<(Rect, bool)>);
 
-/// The top bar's layout toggles: left sidebar, bottom panel, right sidebar.
-pub fn dock_buttons(topbar: Rect) -> [(DockButton, Rect); 3] {
+/// The top bar's layout toggles: left sidebar, bottom panel.
+pub fn dock_buttons(topbar: Rect) -> [(DockButton, Rect); 2] {
     let cy = topbar.center().y;
     let x1 = top_buttons(topbar)[2].1.x0 - 12.0;
-    let mut k = 3.0;
-    [DockButton::Left, DockButton::Panel, DockButton::Right].map(|b| {
+    let mut k = 2.0;
+    [DockButton::Left, DockButton::Panel].map(|b| {
         let x = x1 - k * 26.0;
         k -= 1.0;
         (b, ctrl(cy, x, x + 26.0))
@@ -285,8 +280,6 @@ pub struct Drawn {
     pub grid: Option<GridLayout>,
     /// The inspector's macros, when the right sidebar shows.
     pub macros: Option<crate::macros::MacroLayout>,
-    /// The session view, when shown.
-    pub session: Option<crate::session::SessionLayout>,
     /// The command palette, when open.
     pub palette: Option<crate::palette::PaletteLayout>,
     /// The editor-type menu, when open.
@@ -314,12 +307,8 @@ pub struct ShellLayout {
     pub panel: Rect,
     /// Left sidebar (clip bank), when it shows.
     pub left: Option<Rect>,
-    /// Right sidebar (inspector), when it shows.
-    pub right: Option<Rect>,
     /// The icon strip at the left edge.
     pub strip_left: Rect,
-    /// The icon strip at the right edge.
-    pub strip_right: Rect,
     /// The status bar along the bottom.
     pub status: Rect,
     /// The dock the layout was made from.
@@ -332,22 +321,14 @@ impl ShellLayout {
         let topbar = Rect::new(0.0, 0.0, w, TOPBAR_H);
         let status = Rect::new(0.0, h - STATUS_H, w, h);
         let strip_left = Rect::new(0.0, TOPBAR_H, STRIP_W, status.y0);
-        let strip_right = Rect::new(w - STRIP_W, TOPBAR_H, w, status.y0);
         let (y0, y1) = (TOPBAR_H + GAP, status.y0 - GAP);
-        let (x0, x1) = (strip_left.x1, strip_right.x0);
-        // the main view keeps some width when both sidebars are wide
-        let room = (x1 - x0 - 2.0 * GAP - 360.0).max(0.0);
-        let mut lw = if dock.side_open(Side::Left) { dock.left_w } else { 0.0 };
-        let mut rw = if dock.side_open(Side::Right) { dock.right_w } else { 0.0 };
-        if lw + rw > room && lw + rw > 0.0 {
-            let k = room / (lw + rw);
-            lw *= k;
-            rw *= k;
-        }
+        let (x0, x1) = (strip_left.x1, w);
+        // the main view keeps some width when the sidebar is wide
+        let room = (x1 - x0 - GAP - 360.0).max(0.0);
+        let lw = if dock.side_open(Side::Left) { dock.left_w.min(room) } else { 0.0 };
         let left = (lw > 0.0).then(|| Rect::new(x0, y0, x0 + lw, y1));
-        let right = (rw > 0.0).then(|| Rect::new(x1 - rw, y0, x1, y1));
         let cx0 = left.map_or(x0, |r| r.x1 + GAP);
-        let cx1 = right.map_or(x1, |r| r.x0 - GAP);
+        let cx1 = x1;
         let (arrange, panel) = match dock.zoom {
             Some(Zoom::Main) => (Rect::new(cx0, y0, cx1, y1), Rect::new(cx0, y1, cx1, y1)),
             Some(Zoom::Panel) => (Rect::new(cx0, y0, cx1, y0), Rect::new(cx0, y0, cx1, y1)),
@@ -361,7 +342,7 @@ impl ShellLayout {
                 (Rect::new(cx0, y0, cx1, panel.y0 - GAP), panel)
             }
         };
-        ShellLayout { topbar, arrange, panel, left, right, strip_left, strip_right, status, dock: *dock }
+        ShellLayout { topbar, arrange, panel, left, strip_left, status, dock: *dock }
     }
 
     /// The rectangle of an area, when it shows.
@@ -370,15 +351,12 @@ impl ShellLayout {
             Slot::Main => self.main_shown().then_some(self.arrange),
             Slot::Panel => (self.panel.height() > 0.0).then_some(self.panel),
             Slot::Left => self.left,
-            Slot::Right => self.right,
         }
     }
 
     /// The area under `pt`.
     pub fn slot_at(&self, pt: Point) -> Option<Slot> {
-        [Slot::Left, Slot::Right, Slot::Panel, Slot::Main]
-            .into_iter()
-            .find(|s| self.slot_rect(*s).is_some_and(|r| r.contains(pt)))
+        [Slot::Left, Slot::Panel, Slot::Main].into_iter().find(|s| self.slot_rect(*s).is_some_and(|r| r.contains(pt)))
     }
 
     /// The bottom panel shows its editor (not collapsed or hidden).
@@ -398,12 +376,6 @@ impl ShellLayout {
             && (l.y0..l.y1).contains(&pt.y)
         {
             return Some(Handle::Left);
-        }
-        if let Some(r) = self.right
-            && (r.x0 - GAP - GRAB..r.x0 + GRAB).contains(&pt.x)
-            && (r.y0..r.y1).contains(&pt.y)
-        {
-            return Some(Handle::Right);
         }
         let p = self.panel;
         if self.dock.zoom != Some(Zoom::Main)
@@ -520,7 +492,6 @@ fn topbar(p: &mut Painter<'_>, th: &Theme, f: &Frame<'_>, r: Rect) {
     p.text(search.x1 - 7.0, cy, k, &TextStyle::mono(10.0, c.text_secondary), Align::Right);
     let active = match f.view {
         MainView::Arrange => ViewButton::Arrange,
-        MainView::Session => ViewButton::Session,
         MainView::Grid(g) => match f.doc.grids.get(&g).map(|g| g.kind) {
             Some(GridKind::Instrument) => ViewButton::Instrument,
             Some(GridKind::Fx) => ViewButton::Fx,
@@ -531,7 +502,6 @@ fn topbar(p: &mut Painter<'_>, th: &Theme, f: &Frame<'_>, r: Rect) {
     sep(p, views[0].1.x0 - 6.0);
     for (b, br) in views {
         let ty = match b {
-            ViewButton::Session => EditorType::Session,
             ViewButton::Arrange => EditorType::Arrange,
             ViewButton::SourceGrid => EditorType::SourceGrid,
             ViewButton::Instrument => EditorType::InstrumentGrid,
@@ -547,7 +517,6 @@ fn topbar(p: &mut Painter<'_>, th: &Theme, f: &Frame<'_>, r: Rect) {
     for (b, br) in docks {
         let on = match b {
             DockButton::Left => f.dock.side_open(Side::Left),
-            DockButton::Right => f.dock.side_open(Side::Right),
             DockButton::Panel => f.dock.zoom != Some(Zoom::Main) && f.dock.panel_open,
         };
         if hover(br) {
@@ -576,22 +545,8 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
     topbar(&mut p, th, f, sl.topbar);
     let al = ArrangeLayout::new(f.doc, f.arrange, sl.arrange);
     let mut gl = None;
-    let mut ssl = None;
     match f.view {
         _ if !sl.main_shown() => {}
-        MainView::Session => {
-            p.clip(sl.arrange, |p| {
-                ssl = Some(crate::session::draw(
-                    p,
-                    th,
-                    f.doc,
-                    f.session,
-                    f.arrange.selected_clip,
-                    &f.transport,
-                    sl.arrange,
-                ))
-            });
-        }
         MainView::Grid(g) => {
             p.clip(sl.arrange, |p| {
                 gl = grid::draw(
@@ -609,10 +564,8 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
             });
         }
         MainView::Arrange => {
-            p.clip(sl.arrange, |p| {
-                arrange::draw(p, th, f.doc, f.arrange, &f.transport, f.levels, f.sounds, f.session, &al)
-            });
-            if !f.session.following.is_empty() {
+            p.clip(sl.arrange, |p| arrange::draw(p, th, f.doc, f.arrange, &f.transport, f.sounds, f.session, &al));
+            if f.session.any_launcher() {
                 crate::session::draw_back(&mut p, th, sl.arrange);
             }
         }
@@ -631,7 +584,7 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
     let mut br = None;
     let on_screen = match f.view {
         MainView::Grid(g) => Some(g),
-        MainView::Arrange | MainView::Session => None,
+        MainView::Arrange => None,
     };
     if sl.panel.height() > 0.0 && !sl.panel_open() {
         // collapsed: the header, to click and bring it back
@@ -667,7 +620,7 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
         p.clip(sl.panel, |p| dock::draw_panel_buttons(p, th, sl.panel, &f.dock));
         crate::area::finish(&mut p, th, sl.panel);
     }
-    for (side, r) in [(Side::Left, sl.left), (Side::Right, sl.right)] {
+    for (side, r) in [(Side::Left, sl.left)] {
         let Some(r) = r else { continue };
         match f.dock.side_shows(side) {
             EditorType::Inspector => {
@@ -724,7 +677,6 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
         chords: cg,
         grid: gl,
         macros: mc,
-        session: ssl,
         palette: pl,
         bank: bk,
         outline: ol,
@@ -740,9 +692,7 @@ fn strips(p: &mut Painter<'_>, th: &Theme, f: &Frame<'_>, sl: &ShellLayout) {
     if sl.strip_left.width() < 8.0 {
         return;
     }
-    for r in [sl.strip_left, sl.strip_right] {
-        p.rect(r, c.bg_base);
-    }
+    p.rect(sl.strip_left, c.bg_base);
     let d = &f.dock;
     for (target, ty, r) in strip_buttons(sl) {
         let on = match target {
@@ -751,10 +701,7 @@ fn strips(p: &mut Painter<'_>, th: &Theme, f: &Frame<'_>, sl: &ShellLayout) {
         };
         if on {
             p.rrect(r, 6.0, c.bg_raised);
-            let bar = match target {
-                StripTarget::Side(Side::Right) => Rect::new(r.x1 + 2.0, r.y0 + 6.0, r.x1 + 4.0, r.y1 - 6.0),
-                _ => Rect::new(r.x0 - 4.0, r.y0 + 6.0, r.x0 - 2.0, r.y1 - 6.0),
-            };
+            let bar = Rect::new(r.x0 - 4.0, r.y0 + 6.0, r.x0 - 2.0, r.y1 - 6.0);
             p.rect(bar, c.accent_primary);
         }
         let col = if on { c.text_max } else { c.text_secondary };
@@ -773,9 +720,8 @@ fn strips(p: &mut Painter<'_>, th: &Theme, f: &Frame<'_>, sl: &ShellLayout) {
 fn hint(ty: EditorType) -> &'static str {
     match ty {
         EditorType::Arrange => {
-            "click a clip to edit it · drag to move, edges to trim · alt drag copies · ctrl wheel: zoom · alt wheel: track height · ctrl u: launcher"
+            "click a clip to edit it · drag to move, edges to trim · alt drag copies · ctrl wheel: zoom · alt wheel: track height · ctrl 1: launcher"
         }
-        EditorType::Session => "click a slot to launch it · a scene launches its row · drag clips in from the bank",
         EditorType::SourceGrid | EditorType::InstrumentGrid | EditorType::FxGrid => {
             "drag from an out port to an in port of the same colour · drag a wire off to unplug · delete removes a module"
         }
@@ -846,7 +792,6 @@ fn status_bar(p: &mut Painter<'_>, th: &Theme, f: &Frame<'_>, sl: &ShellLayout) 
 pub fn main_editor(doc: &Document, view: MainView) -> EditorType {
     match view {
         MainView::Arrange => EditorType::Arrange,
-        MainView::Session => EditorType::Session,
         MainView::Grid(g) => doc.grids.get(&g).map_or(EditorType::SourceGrid, |g| grid::editor_type(g.kind)),
     }
 }
@@ -857,7 +802,6 @@ pub fn editor_in(doc: &Document, view: MainView, panel: PanelView, d: &Dock, slo
         Slot::Main => main_editor(doc, view),
         Slot::Panel => panel.editor(),
         Slot::Left => d.side_shows(Side::Left),
-        Slot::Right => d.side_shows(Side::Right),
     }
 }
 
@@ -865,15 +809,15 @@ pub fn editor_in(doc: &Document, view: MainView, panel: PanelView, d: &Dock, slo
 pub fn panel_kind(doc: &Document, panel: PanelView, clip: Option<sat_doc::ClipId>) -> dock::PanelKind {
     use dock::PanelKind;
     match panel {
-        PanelView::Mixer => PanelKind::Mixer,
+        PanelView::Mixer => PanelKind::Tall,
         PanelView::Clip => {
-            let Some(c) = clip.filter(|c| doc.clips.contains_key(c)) else { return PanelKind::Roll };
+            let Some(c) = clip.filter(|c| doc.clips.contains_key(c)) else { return PanelKind::Tall };
             if doc.clips[&c].audio.is_some() {
-                PanelKind::Audio
+                PanelKind::Fixed(dock::AUDIO_H)
             } else if let Some(h) = steps::fit_height(doc, c) {
-                PanelKind::Fit(h)
+                PanelKind::Fixed(h)
             } else {
-                PanelKind::Roll
+                PanelKind::Tall
             }
         }
     }
