@@ -11,6 +11,7 @@ use crate::controls;
 use crate::icons::{self, Icon};
 use crate::mixer::Levels;
 use crate::paint::{Align, Painter, TextStyle};
+use crate::session::{SessionHit, SessionView};
 
 /// Width of the track header column.
 pub const HEADER_W: f64 = 220.0;
@@ -42,7 +43,16 @@ pub struct ArrangeState {
     pub hidden_lanes: BTreeSet<TrackId>,
     /// The breakpoint being dragged, shown with its value.
     pub active_point: Option<(LaneId, usize)>,
+    /// Vertical zoom: height of a track's clip row, in px.
+    pub track_h: f64,
+    /// The clip launcher shows beside the timeline (session slots per track row).
+    pub launcher: bool,
 }
+
+/// Smallest and largest track height (vertical zoom), in px.
+pub const TRACK_H_RANGE: (f64, f64) = (28.0, 240.0);
+/// Smallest and largest px per bar (horizontal zoom).
+pub const PX_PER_BAR_RANGE: (f64, f64) = (8.0, 2000.0);
 
 /// The arrange snap settings the toolbar cycles through.
 pub const SNAPS: [Option<Ticks>; 4] = [Some(Ticks(PPQ * 4)), Some(Ticks(PPQ)), Some(Ticks(PPQ / 4)), None];
@@ -77,6 +87,8 @@ impl Default for ArrangeState {
             snap: Some(Ticks(PPQ * 4)),
             hidden_lanes: BTreeSet::new(),
             active_point: None,
+            track_h: TRACK_H,
+            launcher: false,
         }
     }
 }
@@ -122,6 +134,15 @@ pub struct Row {
     pub depth: usize,
     /// The header shows the track's monitor switch (armed, or not on auto).
     pub monitor: bool,
+    /// Height of the clip part (a track's row above its take lanes).
+    pub clip_h: f64,
+}
+
+impl Row {
+    /// A track row too short for its fader line: one line of controls.
+    pub fn compact(&self) -> bool {
+        self.kind == RowKind::Track && self.clip_h < TRACK_H
+    }
 }
 
 /// One clip placement on screen.
@@ -259,6 +280,10 @@ pub enum Hit {
     Lane(TrackId, Ticks),
     /// The ruler, at a tick.
     Ruler(Ticks),
+    /// The toolbar's launcher button: show or hide the clip launcher.
+    Launcher,
+    /// A slot or scene in the clip launcher beside the timeline.
+    Session(SessionHit),
     /// Nothing.
     Nothing,
 }
@@ -285,6 +310,12 @@ pub struct ArrangeLayout {
     pub snap: Rect,
     /// Visible automation lanes.
     pub autos: Vec<AutoBox>,
+    /// The toolbar's launcher button.
+    pub launcher_button: Rect,
+    /// The clip launcher beside the timeline, when shown (below the ruler).
+    pub launcher: Option<Rect>,
+    /// The launcher's scene heads, in the ruler band.
+    pub scene_heads: Vec<(SceneId, Rect)>,
     origin: Ticks,
     px_per_tick: f64,
 }
@@ -317,8 +348,17 @@ pub fn snap_button(bounds: Rect) -> Rect {
     Rect::new(x - 74.0, ty - 10.0, x - 8.0, ty + 10.0)
 }
 
-/// Height of the clip part of a track row.
-const TRACK_H: f64 = 52.0;
+/// Width of a scene column in the launcher beside the timeline.
+pub const SLOT_W: f64 = 92.0;
+
+/// Where the toolbar's launcher button is in an arrange tile at `bounds`.
+pub fn launcher_button(bounds: Rect) -> Rect {
+    let s = snap_button(bounds);
+    Rect::new(s.x0 - 52.0 - 84.0, s.y0, s.x0 - 52.0, s.y1)
+}
+
+/// Default height of the clip part of a track row.
+pub const TRACK_H: f64 = 52.0;
 
 fn row_height(kind: RowKind) -> f64 {
     match kind {
@@ -333,9 +373,29 @@ impl ArrangeLayout {
     /// Lays out `doc` in `bounds`.
     pub fn new(doc: &Document, st: &ArrangeState, bounds: Rect) -> ArrangeLayout {
         let top = bounds.y0 + TOOLBAR_H;
-        let ruler = Rect::new(bounds.x0 + HEADER_W, top, bounds.x1, top + RULER_H);
-        let headers = Rect::new(bounds.x0, top + RULER_H, bounds.x0 + HEADER_W, bounds.y1);
-        let timeline = Rect::new(bounds.x0 + HEADER_W, top + RULER_H, bounds.x1, bounds.y1);
+        let hx = bounds.x0 + HEADER_W;
+        // the launcher takes up to half the width beside the headers
+        let lw = if st.launcher {
+            (doc.scenes.len().max(1) as f64 * SLOT_W + 8.0).min(((bounds.x1 - hx) * 0.5).max(0.0))
+        } else {
+            0.0
+        };
+        let ruler = Rect::new(hx + lw, top, bounds.x1, top + RULER_H);
+        let headers = Rect::new(bounds.x0, top + RULER_H, hx, bounds.y1);
+        let timeline = Rect::new(hx + lw, top + RULER_H, bounds.x1, bounds.y1);
+        let launcher = st.launcher.then(|| Rect::new(hx, top + RULER_H, hx + lw, bounds.y1));
+        let scene_heads = if st.launcher {
+            doc.scenes
+                .iter()
+                .enumerate()
+                .map(|(i, sc)| {
+                    let x = hx + 4.0 + i as f64 * SLOT_W;
+                    (sc.id, Rect::new(x, top + RULER_H - 26.0, x + SLOT_W - 4.0, top + RULER_H - 4.0))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let px_per_tick = st.px_per_bar / (PPQ * 4) as f64;
         let mut rows = Vec::new();
         let mut y = timeline.y0 - st.scroll_y;
@@ -372,16 +432,29 @@ impl ArrangeLayout {
                 TrackKind::Master => RowKind::Master,
             };
             let lanes = if kind == RowKind::Track { take_lanes(doc, t) } else { 0 };
-            let h = row_height(kind) + if lanes > 0 { lanes as f64 * TAKE_H + 4.0 } else { 0.0 };
+            let clip_h = if kind == RowKind::Track {
+                st.track_h.clamp(TRACK_H_RANGE.0, TRACK_H_RANGE.1)
+            } else {
+                row_height(kind)
+            };
+            let h = clip_h + if lanes > 0 { lanes as f64 * TAKE_H + 4.0 } else { 0.0 };
             let tr = &doc.tracks[&t];
-            let monitor = kind == RowKind::Track && (tr.armed || tr.monitor != Monitor::Auto);
-            rows.push(Row { track: t, kind, y, h, depth: depth(t), monitor });
+            let monitor = kind == RowKind::Track && (tr.armed || tr.monitor != Monitor::Auto) && clip_h >= TRACK_H;
+            rows.push(Row { track: t, kind, y, h, depth: depth(t), monitor, clip_h });
             y += h;
             if matches!(kind, RowKind::Track | RowKind::Group) && !st.hidden_lanes.contains(&t) {
                 for target in crate::automation::lane_targets(t) {
                     if let Some(l) = crate::automation::lane_of(doc, &target) {
                         let k = RowKind::Lane(l.id);
-                        rows.push(Row { track: t, kind: k, y, h: row_height(k), depth: depth(t), monitor: false });
+                        rows.push(Row {
+                            track: t,
+                            kind: k,
+                            y,
+                            h: row_height(k),
+                            depth: depth(t),
+                            monitor: false,
+                            clip_h: row_height(k),
+                        });
                         y += row_height(k);
                     }
                 }
@@ -397,6 +470,9 @@ impl ArrangeLayout {
             takes: Vec::new(),
             snap: snap_button(bounds),
             autos: Vec::new(),
+            launcher_button: launcher_button(bounds),
+            launcher,
+            scene_heads,
             origin: st.origin,
             px_per_tick,
         };
@@ -413,7 +489,7 @@ impl ArrangeLayout {
                 continue;
             }
             let lanes = take_lanes(doc, c.track);
-            let bottom = if lanes > 0 { row.y + TRACK_H - 3.0 } else { row.y + row.h - 4.0 };
+            let bottom = if lanes > 0 { row.y + row.clip_h - 3.0 } else { row.y + row.h - 4.0 };
             let rect = Rect::new(x0 + 1.0, row.y + 4.0, x1 - 1.0, bottom);
             let fades = c.audio.as_ref().map(|a| {
                 // a fade ends where its length in clip time falls on the timeline
@@ -424,7 +500,7 @@ impl ArrangeLayout {
             clips.push(ClipBox { placement: p.id, clip: c.id, rect, fades });
             if let Some(a) = &c.audio {
                 for (i, _) in a.takes.iter().enumerate().take(lanes) {
-                    let y = row.y + TRACK_H + i as f64 * TAKE_H;
+                    let y = row.y + row.clip_h + i as f64 * TAKE_H;
                     takes.push(TakeBox {
                         placement: p.id,
                         clip: c.id,
@@ -496,6 +572,44 @@ impl ArrangeLayout {
 
     /// What is under `pt`.
     pub fn hit(&self, pt: Point) -> Hit {
+        self.hit_with(None, pt)
+    }
+
+    /// The session slot rectangle of scene column `i` on `row`.
+    pub fn slot_rect(&self, row: &Row, i: usize) -> Option<Rect> {
+        let l = self.launcher?;
+        let x = l.x0 + 4.0 + i as f64 * SLOT_W;
+        Some(Rect::new(x, row.y + 3.0, x + SLOT_W - 4.0, row.y + row.clip_h - 3.0))
+    }
+
+    /// What is under `pt`; with `doc`, the launcher's slots resolve to their clips.
+    pub fn hit_with(&self, doc: Option<&Document>, pt: Point) -> Hit {
+        if self.launcher_button.contains(pt) {
+            return Hit::Launcher;
+        }
+        if let Some((s, _)) = self.scene_heads.iter().find(|(_, r)| r.contains(pt)) {
+            return Hit::Session(SessionHit::Scene(*s));
+        }
+        if let (Some(l), Some(doc)) = (self.launcher, doc)
+            && l.contains(pt)
+        {
+            let Some(row) = self.row_at(pt.y) else { return Hit::Nothing };
+            let Some((i, (scene, _))) =
+                self.scene_heads.iter().enumerate().find(|(_, (_, h))| (h.x0..h.x1).contains(&pt.x))
+            else {
+                return Hit::Nothing;
+            };
+            let Some(cell) = self.slot_rect(row, i).filter(|c| c.contains(pt)) else { return Hit::Nothing };
+            return Hit::Session(match row.kind {
+                RowKind::Group => SessionHit::Group(row.track, *scene),
+                RowKind::Track => match doc.slots.get(&(*scene, row.track)) {
+                    Some(c) if pt.x < cell.x0 + crate::session::PLAY_W => SessionHit::Launch(row.track, *c),
+                    Some(c) => SessionHit::Select(*c),
+                    None => SessionHit::Stop(row.track),
+                },
+                _ => SessionHit::Nothing,
+            });
+        }
         if self.snap.contains(pt) {
             return Hit::Snap;
         }
@@ -653,6 +767,21 @@ pub fn header_controls(row: &Row, headers: Rect) -> HeaderControls {
                 ..Default::default()
             }
         }
+        RowKind::Track if row.compact() => {
+            // one line: name, buttons and a short meter
+            let cy = y0 + row.clip_h / 2.0;
+            let small = |x: f64| Some(Rect::new(x, cy - 9.0, x + 20.0, cy + 9.0));
+            HeaderControls {
+                mute: small(x1 - 94.0),
+                solo: small(x1 - 70.0),
+                arm: small(x1 - 46.0),
+                fader: None,
+                meter: Some(Rect::new(x1 - 16.0, y0 + 5.0, x1 - 9.0, y0 + row.clip_h - 5.0)),
+                auto: small(x1 - 118.0),
+                monitor: None,
+                ..Default::default()
+            }
+        }
         RowKind::Track => {
             let cy = y0 + 17.0;
             HeaderControls {
@@ -738,6 +867,7 @@ pub fn draw(
     tr: &TransportView,
     levels: &Levels,
     sounds: &sat_disk::Pool,
+    session: &SessionView,
     l: &ArrangeLayout,
 ) {
     let c = &th.c;
@@ -749,7 +879,8 @@ pub fn draw(
     let ty = b.y0 + TOOLBAR_H / 2.0;
     let tracks = doc.tracks.values().filter(|t| t.kind == TrackKind::Track).count();
     let bars = doc.placements.values().map(|pl| pl.start.0 + pl.length.0).max().unwrap_or(0).max(0).div_euclid(PPQ * 4);
-    crate::area::note(p, th, hx, ty, &format!("{tracks} tracks · {bars} bars"), l.snap.x0 - 60.0 - hx);
+    crate::area::note(p, th, hx, ty, &format!("{tracks} tracks · {bars} bars"), l.launcher_button.x0 - 12.0 - hx);
+    crate::area::button(p, th, l.launcher_button, "launcher", st.launcher);
     let mut x = b.x1 - 12.0;
     for icon in [Icon::Plus, Icon::Search] {
         let r = Rect::new(x - 26.0, ty - 11.0, x, ty + 11.0);
@@ -850,12 +981,21 @@ pub fn draw(
                 draw_take(p, th, doc, l, k, tempo, sounds);
             }
         }
+        // a track playing the session greys out its arrangement clips
+        for cb in &l.clips {
+            if doc.clips.get(&cb.clip).is_some_and(|cl| session.following.contains(&cl.track)) {
+                p.rect(cb.rect, Rgba::new(10, 10, 10, 150));
+            }
+        }
         // playhead
         let x = l.x_of(tr.playhead);
         if x >= l.timeline.x0 && x <= l.timeline.x1 {
             p.vline(x, l.timeline.y0, l.timeline.y1, c.text_max);
         }
     });
+    if l.launcher.is_some() {
+        draw_launcher(p, th, doc, st, tr, session, l);
+    }
     let x = l.x_of(tr.playhead);
     if x >= l.timeline.x0 && x <= l.timeline.x1 {
         p.vline(x, l.ruler.y0 + 16.0, l.ruler.y1, c.text_max);
@@ -937,9 +1077,11 @@ fn draw_row(
                     }
                 }
             } else {
-                let cy = hr.y0 + 17.0;
+                let cy = if row.compact() { hr.y0 + row.clip_h / 2.0 } else { hr.y0 + 17.0 };
                 p.text_fit(hr.x0 + indent, cy, &t.name, &TextStyle::sans(13.0, c.text_strong).medium(), 70.0);
-                if let Some(mr) = hc.monitor {
+                if row.compact() {
+                    // no second line
+                } else if let Some(mr) = hc.monitor {
                     p.rrect_stroke(mr.inset(-0.5), 4.0, 1.0, c.border_default);
                     for ((m, part), (_, label)) in monitor_parts(mr).into_iter().zip(MONITOR_MODES) {
                         let on = t.monitor == m;
@@ -969,8 +1111,10 @@ fn draw_row(
                         p.circle_stroke(arm.center(), 4.0, 1.0, c.text_primary);
                     }
                 }
-                if let (Some(f), Some(m)) = (hc.fader, hc.meter) {
+                if let Some(f) = hc.fader {
                     fader(p, th, f, t.mixer.gain_db);
+                }
+                if let Some(m) = hc.meter {
                     meter(p, th, m, level);
                 }
                 draw_take_names(p, th, doc, st, row, hr);
@@ -1057,6 +1201,83 @@ fn draw_row(
             p.hline(hr.x0, lane.x1, hr.y1 - 1.0, c.border_subtle);
         }
     }
+}
+
+/// The clip launcher beside the timeline: a column per scene, a slot per
+/// track row, the same slots the session view shows.
+fn draw_launcher(
+    p: &mut Painter<'_>,
+    th: &Theme,
+    doc: &Document,
+    st: &ArrangeState,
+    tr: &TransportView,
+    session: &SessionView,
+    l: &ArrangeLayout,
+) {
+    let Some(lr) = l.launcher else { return };
+    let c = &th.c;
+    let band = Rect::new(lr.x0, l.ruler.y0, lr.x1, l.ruler.y1);
+    let blink = (tr.playhead.0 / (PPQ / 2)) % 2 == 0;
+    p.rect(band, c.bg_surface);
+    p.hline(band.x0, band.x1, band.y1 - 1.0, c.border_default);
+    p.text(band.x0 + 8.0, band.y0 + 9.0, "clip launcher", &TextStyle::mono(10.0, c.text_secondary), Align::Left);
+    p.clip(band, |p| {
+        for (id, h) in &l.scene_heads {
+            let name = doc.scenes.iter().find(|s| s.id == *id).map_or("", |s| s.name.as_str());
+            let clips: Vec<(TrackId, ClipId)> =
+                doc.slots.iter().filter(|((s, _), _)| s == id).map(|((_, t), c)| (*t, *c)).collect();
+            let on = !clips.is_empty() && clips.iter().all(|(t, c)| session.playing.get(t) == Some(c));
+            p.rrect(*h, 3.0, if on { c.bg_control } else { c.bg_fill });
+            let tri = Rect::new(h.x0 + 6.0, h.center().y - 4.5, h.x0 + 15.0, h.center().y + 4.5);
+            icons::draw(p, Icon::Play, tri, if on { c.accent_primary } else { c.text_secondary });
+            p.text_fit(h.x0 + 20.0, h.center().y, name, &TextStyle::mono(11.0, c.text_strong), h.width() - 24.0);
+        }
+    });
+    let body = Rect::new(lr.x0, lr.y0, lr.x1, lr.y1);
+    p.clip(body, |p| {
+        p.rect(body, c.bg_base);
+        for row in &l.rows {
+            if row.y + row.h < lr.y0 || row.y > lr.y1 {
+                continue;
+            }
+            let strip = Rect::new(lr.x0, row.y, lr.x1, row.y + row.h);
+            match row.kind {
+                RowKind::Track => {
+                    let follows = session.following.contains(&row.track);
+                    for (i, (scene, _)) in l.scene_heads.iter().enumerate() {
+                        let Some(cell) = l.slot_rect(row, i) else { continue };
+                        let clip = doc.slots.get(&(*scene, row.track)).and_then(|id| doc.clips.get(id));
+                        let slot = crate::session::Slot { track: row.track, clip, follows, blink };
+                        crate::session::draw_slot(p, th, session, st.selected_clip, tr, &slot, cell);
+                    }
+                }
+                RowKind::Group => {
+                    let kids = crate::session::tracks_of(doc, row.track);
+                    for (i, (scene, _)) in l.scene_heads.iter().enumerate() {
+                        let Some(cell) = l.slot_rect(row, i) else { continue };
+                        let cell = Rect::new(cell.x0, cell.y0, cell.x1, cell.y0 + (row.clip_h - 6.0).min(26.0));
+                        p.rrect(cell, 1.0, c.bg_surface.alpha(0.6));
+                        let n = kids.len().max(1) as f64;
+                        let w = (cell.width() - 26.0) / n;
+                        for (k, t) in kids.iter().enumerate() {
+                            let x = cell.x0 + 22.0 + k as f64 * w;
+                            if let Some(clip) = doc.slots.get(&(*scene, *t)).and_then(|id| doc.clips.get(id)) {
+                                let on = session.playing.get(t) == Some(&clip.id);
+                                let col = th.track(clip.color.0).alpha(if on { 1.0 } else { 0.55 });
+                                p.rect(Rect::new(x, cell.center().y - 2.5, x + w - 2.0, cell.center().y + 2.5), col);
+                            }
+                        }
+                        let tri =
+                            Rect::new(cell.x0 + 6.0, cell.center().y - 4.5, cell.x0 + 15.0, cell.center().y + 4.5);
+                        icons::draw(p, Icon::Play, tri, c.text_secondary);
+                    }
+                }
+                _ => p.rect(strip, Rgba::new(0, 0, 0, 40)),
+            }
+            p.hline(strip.x0, strip.x1, strip.y1 - 1.0, c.border_subtle);
+        }
+    });
+    p.vline(lr.x1, l.ruler.y0, lr.y1, c.border_default);
 }
 
 /// The automation button: lit while the track's lanes show.
@@ -1240,7 +1461,7 @@ fn draw_take_names(p: &mut Painter<'_>, th: &Theme, doc: &Document, st: &Arrange
     };
     let c = &th.c;
     for (i, take) in a.takes.iter().enumerate().take(lanes) {
-        let y = row.y + TRACK_H + i as f64 * TAKE_H;
+        let y = row.y + row.clip_h + i as f64 * TAKE_H;
         let lane = Rect::new(hr.x0 + 14.0, y, hr.x1 - 12.0, y + TAKE_H - 1.0);
         let used = a.comp.iter().any(|s| s.take as usize == i);
         if used {

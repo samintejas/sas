@@ -609,7 +609,9 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
             });
         }
         MainView::Arrange => {
-            p.clip(sl.arrange, |p| arrange::draw(p, th, f.doc, f.arrange, &f.transport, f.levels, f.sounds, &al));
+            p.clip(sl.arrange, |p| {
+                arrange::draw(p, th, f.doc, f.arrange, &f.transport, f.levels, f.sounds, f.session, &al)
+            });
             if !f.session.following.is_empty() {
                 crate::session::draw_back(&mut p, th, sl.arrange);
             }
@@ -771,14 +773,14 @@ fn strips(p: &mut Painter<'_>, th: &Theme, f: &Frame<'_>, sl: &ShellLayout) {
 fn hint(ty: EditorType) -> &'static str {
     match ty {
         EditorType::Arrange => {
-            "click a clip to edit it · drag to move, edges to trim · alt drag copies · double-click a lane draws"
+            "click a clip to edit it · drag to move, edges to trim · alt drag copies · ctrl wheel: zoom · alt wheel: track height · ctrl u: launcher"
         }
         EditorType::Session => "click a slot to launch it · a scene launches its row · drag clips in from the bank",
         EditorType::SourceGrid | EditorType::InstrumentGrid | EditorType::FxGrid => {
             "drag from an out port to an in port of the same colour · drag a wire off to unplug · delete removes a module"
         }
         EditorType::Clip => {
-            "click to draw · drag notes to move, edges to resize · shift arrows: octave · double-click deletes"
+            "click to draw · drag to move, edges to resize · double-click deletes · ctrl wheel: zoom · alt wheel: row height · shift wheel: scroll"
         }
         EditorType::Mixer => "drag faders and knobs · shift: fine · double-click resets · src / ins / fx open grids",
         EditorType::Bank => "drag a clip onto its lane or a slot · double-click places it at the playhead · + new clip",

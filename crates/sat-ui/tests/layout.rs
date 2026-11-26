@@ -105,6 +105,54 @@ fn header_controls_are_hit_where_they_are_drawn() {
     assert_eq!(l.hit(hm.mute.unwrap().center()), Hit::Mute(d.doc.master));
 }
 
+#[test]
+fn track_height_zoom_scales_rows_and_goes_compact() {
+    let d = demo();
+    let tall = ArrangeState { track_h: 120.0, ..Default::default() };
+    let l = ArrangeLayout::new(&d.doc, &tall, Rect::new(0.0, 0.0, 1400.0, 700.0));
+    let row = l.rows.iter().find(|r| r.kind == RowKind::Track).unwrap();
+    assert_eq!(row.clip_h, 120.0);
+    assert!(!row.compact());
+    let clip = l.clips.iter().find(|c| (c.rect.y0 - row.y - 4.0).abs() < 0.5).unwrap();
+    assert!(clip.rect.height() > 100.0, "clips grow with the row");
+    let short = ArrangeState { track_h: 30.0, ..Default::default() };
+    let l = ArrangeLayout::new(&d.doc, &short, Rect::new(0.0, 0.0, 1400.0, 700.0));
+    let row = l.rows.iter().find(|r| r.kind == RowKind::Track).unwrap();
+    assert!(row.compact());
+    let hc = sat_ui::arrange::header_controls(row, l.headers);
+    assert!(hc.fader.is_none(), "a compact row has one line of controls");
+    assert_eq!(l.hit(hc.mute.unwrap().center()), Hit::Mute(row.track));
+}
+
+#[test]
+fn the_launcher_sits_between_headers_and_timeline_and_hits_slots() {
+    use sat_ui::session::SessionHit;
+    let d = demo();
+    let st = ArrangeState { launcher: true, ..Default::default() };
+    let l = ArrangeLayout::new(&d.doc, &st, Rect::new(0.0, 0.0, 1400.0, 700.0));
+    let lr = l.launcher.unwrap();
+    assert_eq!(lr.x0, l.headers.x1);
+    assert_eq!(l.timeline.x0, lr.x1, "the timeline starts after the launcher");
+    assert_eq!(l.scene_heads.len(), d.doc.scenes.len());
+    assert_eq!(l.hit_with(Some(&d.doc), l.launcher_button.center()), Hit::Launcher);
+    let (s1, head) = l.scene_heads[0];
+    assert_eq!(l.hit_with(Some(&d.doc), head.center()), Hit::Session(SessionHit::Scene(s1)));
+    let drums = d.doc.tracks.values().find(|t| t.name == "drums").unwrap().id;
+    let row = *l.rows.iter().find(|r| r.track == drums && r.kind == RowKind::Track).unwrap();
+    let cell = l.slot_rect(&row, 0).unwrap();
+    let clip = d.doc.slots[&(s1, drums)];
+    let doc = Some(&d.doc);
+    assert_eq!(
+        l.hit_with(doc, Point::new(cell.x0 + 5.0, cell.center().y)),
+        Hit::Session(SessionHit::Launch(drums, clip))
+    );
+    assert_eq!(l.hit_with(doc, Point::new(cell.x1 - 5.0, cell.center().y)), Hit::Session(SessionHit::Select(clip)));
+    // clips on the timeline still hit where drawn
+    let cb = l.clips.iter().find(|c| c.clip == d.selected).unwrap();
+    assert!(cb.rect.x0 >= l.timeline.x0);
+    assert_eq!(l.hit_with(doc, cb.rect.center()), Hit::Clip { placement: cb.placement, clip: d.selected });
+}
+
 mod mixer {
     use sat_doc::*;
     use sat_ui::demo::demo;
@@ -223,6 +271,60 @@ mod roll {
         let top = RollView { lo: Some(127), ..Default::default() };
         let g = geometry(&d.doc, Some(d.selected), panel(), &top).unwrap();
         assert_eq!(g.layout.hi, 127, "scrolling up stops with the top row at 127");
+    }
+
+    #[test]
+    fn zooming_time_holds_the_tick_under_the_pointer() {
+        let d = demo();
+        let g = geometry(&d.doc, Some(d.selected), panel(), &RollView::default()).unwrap();
+        let l = &g.layout;
+        assert!(l.fits());
+        let x = l.grid.x0 + l.grid.width() * 0.3;
+        let at = l.tick_at(x);
+        let (zoom, x0) = l.zoomed(3.0, x).unwrap();
+        let view = RollView { zoom: Some(zoom), x0, ..Default::default() };
+        let g2 = geometry(&d.doc, Some(d.selected), panel(), &view).unwrap();
+        assert!(!g2.layout.fits());
+        assert!((g2.layout.tick_at(x).0 - at.0).abs() <= 2, "the tick under the pointer stays put");
+        assert!(l.zoomed(0.2, x).is_none(), "zooming out past the clip fits it again");
+    }
+
+    #[test]
+    fn row_height_zoom_and_folding_to_the_key() {
+        let mut d = demo();
+        let short = RollView { row_h: 8.0, lo: Some(40), ..Default::default() };
+        let tall = RollView { row_h: 24.0, lo: Some(40), ..Default::default() };
+        let a = geometry(&d.doc, Some(d.selected), panel(), &short).unwrap();
+        let b = geometry(&d.doc, Some(d.selected), panel(), &tall).unwrap();
+        assert!(a.layout.rows.len() > 2 * b.layout.rows.len());
+        d.doc.key = sat_doc::Key { root: 9, scale: 2 }; // a minor
+        let fold = RollView { fold: true, lo: Some(57), ..Default::default() };
+        let g = geometry(&d.doc, Some(d.selected), panel(), &fold).unwrap();
+        let l = &g.layout;
+        assert!(l.rows.iter().all(|p| sat_ui::piano_roll::in_key(*p, d.doc.key)));
+        assert_eq!(l.lo, 57);
+        // rows map back to their pitches
+        for &p in &l.rows {
+            assert_eq!(l.pitch_at(l.y_of(p) + l.row_h() / 2.0), p);
+        }
+        // scrolling walks key rows
+        assert_eq!(l.scrolled(1), 59);
+    }
+
+    #[test]
+    fn the_key_chooser_hits_roots_and_scales() {
+        let d = demo();
+        let open = RollView { key_menu: true, ..Default::default() };
+        let g = geometry(&d.doc, Some(d.selected), panel(), &open).unwrap();
+        let (_, notes) = clip_notes(&d.doc, d.selected);
+        assert_eq!(g.hit(&notes, g.key.center()), RollHit::KeyButton);
+        let m = g.key_menu.as_ref().unwrap();
+        assert_eq!(g.hit(&notes, m.roots[9].center()), RollHit::Root(9));
+        assert_eq!(g.hit(&notes, m.scales[2].center()), RollHit::Scale(2));
+        assert_eq!(g.hit(&notes, g.fold.center()), RollHit::Fold);
+        assert_eq!(g.hit(&notes, g.in_key.center()), RollHit::InKey);
+        assert_eq!(g.hit(&notes, g.zoom[1].center()), RollHit::Zoom(true));
+        assert_eq!(g.hit(&notes, g.zoom[2].center()), RollHit::ZoomFit);
     }
 
     #[test]

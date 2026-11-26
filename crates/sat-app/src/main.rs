@@ -519,7 +519,14 @@ impl App {
         };
         self.mixer_scroll = 0.0;
         self.levels.clear();
-        self.roll = RollView { tool: self.roll.tool, snap: self.roll.snap, ..Default::default() };
+        self.roll = RollView {
+            tool: self.roll.tool,
+            snap: self.roll.snap,
+            row_h: self.roll.row_h,
+            fold: self.roll.fold,
+            in_key: self.roll.in_key,
+            ..Default::default()
+        };
         self.roll_drag = None;
         self.steps = StepView::default();
         self.view = MainView::Arrange;
@@ -1066,9 +1073,15 @@ impl App {
 
     fn press_session(&mut self, pt: Point, double: bool) {
         let Some(l) = &self.session_layout else { return };
+        let hit = l.hit(self.history.doc(), &self.session, pt);
+        self.session_hit(hit, double);
+    }
+
+    /// Acts on a press in the session view or the launcher beside the arrangement.
+    fn session_hit(&mut self, hit: SessionHit, double: bool) {
         let doc = self.history.doc();
-        let hit = l.hit(doc, &self.session, pt);
-        let columns: Vec<TrackId> = l.cols.iter().filter(|c| !c.group).map(|c| c.track).collect();
+        let columns: Vec<TrackId> =
+            doc.tracks_in_order().into_iter().filter(|t| doc.tracks[t].kind == TrackKind::Track).collect();
         let slot = |scene: sat_doc::SceneId, t: TrackId| doc.slots.get(&(scene, t)).copied();
         let launches: Vec<(TrackId, Option<ClipId>)> = match hit {
             SessionHit::Launch(t, c) => vec![(t, Some(c))],
@@ -1133,6 +1146,8 @@ impl App {
             self.chords.selected = None;
             self.roll.selected.clear();
             self.roll.lo = None;
+            self.roll.zoom = None;
+            self.roll.x0 = Ticks::ZERO;
         }
         self.arrange.selected_clip = Some(clip);
         self.arrange.selected_track = self.history.doc().clips.get(&clip).map(|c| c.track);
@@ -1158,7 +1173,34 @@ impl App {
     fn press_roll(&mut self, pt: Point, double: bool) {
         let (Some(g), Some((_, _, notes, len))) = (self.roll_geom.clone(), self.roll_target()) else { return };
         let shift = self.mods.shift_key();
-        match g.hit(&notes, pt) {
+        let hit = g.hit(&notes, pt);
+        if !matches!(hit, RollHit::KeyButton | RollHit::Root(_) | RollHit::Scale(_)) {
+            let was = std::mem::take(&mut self.roll.key_menu);
+            if was && g.key_menu.as_ref().is_some_and(|m| m.rect.contains(pt)) {
+                self.roll.key_menu = true;
+            }
+        }
+        let key = self.history.doc().key;
+        let scaled = (self.roll.in_key || self.roll.fold) && key.scale != 0;
+        match hit {
+            RollHit::KeyButton => self.roll.key_menu = !self.roll.key_menu,
+            RollHit::Root(root) => self.edit("key", vec![Op::SetKey { key: sat_doc::Key { root, ..key } }]),
+            RollHit::Scale(scale) => self.edit("key", vec![Op::SetKey { key: sat_doc::Key { scale, ..key } }]),
+            RollHit::Fold => {
+                self.roll.fold = !self.roll.fold;
+                if self.roll.fold && key.scale == 0 {
+                    self.roll.fold = false;
+                }
+            }
+            RollHit::InKey => self.roll.in_key = !self.roll.in_key,
+            RollHit::Zoom(zoom_in) => {
+                let k = if zoom_in { 1.5 } else { 1.0 / 1.5 };
+                self.zoom_roll(&g, k, g.layout.grid.center().x);
+            }
+            RollHit::ZoomFit => {
+                self.roll.zoom = None;
+                self.roll.x0 = Ticks::ZERO;
+            }
             RollHit::Tool(t) => self.roll.tool = t,
             RollHit::Snap => self.roll.snap = next_snap(self.roll.snap),
             RollHit::Quantise => {
@@ -1188,6 +1230,7 @@ impl App {
                 });
             }
             RollHit::Grid { tick, pitch } if self.roll.tool == Tool::Draw => {
+                let pitch = if scaled { piano_roll::key_snap(pitch, key) } else { pitch };
                 let start = roll_edit::snap_floor(tick, self.roll.snap);
                 let note = Note { start, len: self.note_len, pitch, velocity: 0.8, chance: 1.0 };
                 self.history.begin_gesture("draw note");
@@ -1238,8 +1281,16 @@ impl App {
             RollDrag::Move { notes, sel, anchor, from } => {
                 let raw = l.tick_at(pt.x).0 - l.tick_at(from.x).0;
                 let start = roll_edit::snap_round(Ticks(anchor.start.0 + raw), snap);
-                let dp = l.pitch_at(pt.y) as i32 - l.pitch_at(from.y) as i32;
-                self.write_notes("move notes", roll_edit::move_by(&notes, &sel, start.0 - anchor.start.0, dp, len));
+                let key = self.history.doc().key;
+                let dt = start.0 - anchor.start.0;
+                let (a, b) = (l.pitch_at(from.y), l.pitch_at(pt.y));
+                let e = if (self.roll.in_key || self.roll.fold) && key.scale != 0 {
+                    let steps = roll_edit::degree(b, key) - roll_edit::degree(a, key);
+                    roll_edit::move_in_key(&notes, &sel, dt, steps, key, len)
+                } else {
+                    roll_edit::move_by(&notes, &sel, dt, b as i32 - a as i32, len)
+                };
+                self.write_notes("move notes", e);
             }
             RollDrag::Resize { notes, sel, anchor, from } => {
                 let raw = l.tick_at(pt.x).0 - l.tick_at(from.x).0;
@@ -1276,6 +1327,20 @@ impl App {
         }
     }
 
+    /// Zooms the piano roll's time by `k` around screen x `x`.
+    fn zoom_roll(&mut self, g: &RollGeom, k: f64, x: f64) {
+        match g.layout.zoomed(k, x) {
+            Some((z, o)) => {
+                self.roll.zoom = Some(z);
+                self.roll.x0 = o;
+            }
+            None => {
+                self.roll.zoom = None;
+                self.roll.x0 = Ticks::ZERO;
+            }
+        }
+    }
+
     /// Keys for the piano roll; returns whether the key was used.
     fn roll_key(&mut self, key: &Key) -> bool {
         if self.panel != PanelView::Clip || self.roll_drag.is_some() || self.mods.alt_key() || !self.panel_focus {
@@ -1290,11 +1355,16 @@ impl App {
             Key::Named(NamedKey::Delete | NamedKey::Backspace) if !sel.is_empty() => {
                 self.write_notes("delete notes", roll_edit::delete(&notes, &sel));
             }
-            Key::Named(NamedKey::ArrowUp) if !sel.is_empty() => {
-                self.write_notes("transpose", roll_edit::move_by(&notes, &sel, 0, octave, len));
-            }
-            Key::Named(NamedKey::ArrowDown) if !sel.is_empty() => {
-                self.write_notes("transpose", roll_edit::move_by(&notes, &sel, 0, -octave, len));
+            Key::Named(NamedKey::ArrowUp | NamedKey::ArrowDown) if !sel.is_empty() => {
+                let up = matches!(key, Key::Named(NamedKey::ArrowUp));
+                let dk = self.history.doc().key;
+                let e = if (self.roll.in_key || self.roll.fold) && dk.scale != 0 && octave == 1 {
+                    // one degree of the key
+                    roll_edit::move_in_key(&notes, &sel, 0, if up { 1 } else { -1 }, dk, len)
+                } else {
+                    roll_edit::move_by(&notes, &sel, 0, if up { octave } else { -octave }, len)
+                };
+                self.write_notes("transpose", e);
             }
             Key::Named(NamedKey::ArrowLeft) if !sel.is_empty() => {
                 self.write_notes("move notes", roll_edit::move_by(&notes, &sel, -step, 0, len));
@@ -1457,7 +1527,9 @@ impl App {
             return self.press_session(pt, double);
         }
         let Some(layout) = &self.layout else { return };
-        match layout.hit(pt) {
+        match layout.hit_with(Some(self.history.doc()), pt) {
+            Hit::Launcher => self.arrange.launcher = !self.arrange.launcher,
+            Hit::Session(h) => self.session_hit(h, double),
             Hit::Clip { placement, clip } => {
                 self.select_clip(clip);
                 self.arrange.selected_placement = Some(placement);
@@ -2614,6 +2686,10 @@ impl App {
             Action::Focus => self.dock.toggle_zoom(Zoom::Main),
             Action::PlayStop => self.playback.toggle(),
             Action::Loop => self.toggle_loop(),
+            Action::Launcher => {
+                self.arrange.launcher = !self.arrange.launcher;
+                self.view = MainView::Arrange;
+            }
             Action::Undo | Action::Redo => self.undo(a == Action::Redo),
             Action::Save => self.save(false),
             Action::Freeze(t) => self.toggle_freeze(t),
@@ -2944,6 +3020,12 @@ impl App {
                 return self.dock.toggle_side(side);
             }
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("j") => return self.dock.toggle_panel(),
+            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("u") => {
+                // the clip launcher beside the arrangement
+                self.arrange.launcher = !self.arrange.launcher;
+                self.view = MainView::Arrange;
+                return;
+            }
             // interface scale, like a browser's zoom
             Key::Character(c) if ctrl && matches!(c.as_str(), "=" | "+" | "-" | "0") => {
                 self.ui_scale = match c.as_str() {
@@ -3062,17 +3144,54 @@ impl App {
                 let d = if dx.abs() > dy.abs() { dx } else { dy };
                 let max = self.mixer.as_ref().map(|m| m.max_scroll).unwrap_or(0.0);
                 self.mixer_scroll = (self.mixer_scroll - d).clamp(0.0, max);
-            } else if let (Some(g), Some(lo)) = (&self.roll_geom, self.roll.lo) {
-                // wheel up shows higher notes, a row per 20 px
-                let rows = (dy / 20.0).round() as i32;
-                let max = 127 - (g.layout.hi - g.layout.lo) as i32;
-                self.roll.lo = Some((lo as i32 + rows).clamp(0, max.max(0)) as u8);
+            } else if let Some(g) = self.roll_geom.clone() {
+                let l = &g.layout;
+                let zoom = self.mods.control_key() || self.mods.super_key();
+                if self.mods.alt_key() {
+                    // alt + wheel: taller or shorter rows
+                    let k = (1.0 + dy * 0.004).clamp(0.5, 2.0);
+                    self.roll.row_h = (self.roll.row_h * k).clamp(piano_roll::ROW_H_RANGE.0, piano_roll::ROW_H_RANGE.1);
+                } else if zoom {
+                    // ctrl + wheel: zoom time around the pointer
+                    let k = (1.0 + dy * 0.004).clamp(0.5, 2.0);
+                    self.zoom_roll(&g, k, self.cursor.x);
+                } else if self.mods.shift_key() || dx.abs() > dy.abs() {
+                    let d = if self.mods.shift_key() && dx == 0.0 { dy } else { dx };
+                    if !l.fits() {
+                        self.roll.zoom = Some(l.px_per_beat());
+                        self.roll.x0 = Ticks((l.origin.0 as f64 - d / l.px_per_tick).max(0.0) as i64);
+                    }
+                } else {
+                    // wheel up shows higher notes, a row per 20 px
+                    let rows = (dy / 20.0).round() as i32;
+                    self.roll.lo = Some(l.scrolled(rows));
+                }
             }
             return;
         }
-        if self.mods.control_key() || self.mods.super_key() {
+        if self.mods.alt_key() {
+            // alt + wheel: taller or shorter tracks, the row under the pointer held still
+            let k = (1.0 + dy * 0.003).clamp(0.5, 2.0);
+            let (lo, hi) = sat_ui::arrange::TRACK_H_RANGE;
+            let old = self.arrange.track_h;
+            self.arrange.track_h = (old * k).clamp(lo, hi);
+            if let Some(l) = &self.layout {
+                let above = (self.cursor.y - l.timeline.y0 + self.arrange.scroll_y).max(0.0);
+                let r = self.arrange.track_h / old;
+                self.arrange.scroll_y = (self.arrange.scroll_y + above * (r - 1.0)).max(0.0);
+            }
+        } else if self.mods.control_key() || self.mods.super_key() {
+            // ctrl + wheel: zoom time around the pointer
             let k = (1.0 + dy * 0.0015).clamp(0.5, 2.0);
-            self.arrange.px_per_bar = (self.arrange.px_per_bar * k).clamp(8.0, 2000.0);
+            let (lo, hi) = sat_ui::arrange::PX_PER_BAR_RANGE;
+            let old = self.arrange.px_per_bar;
+            self.arrange.px_per_bar = (old * k).clamp(lo, hi);
+            if let Some(l) = &self.layout {
+                let at = l.tick_at_f(self.cursor.x.max(l.timeline.x0));
+                let dx = self.cursor.x.max(l.timeline.x0) - l.timeline.x0;
+                let ticks_per_px = 3840.0 / self.arrange.px_per_bar;
+                self.arrange.origin = Ticks((at - dx * ticks_per_px).max(0.0) as i64);
+            }
         } else if self.mods.shift_key() || dx.abs() > dy.abs() {
             let d = if self.mods.shift_key() { dy } else { dx };
             let ticks_per_px = 3840.0 / self.arrange.px_per_bar;

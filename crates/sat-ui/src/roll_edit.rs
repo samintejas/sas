@@ -172,6 +172,45 @@ pub fn in_box(notes: &[Note], t0: Ticks, t1: Ticks, p0: u8, p1: u8) -> Vec<usize
         .collect()
 }
 
+/// The number of `key`'s notes below `pitch` (after snapping it into the
+/// key): a pitch's degree counted from midi 0.
+pub fn degree(pitch: u8, key: sat_doc::Key) -> i32 {
+    let p = crate::piano_roll::key_snap(pitch, key);
+    (0..p).filter(|q| crate::piano_roll::in_key(*q, key)).count() as i32
+}
+
+/// Moves the selection by `dt` ticks and `steps` degrees of `key`: each
+/// selected note is snapped into the key and walked along it, so a chord
+/// keeps its shape in the scale. Notes stop at 0–127.
+pub fn move_in_key(notes: &[Note], selected: &[usize], dt: i64, steps: i32, key: sat_doc::Key, len: Ticks) -> Edited {
+    let e = move_by(notes, selected, dt, 0, len);
+    if steps == 0 {
+        return e;
+    }
+    let sel: Vec<Note> = e.selected.iter().map(|&i| e.notes[i]).collect();
+    // limit the walk so every selected note stays in range
+    let mut steps = steps;
+    while steps != 0
+        && sel.iter().any(|n| {
+            let to = sat_dsp::scale::step(n.pitch as i32, steps, key.root as i32, key.scale as usize);
+            !(0..=127).contains(&to)
+        })
+    {
+        steps -= steps.signum();
+    }
+    let tagged = e
+        .notes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| {
+            let s = e.selected.contains(&i);
+            let n = if s { Note { pitch: crate::piano_roll::key_step(n.pitch, steps, key), ..*n } } else { *n };
+            (n, s)
+        })
+        .collect();
+    normalize(tagged)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,5 +291,20 @@ mod tests {
         assert_eq!(snap_floor(Ticks(479), None), Ticks(479));
         let notes = [n(0, 2, 60), n(4, 1, 64), n(8, 1, 70)];
         assert_eq!(in_box(&notes, Ticks(300), Ticks::sixteenths(5), 59, 65), vec![0, 1]);
+    }
+    #[test]
+    fn moving_in_key_walks_degrees() {
+        let key = sat_doc::Key { root: 0, scale: 1 }; // c major
+        let n = |p: u8| Note { start: Ticks(0), len: Ticks(240), pitch: p, velocity: 0.8, chance: 1.0 };
+        // c-e-g up one degree is d-f-a
+        let notes = vec![n(60), n(64), n(67)];
+        let e = move_in_key(&notes, &[0, 1, 2], 0, 1, key, Ticks(3840));
+        let pitches: Vec<u8> = e.notes.iter().map(|n| n.pitch).collect();
+        assert_eq!(pitches, vec![62, 65, 69]);
+        assert_eq!(e.selected.len(), 3);
+        assert_eq!(degree(62, key) - degree(60, key), 1);
+        // the walk stops at the top of the range
+        let e = move_in_key(&[n(127)], &[0], 0, 5, sat_doc::Key { root: 0, scale: 0 }, Ticks(3840));
+        assert_eq!(e.notes[0].pitch, 127);
     }
 }
