@@ -8,7 +8,11 @@
 //! `SAT_GRID_MENU=1` draws a grid view with its add-module menu open.
 //! `SAT_DOCK=<words>` sets the docked areas: `noleft`, `right` (the inspector;
 //! `macros` also opens it), `collapsed`, `max` (panel maximized), `focus`
-//! (main view zoomed), `tall` (a 480 px panel).
+//! (main view zoomed), `tall` (a 480 px panel). The panel is drawn at the
+//! height of the editor it shows (`tall` sets the piano roll's).
+//! `SAT_MENU=main|panel|left` draws that area's editor-type menu open.
+//! `SAT_DOCK=outliner` puts the outliner in the left sidebar; `SAT_FOLDS=<mask>`
+//! folds inspector sections; `SAT_UI_SCALE` sets the interface scale (0.9).
 
 use sat_doc::sat_time::Ticks;
 use sat_ui::arrange::{ArrangeState, TransportView};
@@ -31,11 +35,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let words = std::env::var("SAT_DOCK").unwrap_or_default();
     let has = |w: &str| words.split(',').any(|x| x.trim() == w);
+    // SAT_SETTINGS=interface|audio|editing|keys draws the settings window open
+    let settings = std::env::var("SAT_SETTINGS").ok().map(|s| sat_ui::settings::SettingsView {
+        section: sat_ui::settings::Section::ALL.into_iter().find(|x| x.label() == s).unwrap_or_default(),
+        ui_scale: 0.9,
+        snap: Some(sat_doc::sat_time::Ticks(sat_doc::sat_time::PPQ * 4)),
+        note_len: sat_doc::sat_time::Ticks(sat_doc::sat_time::PPQ / 4),
+        device: "built-in output".into(),
+        sample_rate: 48000.0,
+        latency_ms: 10.7,
+    });
     let dock = Dock {
         left_open: !has("noleft"),
+        left_shows: if has("outliner") {
+            sat_ui::area::EditorType::Outliner
+        } else if has("browser") {
+            sat_ui::area::EditorType::Browser
+        } else {
+            sat_ui::area::EditorType::Bank
+        },
         right_open: has("right") || view == "macros",
         panel_open: !has("collapsed"),
-        panel_h: if has("tall") { 480.0 } else { sat_ui::dock::PANEL_H },
+        roll_h: if has("tall") { 480.0 } else { sat_ui::dock::PANEL_H },
         zoom: if has("max") {
             Some(Zoom::Panel)
         } else if has("focus") {
@@ -49,7 +70,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(c) = demo.doc.clips.values().find(|c| c.name == view) {
         demo.selected = c.id;
     }
-    let theme = sat_theme::Theme::dark();
+    let theme =
+        if std::env::var_os("SAT_LIGHT").is_some() { sat_theme::Theme::light() } else { sat_theme::Theme::dark() };
     let mut fonts = Fonts::new();
     let mut scene = vello::Scene::new();
     let state = ArrangeState {
@@ -84,8 +106,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     // SAT_PALETTE=<query> draws the command palette open with that query
     let palette = std::env::var("SAT_PALETTE").ok().map(|query| sat_ui::palette::PaletteView { query, index: 0 });
-    let (w, h) = (1440.0, 900.0);
+    // SAT_UI_SCALE: the app's interface scale (0.9 by default), so a
+    // screenshot shows as much as the window does
+    let scale_ui: f64 = std::env::var("SAT_UI_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.9);
+    let (w, h) = (1440.0 / scale_ui, 900.0 / scale_ui);
     let levels = sat_ui::demo::levels(&demo.doc);
+    let mut dock = dock;
+    dock.panel_h = dock.target(shell::panel_kind(&demo.doc, panel, state.selected_clip));
     let frame = Frame {
         doc: &demo.doc,
         name: "untitled set",
@@ -93,6 +120,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         transport: TransportView { playhead: Ticks(6 * 3840 + 960 + 240), playing: true, recording: false },
         dock,
         macro_scroll: 0.0,
+        focus: sat_ui::area::Slot::Panel,
+        menu: match std::env::var("SAT_MENU").as_deref() {
+            Ok("main") => Some(sat_ui::area::Slot::Main),
+            Ok("panel") => Some(sat_ui::area::Slot::Panel),
+            Ok("left") => Some(sat_ui::area::Slot::Left),
+            _ => None,
+        },
+        outline_scroll: 0.0,
+        macro_folds: std::env::var("SAT_FOLDS").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
+        pointer: vello::kurbo::Point::new(700.0, 300.0),
+        status: "built-in output @ 48000 Hz",
+        ui_scale: scale_ui,
         panel,
         mixer_scroll: 0.0,
         levels: &levels,
@@ -107,6 +146,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         session: &session,
         palette: palette.as_ref(),
         bank: &sat_ui::bank::BankView::default(),
+        browser: &sat_ui::browser::BrowserView {
+            query: std::env::var("SAT_BROWSER_QUERY").unwrap_or_default(),
+            typing: std::env::var_os("SAT_BROWSER_QUERY").is_some(),
+            selected: Some(sat_ui::browser::SYNTH_TRACK),
+            ..Default::default()
+        },
+        settings: settings.as_ref(),
         drag_clip: None,
     };
     let t = std::time::Instant::now();
@@ -114,8 +160,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let build = t.elapsed();
     let mut gpu = Gpu::headless()?;
     let t = std::time::Instant::now();
+    let px = scale * scale_ui;
     let img =
-        gpu.render_rgba(&scaled(&scene, scale), (w * scale) as u32, (h * scale) as u32, color(theme.c.bg_base))?;
+        gpu.render_rgba(&scaled(&scene, px), (w * px).round() as u32, (h * px).round() as u32, color(theme.c.bg_base))?;
     println!(
         "{}: scene {:.1} ms, render {:.1} ms",
         gpu.adapter_name,

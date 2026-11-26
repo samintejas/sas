@@ -75,7 +75,7 @@ impl AudioEditLayout {
         let fields = AudioField::ALL
             .map(|f| {
                 let w = if f == AudioField::Gain { 118.0 } else { 136.0 };
-                let rect = Rect::new(x, cy - 13.0, x + w, cy + 13.0);
+                let rect = Rect::new(x, cy - 11.0, x + w, cy + 11.0);
                 x += w + 8.0;
                 (f, rect)
             })

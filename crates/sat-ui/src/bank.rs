@@ -22,17 +22,19 @@ pub const CARD_H: f64 = 46.0;
 pub const MIN_CARD_W: f64 = 104.0;
 /// Height of a track's heading.
 pub const HEAD_H: f64 = 26.0;
-/// Height of the hint line at the bottom.
-pub const FOOT_H: f64 = 26.0;
+/// Height of the hint line at the bottom (the status bar carries the hints).
+pub const FOOT_H: f64 = 0.0;
 const GAP: f64 = 6.0;
 
 /// Scroll and selection of the clip bank.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct BankView {
     /// Vertical scroll, px.
     pub scroll: f64,
     /// The selected clip (Delete removes it from the project).
     pub selected: Option<ClipId>,
+    /// Tracks whose clips are folded away under their heading.
+    pub folded: std::collections::BTreeSet<TrackId>,
 }
 
 /// How a clip is used.
@@ -92,6 +94,8 @@ pub enum BankHit {
     Delete(ClipId),
     /// A row's add button: a new clip for the track, in the bank.
     Add(TrackId),
+    /// A track's heading: fold or unfold its clips.
+    Fold(TrackId),
     /// Nothing.
     Nothing,
 }
@@ -118,16 +122,21 @@ impl BankLayout {
         let avail = (body.width() - 20.0).max(MIN_CARD_W);
         let cols = (((avail + GAP) / (MIN_CARD_W + GAP)).floor() as usize).max(1);
         let cw = (avail - GAP * (cols - 1) as f64) / cols as f64;
-        let height = |n: usize| HEAD_H + n.div_ceil(cols).max(1) as f64 * (CARD_H + GAP) + 8.0;
-        let content: f64 = tracks.iter().map(|t| height(doc.clips_on(*t).count())).sum::<f64>() + 8.0;
+        let height = |t: TrackId| {
+            if view.folded.contains(&t) {
+                return HEAD_H + 2.0;
+            }
+            HEAD_H + doc.clips_on(t).count().div_ceil(cols).max(1) as f64 * (CARD_H + GAP) + 8.0
+        };
+        let content: f64 = tracks.iter().map(|t| height(*t)).sum::<f64>() + 8.0;
         let max_scroll = (content - body.height()).max(0.0);
         let scroll = view.scroll.clamp(0.0, max_scroll);
         let mut y = body.y0 + 6.0 - scroll;
         let rows = tracks
             .into_iter()
             .map(|t| {
-                let n = doc.clips_on(t).count();
-                let rect = Rect::new(body.x0 + 6.0, y, body.x1 - 6.0, y + height(n));
+                let rect = Rect::new(body.x0 + 6.0, y, body.x1 - 6.0, y + height(t));
+                let folded = view.folded.contains(&t);
                 let x0 = body.x0 + 10.0;
                 let cards = doc
                     .clips_on(t)
@@ -142,6 +151,7 @@ impl BankLayout {
                             .then(|| Rect::new(card.x1 - 18.0, card.y0 + 1.0, card.x1 - 2.0, card.y0 + 15.0));
                         CardBox { clip: c.id, rect: card, delete }
                     })
+                    .filter(|_| !folded)
                     .collect();
                 let hy = y + HEAD_H / 2.0;
                 let add = Rect::new(rect.x1 - 26.0, hy - 10.0, rect.x1 - 4.0, hy + 10.0);
@@ -169,6 +179,9 @@ impl BankLayout {
             if row.add.contains(pt) {
                 return BankHit::Add(row.track);
             }
+            if pt.y >= row.rect.y0 && pt.y < row.rect.y0 + HEAD_H && (row.rect.x0..row.rect.x1).contains(&pt.x) {
+                return BankHit::Fold(row.track);
+            }
         }
         BankHit::Nothing
     }
@@ -191,7 +204,7 @@ pub fn draw_card(p: &mut Painter<'_>, th: &Theme, doc: &Document, clip: ClipId, 
     let col = th.track(cl.color.0);
     let u = uses(doc, clip);
     let faded = if u.unused() { 0.55 } else { 1.0 };
-    p.rrect(r, 4.0, col.mix(Rgba::hex(0x111111), 0.16));
+    p.rrect(r, 1.0, col.mix(Rgba::hex(0x111111), 0.16));
     p.clip(r, |p| {
         p.rect(Rect::new(r.x0, r.y0, r.x1, r.y0 + 16.0), col.alpha(faded));
         p.text_fit(
@@ -227,7 +240,7 @@ pub fn draw_card(p: &mut Painter<'_>, th: &Theme, doc: &Document, clip: ClipId, 
         p.text(r.x0 + 6.0, r.y1 - 7.0, &uses_label(u), &TextStyle::mono(9.5, ucol), Align::Left);
         p.text(r.x1 - 6.0, r.y1 - 7.0, &format!("{bars}b"), &TextStyle::mono(9.5, c.text_secondary), Align::Right);
     });
-    p.rrect_stroke(r.inset(-0.5), 4.0, 1.0, col.alpha(0.6 * faded));
+    p.rrect_stroke(r.inset(-0.5), 1.0, 1.0, col.alpha(0.6 * faded));
     if selected {
         p.rrect_stroke(r.inset(1.0), 5.0, 2.0, c.accent_primary);
     }
@@ -240,13 +253,15 @@ pub fn draw(p: &mut Painter<'_>, th: &Theme, doc: &Document, view: &BankView, r:
     let n = doc.clips.len();
     let unused = doc.clips.keys().filter(|k| uses(doc, **k).unused()).count();
     let note = if unused > 0 { format!("{n} · {unused} unused") } else { format!("{n}") };
-    crate::dock::side_header(p, th, r, None, "clip bank", &note, crate::dock::close_button(r).x0 - 6.0);
+    let end = crate::dock::close_button(r).x0 - 6.0;
+    crate::dock::side_header(p, th, r, crate::area::EditorType::Bank, None, "", &format!("{note} clips"), end);
     p.clip(l.body, |p| {
         for row in &l.rows {
             let Some(t) = doc.tracks.get(&row.track) else { continue };
             let tc = th.track(t.color.0);
             let hy = row.rect.y0 + HEAD_H / 2.0;
-            p.rrect(Rect::new(row.rect.x0 + 4.0, hy - 5.0, row.rect.x0 + 7.0, hy + 5.0), 1.5, tc);
+            let ic = if view.folded.contains(&row.track) { Icon::ChevronRight } else { Icon::ChevronDown };
+            icons::draw(p, ic, Rect::new(row.rect.x0 + 2.0, hy - 5.0, row.rect.x0 + 12.0, hy + 5.0), tc);
             let k = doc.clips_on(row.track).count();
             let count = format!("{k}");
             let cw = p.text(row.add.x0 - 8.0, hy, &count, &TextStyle::mono(10.5, c.text_secondary), Align::Right);
@@ -277,12 +292,6 @@ pub fn draw(p: &mut Painter<'_>, th: &Theme, doc: &Document, view: &BankView, r:
         let y = track.y0 + (track.height() - th_h) * at;
         p.rrect(Rect::new(track.x0, y, track.x1, y + th_h), 1.0, c.border_strong.alpha(0.6));
     }
-    let foot = Rect::new(r.x0, l.body.y1, r.x1, r.y1);
-    p.hline(foot.x0, foot.x1, foot.y0, c.border_subtle);
-    p.clip(foot, |p| {
-        let hint = "drag onto a lane · double-click places";
-        p.text(foot.x0 + 12.0, foot.center().y, hint, &TextStyle::mono(10.0, c.text_secondary), Align::Left);
-    });
     l
 }
 

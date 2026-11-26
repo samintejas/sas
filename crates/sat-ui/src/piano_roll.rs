@@ -12,7 +12,7 @@ use crate::panel::{self, PanelView, tab};
 
 pub use crate::panel::TABS_H;
 /// Height of the editor toolbar.
-pub const TOOLS_H: f64 = 36.0;
+pub const TOOLS_H: f64 = 30.0;
 /// Width of the keyboard.
 pub const KEYS_W: f64 = 64.0;
 /// Width of the inspector on the right.
@@ -244,7 +244,7 @@ pub fn geometry(doc: &Document, clip: Option<ClipId>, r: Rect, view: &RollView) 
     let (module, notes) = clip_notes(doc, clip.id);
     let tools_y0 = r.y0 + TABS_H;
     let ty = tools_y0 + TOOLS_H / 2.0;
-    let tg = Rect::new(r.x0 + 12.0, ty - 13.0, r.x0 + 140.0, ty + 13.0);
+    let tg = Rect::new(r.x0 + 12.0, ty - 11.0, r.x0 + 140.0, ty + 11.0);
     let tool_rect = |i: f64| Rect::new(tg.x0 + 2.0 + i * 32.0, tg.y0 + 2.0, tg.x0 + 30.0 + i * 32.0, tg.y1 - 2.0);
     let roll_right = r.x1 - INSPECTOR_W;
     let area = Rect::new(r.x0, tools_y0 + TOOLS_H, roll_right, r.y1);
@@ -258,8 +258,8 @@ pub fn geometry(doc: &Document, clip: Option<ClipId>, r: Rect, view: &RollView) 
         layout,
         area,
         tools: [(Tool::Draw, tool_rect(0.0)), (Tool::Select, tool_rect(1.0))],
-        snap: Rect::new(roll_right - 300.0, ty - 13.0, roll_right - 196.0, ty + 13.0),
-        quantise: Rect::new(roll_right - 96.0, ty - 13.0, roll_right - 12.0, ty + 13.0),
+        snap: Rect::new(roll_right - 300.0, ty - 11.0, roll_right - 196.0, ty + 11.0),
+        quantise: Rect::new(roll_right - 96.0, ty - 11.0, roll_right - 12.0, ty + 11.0),
     })
 }
 
@@ -303,9 +303,7 @@ impl RollGeom {
 }
 
 fn button(p: &mut Painter<'_>, th: &Theme, r: Rect, label: &str) {
-    p.rrect(r, 5.0, th.c.bg_control);
-    p.rrect_stroke(r.inset(-0.5), 5.0, 1.0, th.c.border_strong.alpha(0.6));
-    p.text(r.center().x, r.center().y, label, &TextStyle::mono(12.0, th.c.text_strong), Align::Center);
+    crate::area::button(p, th, r, label, false);
 }
 
 /// Draws the clip panel's tab bar with the clip's name, track, bars and
@@ -354,7 +352,7 @@ pub fn clip_bar<'d>(
 /// (left of the panel's own maximize and collapse buttons).
 pub fn open_grid_button(r: Rect) -> Rect {
     let cy = r.y0 + TABS_H / 2.0;
-    Rect::new(r.x1 - 204.0, cy - 13.0, r.x1 - 76.0, cy + 13.0)
+    Rect::new(r.x1 - 204.0, cy - 11.0, r.x1 - 76.0, cy + 11.0)
 }
 
 /// Where the playhead is inside `clip`, if it is inside a placement of it.
@@ -381,7 +379,7 @@ pub fn draw(
     // toolbar
     let tools = Rect::new(r.x0, r.y0 + TABS_H, r.x1, r.y0 + TABS_H + TOOLS_H);
     let ty = tools.center().y;
-    let tg = Rect::new(r.x0 + 12.0, ty - 13.0, r.x0 + 140.0, ty + 13.0);
+    let tg = Rect::new(r.x0 + 12.0, ty - 11.0, r.x0 + 140.0, ty + 11.0);
     p.rrect_stroke(tg.inset(-0.5), 5.0, 1.0, c.border_default);
     for (i, ic) in [Icon::Pencil, Icon::Pointer, Icon::Plus, Icon::ChevronDown].iter().enumerate() {
         let br = Rect::new(tg.x0 + 2.0 + i as f64 * 32.0, tg.y0 + 2.0, tg.x0 + 30.0 + i as f64 * 32.0, tg.y1 - 2.0);

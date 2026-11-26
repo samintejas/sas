@@ -14,7 +14,7 @@ use crate::icons::{self, Icon};
 use crate::paint::{Align, Painter, TextStyle};
 
 /// Height of the breadcrumb bar.
-pub const BAR_H: f64 = 40.0;
+pub const BAR_H: f64 = crate::area::HEADER_H;
 /// Width of the clip dock.
 pub const DOCK_W: f64 = 320.0;
 /// Width of the track list beside a grid.
@@ -369,6 +369,15 @@ fn card(m: &Module, canvas: Rect, scroll: Vec2) -> Card {
     Card { module: m.id, rect, header, power, outs, ins, preview, params }
 }
 
+/// The editor type of a grid kind, for its area header.
+pub fn editor_type(kind: GridKind) -> crate::area::EditorType {
+    match kind {
+        GridKind::Source => crate::area::EditorType::SourceGrid,
+        GridKind::Instrument => crate::area::EditorType::InstrumentGrid,
+        GridKind::Fx => crate::area::EditorType::FxGrid,
+    }
+}
+
 /// Lays out `grid` inside `r`.
 pub fn layout(doc: &Document, grid: GridId, r: Rect, view: &GridView) -> Option<GridLayout> {
     let g = doc.grids.get(&grid)?;
@@ -376,9 +385,10 @@ pub fn layout(doc: &Document, grid: GridId, r: Rect, view: &GridView) -> Option<
     let source = kind == GridKind::Source;
     let bar = Rect::new(r.x0, r.y0, r.x1, r.y0 + BAR_H);
     let cy = bar.center().y;
-    let back = Rect::new(r.x0 + 12.0, cy - 13.0, r.x0 + 104.0, cy + 13.0);
-    let prev = Rect::new(back.x1 + 10.0, cy - 13.0, back.x1 + 34.0, cy + 13.0);
-    let next = Rect::new(prev.x1 + 138.0, cy - 13.0, prev.x1 + 162.0, cy + 13.0);
+    let pill = crate::area::pill_rect(r, editor_type(kind));
+    let back = Rect::new(pill.x1 + 10.0, cy - 11.0, pill.x1 + 102.0, cy + 11.0);
+    let prev = Rect::new(back.x1 + 10.0, cy - 11.0, back.x1 + 34.0, cy + 11.0);
+    let next = Rect::new(prev.x1 + 138.0, cy - 11.0, prev.x1 + 162.0, cy + 11.0);
     let mut kx = next.x1 + 14.0;
     let kinds = grid_kinds(doc, track)
         .into_iter()
@@ -388,12 +398,12 @@ pub fn layout(doc: &Document, grid: GridId, r: Rect, view: &GridView) -> Option<
                 GridKind::Instrument => 100.0,
                 GridKind::Fx => 44.0,
             };
-            let r = Rect::new(kx, cy - 13.0, kx + w, cy + 13.0);
+            let r = Rect::new(kx, cy - 11.0, kx + w, cy + 11.0);
             kx += w;
             (k, r)
         })
         .collect();
-    let add_module = Rect::new(r.x1 - 96.0, cy - 13.0, r.x1 - 12.0, cy + 13.0);
+    let add_module = Rect::new(r.x1 - 96.0, cy - 11.0, r.x1 - 12.0, cy + 11.0);
     let menu = if view.menu {
         // one column, or as many as it takes to fit above the bottom edge,
         // filled top to bottom, left to right, ending under the button
@@ -626,15 +636,7 @@ fn port_dot(p: &mut Painter<'_>, th: &Theme, at: Point, col: Rgba, filled: bool)
 }
 
 fn chip(p: &mut Painter<'_>, th: &Theme, r: Rect, label: &str, icon: Option<Icon>) {
-    let c = &th.c;
-    p.rrect(r, 5.0, c.bg_control);
-    p.rrect_stroke(r.inset(-0.5), 5.0, 1.0, c.border_strong.alpha(0.6));
-    let mut x = r.x0 + 10.0;
-    if let Some(ic) = icon {
-        icons::draw(p, ic, Rect::new(x, r.center().y - 6.0, x + 12.0, r.center().y + 6.0), c.text_primary);
-        x += 18.0;
-    }
-    p.text(x, r.center().y, label, &TextStyle::mono(12.0, c.text_strong), Align::Left);
+    crate::area::chip(p, th, r, label, icon);
 }
 
 /// The track list beside the canvas: the grid's track is highlighted, a
@@ -995,9 +997,8 @@ pub fn draw(
             }
         }
     });
-    // breadcrumb bar
-    p.rect(l.bar, c.bg_base);
-    p.hline(l.bar.x0, l.bar.x1, l.bar.y1 - 1.0, c.border_default);
+    // area header: editor type, then the breadcrumb
+    crate::area::header(p, th, l.bar, editor_type(l.kind));
     let cy = l.bar.center().y;
     let back = if view.back_label.is_empty() { "arrange" } else { view.back_label };
     chip(p, th, l.back, back, Some(Icon::ChevronLeft));
@@ -1033,10 +1034,14 @@ pub fn draw(
     if let Some(clip) = selected_clip.and_then(|id| doc.clips.get(&id)).filter(|cl| cl.track == l.track && source) {
         let label = format!("clip · {}", clip.name);
         let w = p.fonts.measure(&label, &TextStyle::mono(12.0, c.text_strong)) as f64;
-        chip(p, th, Rect::new(x, cy - 13.0, x + w + 20.0, cy + 13.0), &label, None);
+        chip(p, th, Rect::new(x, cy - 11.0, x + w + 20.0, cy + 11.0), &label, None);
     }
     let mut lx = l.add_module.x0 - 16.0;
-    for (label, kind) in [("mod", PortKind::Mod), ("audio", PortKind::Audio), ("notes", PortKind::Notes)] {
+    // the cable legend, when the header has room for it
+    let legend = if lx - 230.0 > x + 120.0 { 3 } else { 0 };
+    for (label, kind) in
+        [("mod", PortKind::Mod), ("audio", PortKind::Audio), ("notes", PortKind::Notes)].into_iter().take(legend)
+    {
         let w = p.text(lx, cy, label, &TextStyle::mono(11.0, c.text_secondary), Align::Right);
         let x1 = lx - w - 6.0;
         let col = port_color(th, kind);

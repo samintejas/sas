@@ -301,8 +301,6 @@ pub fn draw(
     let (bar, x) = panel::draw_bar(p, th, r, PanelView::Mixer);
     let rets = returns(doc);
     let cy = bar.center().y;
-    p.rrect(Rect::new(x, cy - 5.0, x + 10.0, cy + 5.0), 2.0, c.text_secondary);
-    let w = p.text(x + 18.0, cy, "mixer", &TextStyle::mono(12.0, c.text_max).medium(), Align::Left);
     let letters: Vec<String> =
         (0..rets.len().min(SENDS_SHOWN)).map(|i| ((b'a' + i as u8) as char).to_string()).collect();
     let channels = doc.tracks.len();
@@ -311,7 +309,7 @@ pub fn draw(
     } else {
         format!("{channels} channels · sends {}", letters.join("·"))
     };
-    p.text(x + 28.0 + w, cy, &info, &TextStyle::mono(12.0, c.text_secondary), Align::Left);
+    p.text(x, cy, &info, &TextStyle::mono(12.0, c.text_secondary), Align::Left);
 
     let body = Rect::new(r.x0, bar.y1, r.x1, r.y1);
     let l = MixerLayout::new(doc, body, scroll_x);

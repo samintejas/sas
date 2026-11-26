@@ -40,6 +40,7 @@ mod cushion;
 mod export;
 mod input;
 mod plugins;
+mod prefs;
 mod project;
 
 use std::collections::HashMap;
@@ -55,21 +56,24 @@ use sat_doc::{
 };
 use sat_engine::{Command, EngineHandle};
 use sat_modules::{Editor, PortKind, drum};
+use sat_ui::area::{EditorType, MenuLayout, Slot};
 use sat_ui::arrange::{ArrangeLayout, ArrangeState, Hit, RowKind, TransportView, header_controls};
 use sat_ui::arrange_edit::{self, Span};
 use sat_ui::automation;
 use sat_ui::bank::{BankHit, BankLayout, BankView};
+use sat_ui::browser::{BrowserHit, BrowserLayout, BrowserView};
 use sat_ui::controls::{self, SILENT_DB};
 use sat_ui::dock::{Dock, DockButton, Handle, PanelButton, Side, Zoom};
 use sat_ui::grid::{self, GridHit, GridLayout, GridView};
 use sat_ui::mixer::{Knob, Levels, MixHit, MixerLayout};
 use sat_ui::paint::{Fonts, color};
 use sat_ui::palette::{self, Action, PaletteLayout, PaletteView};
-use sat_ui::panel::{self, PanelView, Tab};
+use sat_ui::panel::{self, PanelView};
 use sat_ui::piano_roll::{self, RollGeom, RollHit, RollView, Tool, clip_notes, next_snap};
 use sat_ui::roll_edit::{self, Edited};
 use sat_ui::session::{SessionHit, SessionLayout, SessionView};
-use sat_ui::shell::{self, Frame, MainView, ShellLayout, TransportButton, ViewButton};
+use sat_ui::settings::{Section, SettingsHit, SettingsLayout, SettingsView};
+use sat_ui::shell::{self, Frame, MainView, ShellLayout, TopButton, TransportButton, ViewButton};
 use sat_ui::steps::{StepGeom, StepHit, StepView};
 use vello::kurbo::{Point, Rect, Vec2};
 use vello::util::{RenderContext, RenderSurface};
@@ -90,6 +94,9 @@ const METER_FALL_DB: f32 = 24.0;
 /// Pixels of knob travel for its full range.
 const KNOB_TRAVEL: f64 = 160.0;
 const DOUBLE_CLICK: Duration = Duration::from_millis(350);
+/// The interface scale a window opens at: a little under the display's,
+/// so more fits in one window.
+const UI_SCALE: f64 = 0.9;
 
 /// Audio and transport, tied to one compiled schedule.
 struct Playback {
@@ -382,6 +389,20 @@ struct App {
     dock_drag: Option<Handle>,
     /// Vertical scroll of the inspector.
     macro_scroll: f64,
+    /// The area with focus (where the last press was).
+    focus: Slot,
+    /// The area whose editor-type menu is open, and the menu as drawn.
+    menu: Option<Slot>,
+    menu_layout: Option<MenuLayout>,
+    /// The bottom panel is easing to a new height.
+    animating: bool,
+    /// The interface scale on top of the display's (ctrl = / ctrl - / ctrl 0).
+    ui_scale: f64,
+    /// The outliner's scroll and layout.
+    outline_scroll: f64,
+    outline_layout: Option<sat_ui::outliner::OutlineLayout>,
+    /// The inspector's folded sections.
+    macro_folds: u8,
     mixer_scroll: f64,
     levels: Levels,
     playback: Playback,
@@ -415,6 +436,12 @@ struct App {
     /// The clip bank's scroll and selection.
     bank: BankView,
     bank_layout: Option<BankLayout>,
+    /// The browser's search, folds and selection, and its layout.
+    browser: BrowserView,
+    browser_layout: Option<BrowserLayout>,
+    /// The settings window's section, when open, and its layout.
+    settings: Option<Section>,
+    settings_layout: Option<SettingsLayout>,
     /// A clip being dragged out of the bank, and where the press was.
     bank_drag: Option<(ClipId, Point)>,
     /// Macro learn mode: the next touched parameter maps to a free macro.
@@ -698,6 +725,7 @@ impl App {
             .bank_drag
             .filter(|(_, from)| (self.cursor - *from).hypot() > 4.0)
             .map(|(c, _)| (c, self.cursor, self.drop_target(c).map(|(r, ok, _)| (r, ok))));
+        let settings = self.settings.map(|s| self.settings_view(s));
         let Some(g) = &mut self.gfx else { return };
         let size = g.window.inner_size();
         if size.width == 0 || size.height == 0 {
@@ -705,7 +733,10 @@ impl App {
         }
         let dt = self.last_frame.elapsed().as_secs_f32().min(0.25);
         self.playback.update_levels(self.history.doc(), &mut self.levels, dt);
-        let scale = g.window.scale_factor();
+        // the bottom panel eases to the height of the editor it shows
+        let kind = shell::panel_kind(self.history.doc(), self.panel, self.arrange.selected_clip);
+        self.animating = self.dock_drag.is_none() && self.dock.ease(kind, (dt as f64).min(0.05));
+        let scale = g.window.scale_factor() * self.ui_scale;
         let (w, h) = (size.width as f64 / scale, size.height as f64 / scale);
         self.session.advance(self.history.doc(), self.playback.playhead());
         let plugin_views = self.playback.hosts.views();
@@ -720,6 +751,13 @@ impl App {
             },
             dock: self.dock,
             macro_scroll: self.macro_scroll,
+            focus: self.focus,
+            menu: self.menu,
+            outline_scroll: self.outline_scroll,
+            macro_folds: self.macro_folds,
+            pointer: self.cursor,
+            status: &self.playback.status,
+            ui_scale: self.ui_scale,
             panel: self.panel,
             mixer_scroll: self.mixer_scroll,
             levels: &self.levels,
@@ -734,6 +772,8 @@ impl App {
             session: &self.session,
             palette: self.palette.as_ref(),
             bank: &self.bank,
+            browser: &self.browser,
+            settings: settings.as_ref(),
             drag_clip,
         };
         let mut scene = Scene::new();
@@ -764,10 +804,20 @@ impl App {
         self.macro_layout = drawn.macros;
         self.session_layout = drawn.session;
         self.palette_layout = drawn.palette;
+        self.menu_layout = drawn.menu;
+        if let Some(o) = &drawn.outline {
+            self.outline_scroll = self.outline_scroll.min(o.max_scroll);
+        }
+        self.outline_layout = drawn.outline;
         if let Some(b) = &drawn.bank {
             self.bank.scroll = self.bank.scroll.min(b.max_scroll);
         }
         self.bank_layout = drawn.bank;
+        if let Some(b) = &drawn.browser {
+            self.browser.scroll = self.browser.scroll.min(b.max_scroll);
+        }
+        self.browser_layout = drawn.browser;
+        self.settings_layout = drawn.settings;
         self.scene.reset();
         self.scene.append(&scene, Some(vello::kurbo::Affine::scale(scale)));
         let dev = &self.ctx.devices[g.surface.dev_id];
@@ -1035,6 +1085,8 @@ impl App {
                 return;
             }
             SessionHit::BackToArrangement => return self.back_to_arrangement(),
+            SessionHit::AddScene => return self.add_scene(),
+            SessionHit::AddTrack => return self.add_track(sat_doc::TrackKind::Track),
             SessionHit::Nothing => return,
         };
         if let SessionHit::Launch(_, c) = hit {
@@ -1263,7 +1315,21 @@ impl App {
             }
             return;
         }
+        if self.settings.is_some() {
+            if let Some(h) = self.settings_layout.as_ref().map(|l| l.hit(pt)) {
+                self.press_settings(h);
+            }
+            return;
+        }
         let Some(sl) = self.shell else { return };
+        // a press anywhere but the browser's search field ends typing there
+        self.browser.typing = false;
+        if self.menu.take().is_some() {
+            if let Some((slot, ty)) = self.menu_layout.take().and_then(|m| m.hit(pt).map(|t| (m.slot, t))) {
+                self.show_editor(slot, ty);
+            }
+            return;
+        }
         if let Some(h) = sl.handle_at(pt) {
             if double {
                 match h {
@@ -1276,23 +1342,47 @@ impl App {
             }
             return;
         }
-        self.panel_focus = sl.panel.contains(pt);
-        self.bank_focus = sl.left.is_some_and(|r| r.contains(pt));
-        if let Some(r) = sl.left
-            && r.contains(pt)
-        {
-            if sat_ui::dock::close_button(r).contains(pt) {
-                return self.dock.set_side(Side::Left, false);
-            }
-            return self.press_bank(pt, double);
+        if let Some((target, ty, _)) = shell::strip_buttons(&sl).into_iter().find(|(_, _, r)| r.contains(pt)) {
+            return self.press_strip(sl, target, ty);
         }
-        if let Some(r) = sl.right
-            && r.contains(pt)
-        {
-            if sat_ui::dock::close_button(r).contains(pt) {
-                return self.dock.set_side(Side::Right, false);
+        // the status bar's detail-view selector: what the bottom panel shows
+        if sl.status.contains(pt) {
+            if let Some((v, _)) = shell::status_tabs(&sl).into_iter().find(|(_, r)| r.contains(pt)) {
+                return self.press_strip(sl, shell::StripTarget::Panel, v.editor());
             }
-            return self.press_macros(pt, double);
+            return;
+        }
+        let slot = sl.slot_at(pt);
+        if let Some(s) = slot {
+            self.focus = s;
+        }
+        self.panel_focus = slot == Some(Slot::Panel);
+        let side = match slot {
+            Some(Slot::Left) => Some(Side::Left),
+            Some(Slot::Right) => Some(Side::Right),
+            _ => None,
+        };
+        self.bank_focus = side.is_some_and(|s| self.dock.side_shows(s) == EditorType::Bank);
+        // every area's editor-type button opens its menu
+        if let Some(s) = slot
+            && let Some(r) = sl.slot_rect(s)
+        {
+            let ty = shell::editor_in(self.history.doc(), self.view, self.panel, &self.dock, s);
+            if sat_ui::area::pill_rect(r, ty).contains(pt) {
+                self.menu = Some(s);
+                return;
+            }
+        }
+        if let (Some(side), Some(r)) = (side, slot.and_then(|s| sl.slot_rect(s))) {
+            if sat_ui::dock::close_button(r).contains(pt) {
+                return self.dock.set_side(side, false);
+            }
+            return match self.dock.side_shows(side) {
+                EditorType::Inspector => self.press_macros(pt, double),
+                EditorType::Outliner => self.press_outline(pt, double),
+                EditorType::Browser => self.press_browser(pt, double),
+                _ => self.press_bank(pt, double),
+            };
         }
         if sl.panel.contains(pt) {
             return self.press_panel(sl, pt, double);
@@ -1318,6 +1408,16 @@ impl App {
                     let mut range = self.history.doc().loop_range;
                     range.enabled = !range.enabled;
                     return self.edit("loop", vec![Op::SetLoop { range }]);
+                }
+                None => {}
+            }
+            match shell::top_buttons(sl.topbar).into_iter().find(|(_, r)| r.contains(pt)).map(|(b, _)| b) {
+                Some(TopButton::Browser) => return self.toggle_browser(),
+                Some(TopButton::Engine) => return self.settings = Some(Section::Audio),
+                Some(TopButton::Settings) => return self.settings = Some(Section::Interface),
+                Some(b @ (TopButton::Undo | TopButton::Redo)) => {
+                    self.undo(b == TopButton::Redo);
+                    return self.update_title();
                 }
                 None => {}
             }
@@ -1622,6 +1722,11 @@ impl App {
                     self.bank.selected = Some(id);
                 }
             }
+            BankHit::Fold(t) => {
+                if !self.bank.folded.remove(&t) {
+                    self.bank.folded.insert(t);
+                }
+            }
             BankHit::Nothing => self.bank.selected = None,
         }
     }
@@ -1769,19 +1874,8 @@ impl App {
             Some(PanelButton::Collapse) => return self.dock.toggle_panel(),
             None => {}
         }
-        let tab = panel::hit_tab(sl.panel, pt);
-        if let Some(t) = tab {
-            self.panel = match t {
-                Tab::Clip => PanelView::Clip,
-                Tab::Mixer => PanelView::Mixer,
-            };
-            if !sl.panel_open() {
-                self.dock.open_panel();
-            }
-            return;
-        }
         if pt.y < sl.panel.y0 + panel::TABS_H {
-            // double-click on the tab bar maximizes, like a title bar
+            // double-click on the header maximizes, like a title bar
             if double {
                 self.dock.toggle_zoom(Zoom::Panel);
             } else if !sl.panel_open() {
@@ -1859,6 +1953,7 @@ impl App {
                 self.begin_drag(ParamTarget::Gain(t), Axis::Vertical { travel: l.fader.height() }, double)
             }
             MacroHit::Pan(t) => self.begin_drag(ParamTarget::Pan(t), Axis::Vertical { travel: KNOB_TRAVEL }, double),
+            MacroHit::Fold(bit) => self.macro_folds ^= bit,
             MacroHit::Nothing => {}
         }
     }
@@ -2350,6 +2445,249 @@ impl App {
         self.update_title();
     }
 
+    /// An icon in an edge strip: opens its editor in its space, or closes
+    /// the space when that editor already shows there.
+    fn press_strip(&mut self, sl: ShellLayout, target: shell::StripTarget, ty: EditorType) {
+        match target {
+            shell::StripTarget::Side(side) => {
+                if self.dock.side_open(side) && self.dock.side_shows(side) == ty {
+                    self.dock.set_side(side, false);
+                } else {
+                    self.dock.set_side_shows(side, ty);
+                    if self.dock.zoom == Some(Zoom::Main) {
+                        self.dock.zoom = None;
+                    }
+                    self.dock.set_side(side, true);
+                }
+            }
+            shell::StripTarget::Panel => {
+                if sl.panel_open() && self.panel.editor() == ty {
+                    self.dock.toggle_panel();
+                } else {
+                    self.show_editor(Slot::Panel, ty);
+                }
+            }
+        }
+    }
+
+    /// The settings window's view of the app, on `section`.
+    fn settings_view(&self, section: Section) -> SettingsView {
+        let out = self.playback.output.as_ref();
+        SettingsView {
+            section,
+            ui_scale: self.ui_scale,
+            snap: self.arrange.snap,
+            note_len: self.note_len,
+            device: out.map_or(String::new(), |o| o.name.clone()),
+            sample_rate: out.map_or(0.0, |o| o.sample_rate),
+            latency_ms: out.map_or(0.0, |o| o.latency() * 1000.0),
+        }
+    }
+
+    /// The settings worth keeping between runs.
+    fn prefs(&self) -> prefs::Prefs {
+        let mut dock = self.dock;
+        dock.zoom = None;
+        prefs::Prefs { ui_scale: self.ui_scale, snap: self.arrange.snap, note_len: self.note_len, dock }
+    }
+
+    /// A press in the settings window.
+    fn press_settings(&mut self, h: SettingsHit) {
+        match h {
+            SettingsHit::Outside | SettingsHit::Close => self.settings = None,
+            SettingsHit::Section(s) => self.settings = Some(s),
+            SettingsHit::Scale(k) => self.ui_scale = k,
+            SettingsHit::ScaleDown => self.ui_scale = (self.ui_scale - 0.05).max(0.7),
+            SettingsHit::ScaleUp => self.ui_scale = (self.ui_scale + 0.05).min(1.4),
+            SettingsHit::ResetLayout => self.dock = Dock::default(),
+            SettingsHit::Snap(s) => self.arrange.snap = s,
+            SettingsHit::NoteLen(n) => self.note_len = n,
+            SettingsHit::Inside => return,
+        }
+        self.prefs().save();
+    }
+
+    /// The top bar's browser button: shows the browser in the left sidebar,
+    /// or closes it there.
+    fn toggle_browser(&mut self) {
+        let side = self.dock.side_of(EditorType::Browser).unwrap_or(Side::Left);
+        if self.dock.side_open(side) && self.dock.side_shows(side) == EditorType::Browser {
+            self.dock.set_side(side, false);
+        } else {
+            self.dock.set_side_shows(side, EditorType::Browser);
+            if self.dock.zoom == Some(Zoom::Main) {
+                self.dock.zoom = None;
+            }
+            self.dock.set_side(side, true);
+        }
+    }
+
+    /// A press in the browser.
+    fn press_browser(&mut self, pt: Point, double: bool) {
+        let Some(l) = self.browser_layout.clone() else { return };
+        match l.hit(&self.browser, pt) {
+            BrowserHit::Search => self.browser.typing = true,
+            BrowserHit::Clear => {
+                self.browser.query.clear();
+                self.browser.typing = true;
+            }
+            BrowserHit::Fold(c) => self.browser.toggle(c),
+            BrowserHit::Item(c, kind) if double => self.add_from_browser(c, kind),
+            BrowserHit::Item(_, kind) => self.browser.selected = Some(kind),
+            BrowserHit::Add(c, kind) => {
+                self.browser.selected = Some(kind);
+                self.add_from_browser(c, kind);
+            }
+            BrowserHit::Nothing => {}
+        }
+    }
+
+    /// Keys while the browser's search field has them; true if used.
+    fn browser_key(&mut self, key: &Key, ctrl: bool) -> bool {
+        let b = &mut self.browser;
+        match key {
+            Key::Named(NamedKey::Escape) => {
+                if b.query.is_empty() {
+                    b.typing = false;
+                } else {
+                    b.query.clear();
+                }
+            }
+            Key::Named(NamedKey::Enter) => {
+                b.typing = false;
+                // enter adds the only match, or the first one
+                let first = self.browser_layout.as_ref().and_then(|l| l.items.first()).map(|i| (i.cat, i.kind));
+                if let Some((c, kind)) = first {
+                    self.browser.selected = Some(kind);
+                    self.add_from_browser(c, kind);
+                }
+            }
+            Key::Named(NamedKey::Backspace) => {
+                b.query.pop();
+            }
+            Key::Named(NamedKey::Space) => b.query.push(' '),
+            Key::Character(c) if !ctrl => {
+                b.query.push_str(&c.to_lowercase());
+                b.scroll = 0.0;
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// Adds a browser item: a new track, or a module into the selected
+    /// track's grid where it belongs, then shows that grid.
+    fn add_from_browser(&mut self, cat: sat_ui::browser::Category, kind: &'static str) {
+        if let Some(t) = sat_ui::browser::track_kind(kind) {
+            return self.add_track(t);
+        }
+        let Some(gk) = cat.grid() else { return };
+        let Some(t) = self.arrange.selected_track else { return };
+        let doc = self.history.doc();
+        let Some((_, g)) = grid::grid_kinds(doc, t).into_iter().find(|(k, _)| *k == gk) else { return };
+        let (id, ops) = if gk == GridKind::Fx {
+            sat_modules::fx::insert(doc, g, kind)
+        } else {
+            let pos = grid::free_pos(doc, g);
+            let (id, op) = sat_modules::add_module(doc, g, kind, pos);
+            (id, vec![op])
+        };
+        self.edit("add module", ops);
+        self.show_grid(g);
+        self.grid.selected = Some(id);
+        self.update_title();
+    }
+
+    /// Adds a track (with the default voice patch), group or return after
+    /// the last of its kind at the top level, and selects it.
+    fn add_track(&mut self, kind: sat_doc::TrackKind) {
+        use sat_doc::TrackKind;
+        let doc = self.history.doc();
+        let roots: Vec<TrackId> = doc.root.iter().copied().collect();
+        // tracks and groups before the returns, returns before the master
+        let index = match kind {
+            TrackKind::Return => roots.iter().take_while(|t| doc.tracks[t].kind != TrackKind::Master).count(),
+            _ => roots
+                .iter()
+                .take_while(|t| !matches!(doc.tracks[t].kind, TrackKind::Return | TrackKind::Master))
+                .count(),
+        };
+        let n = doc.tracks.values().filter(|t| t.kind == kind).count() + 1;
+        let name = match kind {
+            TrackKind::Group => format!("group {n}"),
+            TrackKind::Return => format!("return {n}"),
+            _ => format!("track {n}"),
+        };
+        let color = sat_doc::Color((doc.tracks.len() % 8) as u8);
+        let (id, op) = match kind {
+            TrackKind::Track => Op::add_track(name, None, index),
+            _ => Op::add_bus(kind, name, None, index),
+        };
+        let mut ops = Vec::new();
+        let (ins, fx) = match &op {
+            Op::AddTrack { grids, .. } => (grids.instrument, grids.fx),
+            _ => unreachable!(),
+        };
+        ops.push(op);
+        ops.push(Op::SetTrackColor { id, color });
+        if let Some(ins) = ins {
+            ops.extend(sat_modules::instrument::default_patch_ops(ins, &[]).0);
+        }
+        ops.extend(sat_modules::fx::chain(fx, &[]));
+        self.edit("add track", ops);
+        self.arrange.selected_track = Some(id);
+        self.update_title();
+    }
+
+    /// Adds a scene after the last one.
+    fn add_scene(&mut self) {
+        let n = self.history.doc().scenes.len();
+        let id = sat_doc::SceneId::new();
+        self.edit("add scene", vec![Op::AddScene { id, name: format!("scene {}", n + 1), index: n }]);
+        self.update_title();
+    }
+
+    /// A press in the outliner.
+    fn press_outline(&mut self, pt: Point, double: bool) {
+        use sat_ui::outliner::OutlineHit;
+        let Some(l) = self.outline_layout.clone() else { return };
+        match l.hit(pt) {
+            OutlineHit::Row(t) if double => self.open_track(t),
+            OutlineHit::Row(t) => self.select_track(t),
+            OutlineHit::Fold(t) => {
+                if !self.arrange.collapsed.remove(&t) {
+                    self.arrange.collapsed.insert(t);
+                }
+            }
+            OutlineHit::Mute(t) => self.toggle_flag(t, TrackFlag::Mute),
+            OutlineHit::Solo(t) => self.toggle_flag(t, TrackFlag::Solo),
+            OutlineHit::Nothing => {}
+        }
+    }
+
+    /// Shows `ty` in the area `slot` (from its editor-type menu).
+    fn show_editor(&mut self, slot: Slot, ty: EditorType) {
+        let track = self.arrange.selected_track;
+        match (slot, ty) {
+            (Slot::Main, EditorType::Arrange) => self.view = MainView::Arrange,
+            (Slot::Main, EditorType::Session) => self.view = MainView::Session,
+            (Slot::Main, EditorType::SourceGrid) => self.open_grid(track, GridKind::Source),
+            (Slot::Main, EditorType::InstrumentGrid) => self.open_grid(track, GridKind::Instrument),
+            (Slot::Main, EditorType::FxGrid) => self.open_grid(track, GridKind::Fx),
+            (Slot::Panel, EditorType::Mixer) => {
+                self.panel = PanelView::Mixer;
+                self.dock.open_panel();
+            }
+            (Slot::Panel, _) => {
+                self.panel = PanelView::Clip;
+                self.dock.open_panel();
+            }
+            (Slot::Left, t) => self.dock.set_side_shows(Side::Left, t),
+            (Slot::Right, t) => self.dock.set_side_shows(Side::Right, t),
+            _ => {}
+        }
+    }
+
     /// Shows or hides a docked area.
     fn toggle_dock(&mut self, b: DockButton) {
         match b {
@@ -2363,7 +2701,7 @@ impl App {
     fn window_size(&self) -> (f64, f64) {
         let Some(g) = &self.gfx else { return (1440.0, 900.0) };
         let s = g.window.inner_size();
-        let k = g.window.scale_factor();
+        let k = g.window.scale_factor() * self.ui_scale;
         (s.width as f64 / k, s.height as f64 / k)
     }
 
@@ -2371,6 +2709,10 @@ impl App {
         let Some(h) = self.dock_drag else { return };
         let (w, hh) = self.window_size();
         self.dock.drag(h, self.cursor, w, hh);
+        if h == Handle::Panel {
+            // the editor shown keeps the height it was dragged to
+            self.dock.remember(shell::panel_kind(self.history.doc(), self.panel, self.arrange.selected_clip));
+        }
     }
 
     fn toggle_loop(&mut self) {
@@ -2392,6 +2734,20 @@ impl App {
         if self.palette.is_some() {
             return self.palette_key(key);
         }
+        let ctrl = self.mods.control_key() || self.mods.super_key();
+        if self.settings.is_some() {
+            if matches!(key, Key::Named(NamedKey::Escape)) || matches!(key, Key::Character(c) if ctrl && c == ",") {
+                self.settings = None;
+            }
+            return;
+        }
+        if ctrl && matches!(key, Key::Character(c) if c == ",") {
+            self.settings = Some(Section::Interface);
+            return;
+        }
+        if self.browser.typing && self.browser_key(key, ctrl) {
+            return;
+        }
         if (self.mods.control_key() || self.mods.super_key())
             && matches!(key, Key::Character(c) if c.eq_ignore_ascii_case("k"))
         {
@@ -2412,6 +2768,15 @@ impl App {
                 return self.dock.toggle_side(side);
             }
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("j") => return self.dock.toggle_panel(),
+            // interface scale, like a browser's zoom
+            Key::Character(c) if ctrl && matches!(c.as_str(), "=" | "+" | "-" | "0") => {
+                self.ui_scale = match c.as_str() {
+                    "0" => UI_SCALE,
+                    "-" => (self.ui_scale - 0.05).max(0.7),
+                    _ => (self.ui_scale + 0.05).min(1.4),
+                };
+                return self.prefs().save();
+            }
             Key::Named(NamedKey::Space) if ctrl => {
                 // maximize the area under the pointer; again restores
                 let over_panel = self.shell.is_some_and(|sl| sl.panel.contains(self.cursor));
@@ -2419,8 +2784,11 @@ impl App {
             }
             _ => {}
         }
+        if self.menu.take().is_some() && matches!(key, Key::Named(NamedKey::Escape)) {
+            return;
+        }
         if self.bank_focus
-            && self.dock.side_open(Side::Left)
+            && self.dock.side_of(EditorType::Bank).is_some()
             && matches!(key, Key::Named(NamedKey::Delete | NamedKey::Backspace))
             && let Some(c) = self.bank.selected.take()
         {
@@ -2490,18 +2858,25 @@ impl App {
             self.grid.scroll = Vec2::new((self.grid.scroll.x - dx).max(0.0), (self.grid.scroll.y - dy).max(0.0));
             return;
         }
-        if let Some(sl) = self.shell
-            && sl.left.is_some_and(|r| r.contains(self.cursor))
-        {
-            let max = self.bank_layout.as_ref().map_or(0.0, |b| b.max_scroll);
-            self.bank.scroll = (self.bank.scroll - dy).clamp(0.0, max);
-            return;
-        }
-        if let Some(sl) = self.shell
-            && sl.right.is_some_and(|r| r.contains(self.cursor))
-        {
-            let max = self.macro_layout.as_ref().map_or(0.0, |m| m.max_scroll);
-            self.macro_scroll = (self.macro_scroll - dy).clamp(0.0, max);
+        let side = match self.shell.and_then(|sl| sl.slot_at(self.cursor)) {
+            Some(Slot::Left) => Some(Side::Left),
+            Some(Slot::Right) => Some(Side::Right),
+            _ => None,
+        };
+        if let Some(side) = side {
+            if self.dock.side_shows(side) == EditorType::Inspector {
+                let max = self.macro_layout.as_ref().map_or(0.0, |m| m.max_scroll);
+                self.macro_scroll = (self.macro_scroll - dy).clamp(0.0, max);
+            } else if self.dock.side_shows(side) == EditorType::Outliner {
+                let max = self.outline_layout.as_ref().map_or(0.0, |o| o.max_scroll);
+                self.outline_scroll = (self.outline_scroll - dy).clamp(0.0, max);
+            } else if self.dock.side_shows(side) == EditorType::Browser {
+                let max = self.browser_layout.as_ref().map_or(0.0, |b| b.max_scroll);
+                self.browser.scroll = (self.browser.scroll - dy).clamp(0.0, max);
+            } else {
+                let max = self.bank_layout.as_ref().map_or(0.0, |b| b.max_scroll);
+                self.bank.scroll = (self.bank.scroll - dy).clamp(0.0, max);
+            }
             return;
         }
         if let Some(sl) = self.shell
@@ -2533,6 +2908,7 @@ impl App {
 
     fn quit(&mut self, el: &ActiveEventLoop) {
         self.end_drag();
+        self.prefs().save();
         self.keep_unsaved();
         self.project.finish();
         el.exit();
@@ -2589,7 +2965,7 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(_) => {}
             WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
             WindowEvent::CursorMoved { position, .. } => {
-                let scale = self.gfx.as_ref().map(|g| g.window.scale_factor()).unwrap_or(1.0);
+                let scale = self.gfx.as_ref().map(|g| g.window.scale_factor()).unwrap_or(1.0) * self.ui_scale;
                 self.cursor = Point::new(position.x / scale, position.y / scale);
                 dirty = self.drag.is_some()
                     || self.roll_drag.is_some()
@@ -2656,7 +3032,7 @@ impl ApplicationHandler for App {
         }
         // while playing or meters are falling, redraw at display rate; otherwise
         // sleep until input or the next autosave
-        if self.playback.playing || self.metering() {
+        if self.playback.playing || self.metering() || self.animating {
             if let Some(g) = &self.gfx {
                 g.window.request_redraw();
             }
@@ -2754,19 +3130,35 @@ fn main() {
         return;
     }
     let playback = Playback::start(&doc, pool, args.project.as_deref());
-    let arrange = ArrangeState {
+    let mut arrange = ArrangeState {
         selected_clip: selected,
         selected_track: selected.and_then(|c| doc.clips.get(&c)).map(|c| c.track),
         ..Default::default()
     };
+    // the settings kept from the last run
+    let prefs = prefs::Prefs::load(prefs::Prefs {
+        ui_scale: UI_SCALE,
+        snap: arrange.snap,
+        note_len: Ticks::sixteenths(1),
+        dock: Dock::default(),
+    });
+    arrange.snap = prefs.snap;
     let mut app = App {
         project,
         history: History::new(doc, 500),
         arrange,
         panel: PanelView::Clip,
-        dock: Dock::default(),
+        dock: Dock { panel_h: prefs.dock.roll_h, ..prefs.dock },
         dock_drag: None,
         macro_scroll: 0.0,
+        focus: Slot::Main,
+        menu: None,
+        menu_layout: None,
+        animating: false,
+        ui_scale: prefs.ui_scale,
+        outline_scroll: 0.0,
+        outline_layout: None,
+        macro_folds: 0,
         mixer_scroll: 0.0,
         levels: HashMap::new(),
         playback,
@@ -2796,6 +3188,10 @@ fn main() {
         session_layout: None,
         bank: BankView::default(),
         bank_layout: None,
+        browser: BrowserView::default(),
+        browser_layout: None,
+        settings: None,
+        settings_layout: None,
         bank_drag: None,
         learn: false,
         macro_layout: None,
@@ -2807,7 +3203,7 @@ fn main() {
         panel_focus: false,
         bank_focus: false,
         cursor_icon: winit::window::CursorIcon::Default,
-        note_len: Ticks::sixteenths(1),
+        note_len: prefs.note_len,
         last_click: None,
         last_frame: Instant::now(),
         input: None,
