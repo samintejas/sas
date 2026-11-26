@@ -449,8 +449,8 @@ mod macros {
         let d = demo();
         let track = d.doc.clips[&d.selected].track;
         let tr = &d.doc.tracks[&track];
-        let panel = Rect::new(4.0, 594.0, 1436.0, 900.0);
-        let l = layout(&d.doc, Some(track), None, panel);
+        let side = Rect::new(1120.0, 44.0, 1436.0, 896.0);
+        let l = layout(&d.doc, Some(track), None, side, 0.0);
         let grids: Vec<_> = l.sections.iter().map(|s| s.grid).collect();
         assert_eq!(grids, vec![tr.source_grid.unwrap(), tr.instrument_grid.unwrap()]);
         let ins = &l.sections[1];
@@ -461,7 +461,15 @@ mod macros {
         assert_eq!(l.hit(l.learn.center()), MacroHit::Learn);
         assert_eq!(l.hit(ins.open.center()), MacroHit::Open(ins.grid));
         assert_eq!(l.hit(l.fader.center()), MacroHit::Fader(track));
-        assert!(l.sections.iter().all(|s| s.rect.x1 <= l.track_card.x0), "sections sit left of the track card");
+        assert!(l.sections.iter().all(|s| s.rect.y0 >= l.track_card.y1), "sections stack under the track card");
+        assert!(l.sections.iter().all(|s| s.rect.x1 <= side.x1), "and fit the sidebar");
+        // a short sidebar scrolls; scrolled, the knobs move up with it
+        assert!(l.max_scroll > 20.0, "{}", l.max_scroll);
+        let down = layout(&d.doc, Some(track), None, side, 20.0);
+        assert_eq!(down.sections[1].knobs[2].1.y0, ins.knobs[2].1.y0 - 20.0);
+        // a wide one lays the macros out eight to a row
+        let wide = layout(&d.doc, Some(track), None, Rect::new(0.0, 44.0, 640.0, 896.0), 0.0);
+        assert_eq!(wide.sections[0].knobs[7].1.y0, wide.sections[0].knobs[0].1.y0);
         // with an fx grid on screen, the page shows that grid; a bus shows its fx grid
         let fx = tr.fx_grids[0];
         assert_eq!(grids_for(&d.doc, Some(track), Some(fx)), vec![fx]);

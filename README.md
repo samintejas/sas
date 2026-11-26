@@ -30,7 +30,7 @@ track's fx grid (eq, comp with side chain, gate with key input, drive,
 crush, filter, chorus, flanger, phaser, tremolo/auto-pan, ring mod, delay,
 reverb, utility, limiter, split and mix) runs between its sound and its strip, buses and the
 master included. Every grid has 16 macros: each drives one or more of its
-grid's parameters over a range, and the bottom panel's macros page shows the
+grid's parameters over a range, and the inspector (right sidebar) shows the
 selected track's macros with its fader and pan. Knobs, macros and bypass
 switches change the sound live while it plays. The demo song is made with
 built-in modules only (its vocal is a sampler playing a generated "ah"),
@@ -183,7 +183,11 @@ the app: the device's rate).
 | a mixer strip's src / ins / fx buttons, double-click a strip, a track header or a session column header | open that track's grid (double-click opens a track's instrument, a bus's fx) |
 | click a mixer strip, or a track in the list beside a grid, while a grid is shown | the grid follows to that track (its fx grid if it has none of that kind); the list's m / s buttons mute and solo |
 | Esc in a grid with nothing selected, or its back button | back to the arrangement or session it was opened from |
-| Tab, Shift+Tab, or the panel tabs | cycle the bottom panel through clip, mixer, macros and the clip bank |
+| Tab, or the panel tabs | switch the bottom panel between the clip editor and the mixer (a collapsed panel opens) |
+| drag the bottom panel's top edge or a sidebar's inner edge | resize it; dragged far enough it collapses or closes; double-click the edge to collapse or close |
+| Ctrl+J, or the panel's chevron | collapse the bottom panel to its tab bar, or open it |
+| Ctrl+B / Ctrl+Alt+B, or the top bar's layout buttons | show or hide the clip bank (left sidebar) / the inspector with the selected track's macros (right sidebar) |
+| Ctrl+Space, or double-click the panel's tab bar | maximize the area under the pointer: the bottom panel over the main view, or the main view over everything; again restores |
 | drag a fader or knob | set level, pan or a send (Shift for fine steps, double-click to reset); one drag is one undo step |
 | `m` / `s` buttons, or the keys | mute / solo (the keys act on the selected track); the round button arms recording |
 | Ctrl+Z, Ctrl+Shift+Z | undo, redo |
@@ -196,7 +200,7 @@ the app: the device's rate).
 | arrange: drag a clip, drag its left or right edge | move it along its track, trim or extend it (a looping clip repeats, a one-shot stops at its ends); both snap to the toolbar's snap (1 bar, 1 beat, 1/16, off), Alt trims off the grid |
 | arrange: Alt-drag a clip, Ctrl+D | drag a copy (the original stays), put a copy right after it; a copy is a clip of its own playing the same notes or audio |
 | arrange: Delete, Left / Right, Ctrl+L, Esc | take the selected clip out of the arrangement (it stays in the clip bank), nudge it by the snap, loop over it, deselect |
-| bank tab: every clip by track, with how often the arrangement and session use it | drag a clip onto its track's lane or a session slot to place it there, double-click to place it at the playhead, + for a new clip, × or Delete to delete an unused (or the selected) clip for good |
+| clip bank (left sidebar): every clip by track, with how often the arrangement and session use it | drag a clip onto its track's lane or a session slot to place it there, double-click to place it at the playhead, + for a new clip, × or Delete to delete an unused (or the selected) clip for good |
 | arrange: double-click an empty lane | a new looping clip there, fed by the track's first source module |
 | arrange: a track header's automation button, a lane's + and × | start a gain lane (or show / hide the track's lanes), add its pan lane, remove the lane |
 | arrange: click an automation lane, drag a point, double-click a point | add a breakpoint (snapped to sixteenths; Alt places it freely), move it (its value shows while dragging), delete it; a return's or master's row is its gain lane |
@@ -215,7 +219,7 @@ the app: the device's rate).
 | an audio clip's take lane: click, or drag along it | play that take over the comp segment under the click, or over the dragged range (snapped to sixteenths) |
 | an audio clip's square fade handles | drag the fade in or out |
 | sampler: click its waveform | load a WAV (white line: where notes start; amber: where the loop starts) |
-| macros page: drag a macro, learn, click an empty macro, open | play it; map the next touched parameter (in any grid or the euclid editor) to a free macro, click a macro to clear it; start learning; show that grid |
+| inspector (right sidebar): drag a macro, learn, click an empty macro, open | play it; map the next touched parameter (in any grid or the euclid editor) to a free macro, click a macro to clear it; start learning; show that grid |
 | a parameter row with a macro badge (m1–m16) | drag it to play its macro |
 | fx grid: + module, the power icon, dragging between ports | add an effect just before out (an empty grid gets its in and out), bypass it, reroute (split, mix, side chain) |
 | drum seq: click a step, Shift-click it, the page buttons | toggle it, cycle its velocity (normal, accent, ghost), show another bar |
@@ -241,7 +245,7 @@ cargo run --release -p sat-ui --example screenshot -- grid.png 2 clip grid  # it
 cargo run --release -p sat-ui --example screenshot -- ins.png 2 clip instrument  # its instrument grid
 cargo run --release -p sat-ui --example screenshot -- fx.png 2 clip fx       # its fx grid
 cargo run --release -p sat-ui --example screenshot -- smp.png 2 ah instrument  # the vox sampler
-cargo run --release -p sat-ui --example screenshot -- mac.png 2 macros instrument  # macros page
+cargo run --release -p sat-ui --example screenshot -- mac.png 2 macros instrument  # inspector open (SAT_DOCK=collapsed,max,focus,noleft for other layouts)
 cargo run --release -p sat-ui --example screenshot -- ses.png 2 clip session  # session view
 ```
 

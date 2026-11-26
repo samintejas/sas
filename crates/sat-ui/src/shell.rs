@@ -1,12 +1,14 @@
-//! The app shell: top bar, arrange view and bottom panel.
+//! The app shell: top bar, the main view, and the docked areas around it
+//! (bottom panel, left and right sidebars; see [`crate::dock`]).
 
 use sat_doc::sat_time::{PPQ, Ticks};
 use sat_doc::{Document, GridId, GridKind};
 use sat_theme::{Rgba, Theme};
 use vello::Scene;
-use vello::kurbo::Rect;
+use vello::kurbo::{Point, Rect};
 
 use crate::arrange::{self, ArrangeLayout, ArrangeState, TransportView};
+use crate::dock::{self, Dock, DockButton, GAP, GRAB, Handle, Side, Zoom};
 use crate::grid::{self, GridLayout, GridView};
 use crate::icons::{self, Icon};
 use crate::mixer::{self, Levels, MixerLayout};
@@ -17,8 +19,6 @@ use crate::steps::{self, StepGeom, StepView};
 
 /// Height of the top bar.
 pub const TOPBAR_H: f64 = 40.0;
-/// Default height of the bottom panel.
-pub const PANEL_H: f64 = 306.0;
 
 /// What the main area shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -88,11 +88,23 @@ pub fn view_buttons(topbar: Rect) -> [(ViewButton, Rect); 5] {
 /// would land (and whether it can).
 pub type DragClip = (sat_doc::ClipId, vello::kurbo::Point, Option<(Rect, bool)>);
 
+/// The top bar's layout toggles: left sidebar, bottom panel, right sidebar.
+pub fn dock_buttons(topbar: Rect) -> [(DockButton, Rect); 3] {
+    let rx = topbar.x1 - 12.0 - 3.0 * 34.0 - 10.0;
+    let cy = topbar.center().y;
+    let mut k = 3.0;
+    [DockButton::Left, DockButton::Panel, DockButton::Right].map(|b| {
+        let x1 = rx - (k - 1.0) * 28.0;
+        k -= 1.0;
+        (b, Rect::new(x1 - 26.0, cy - 13.0, x1, cy + 13.0))
+    })
+}
+
 /// The top bar's search box, which opens the command palette.
 pub fn search_box(topbar: Rect) -> Rect {
-    let rx = topbar.x1 - 12.0 - 3.0 * 34.0;
+    let rx = dock_buttons(topbar)[0].1.x0 - 10.0;
     let cy = topbar.center().y;
-    Rect::new(rx - 78.0, cy - 13.0, rx - 6.0, cy + 13.0)
+    Rect::new(rx - 72.0, cy - 13.0, rx, cy + 13.0)
 }
 
 /// Everything the shell needs to draw a frame.
@@ -105,8 +117,10 @@ pub struct Frame<'a> {
     pub arrange: &'a ArrangeState,
     /// Transport.
     pub transport: TransportView,
-    /// Bottom panel height (0 hides it).
-    pub panel_h: f64,
+    /// Which docked areas show, and their sizes.
+    pub dock: Dock,
+    /// Vertical scroll of the inspector (right sidebar).
+    pub macro_scroll: f64,
     /// What the bottom panel shows.
     pub panel: PanelView,
     /// Horizontal scroll of the mixer.
@@ -157,13 +171,13 @@ pub struct Drawn {
     pub steps: Option<StepGeom>,
     /// The source grid, when shown.
     pub grid: Option<GridLayout>,
-    /// The macros page, when the panel shows it.
+    /// The inspector's macros, when the right sidebar shows.
     pub macros: Option<crate::macros::MacroLayout>,
     /// The session view, when shown.
     pub session: Option<crate::session::SessionLayout>,
     /// The command palette, when open.
     pub palette: Option<crate::palette::PaletteLayout>,
-    /// The clip bank, when the panel shows it.
+    /// The clip bank, when the left sidebar shows.
     pub bank: Option<crate::bank::BankLayout>,
 }
 
@@ -172,20 +186,86 @@ pub struct Drawn {
 pub struct ShellLayout {
     /// Top bar.
     pub topbar: Rect,
-    /// Arrange tile.
+    /// The main view (arrange, session or a grid); zero height while the
+    /// bottom panel is maximized.
     pub arrange: Rect,
-    /// Bottom panel.
+    /// Bottom panel; just its tab bar when collapsed, zero height while the
+    /// main view is zoomed.
     pub panel: Rect,
+    /// Left sidebar (clip bank), when it shows.
+    pub left: Option<Rect>,
+    /// Right sidebar (inspector), when it shows.
+    pub right: Option<Rect>,
+    /// The dock the layout was made from.
+    pub dock: Dock,
 }
 
 impl ShellLayout {
-    /// Splits a window of `w`×`h`.
-    pub fn new(w: f64, h: f64, panel_h: f64) -> ShellLayout {
+    /// Splits a window of `w`×`h` by `dock`.
+    pub fn new(w: f64, h: f64, dock: &Dock) -> ShellLayout {
         let topbar = Rect::new(0.0, 0.0, w, TOPBAR_H);
-        let panel_h = panel_h.min(h - TOPBAR_H - 200.0).max(0.0);
-        let arrange = Rect::new(4.0, TOPBAR_H + 4.0, w - 4.0, h - panel_h - 4.0);
-        let panel = Rect::new(4.0, h - panel_h, w - 4.0, h - 4.0);
-        ShellLayout { topbar, arrange, panel }
+        let (y0, y1) = (TOPBAR_H + GAP, h - GAP);
+        // the main view keeps some width when both sidebars are wide
+        let room = (w - 2.0 * GAP - 360.0).max(0.0);
+        let mut lw = if dock.side_open(Side::Left) { dock.left_w } else { 0.0 };
+        let mut rw = if dock.side_open(Side::Right) { dock.right_w } else { 0.0 };
+        if lw + rw > room && lw + rw > 0.0 {
+            let k = room / (lw + rw);
+            lw *= k;
+            rw *= k;
+        }
+        let left = (lw > 0.0).then(|| Rect::new(GAP, y0, GAP + lw, y1));
+        let right = (rw > 0.0).then(|| Rect::new(w - GAP - rw, y0, w - GAP, y1));
+        let cx0 = left.map_or(GAP, |r| r.x1 + GAP);
+        let cx1 = right.map_or(w - GAP, |r| r.x0 - GAP);
+        let (arrange, panel) = match dock.zoom {
+            Some(Zoom::Main) => (Rect::new(cx0, y0, cx1, y1), Rect::new(cx0, y1, cx1, y1)),
+            Some(Zoom::Panel) => (Rect::new(cx0, y0, cx1, y0), Rect::new(cx0, y0, cx1, y1)),
+            None => {
+                let ph = if dock.panel_open {
+                    dock.panel_h.min(h - TOPBAR_H - dock::MAIN_MIN).max(crate::panel::TABS_H)
+                } else {
+                    crate::panel::TABS_H
+                };
+                let panel = Rect::new(cx0, y1 - ph, cx1, y1);
+                (Rect::new(cx0, y0, cx1, panel.y0 - GAP), panel)
+            }
+        };
+        ShellLayout { topbar, arrange, panel, left, right, dock: *dock }
+    }
+
+    /// The bottom panel shows its editor (not collapsed or hidden).
+    pub fn panel_open(&self) -> bool {
+        self.panel.height() > crate::panel::TABS_H
+    }
+
+    /// The main view shows.
+    pub fn main_shown(&self) -> bool {
+        self.arrange.height() > 0.0
+    }
+
+    /// The resize handle under `pt`, if any.
+    pub fn handle_at(&self, pt: Point) -> Option<Handle> {
+        if let Some(l) = self.left
+            && (l.x1 - GRAB..l.x1 + GAP + GRAB).contains(&pt.x)
+            && (l.y0..l.y1).contains(&pt.y)
+        {
+            return Some(Handle::Left);
+        }
+        if let Some(r) = self.right
+            && (r.x0 - GAP - GRAB..r.x0 + GRAB).contains(&pt.x)
+            && (r.y0..r.y1).contains(&pt.y)
+        {
+            return Some(Handle::Right);
+        }
+        let p = self.panel;
+        if self.dock.zoom != Some(Zoom::Main)
+            && (p.x0..p.x1).contains(&pt.x)
+            && (p.y0 - GAP - GRAB..p.y0 + GRAB).contains(&pt.y)
+        {
+            return Some(Handle::Panel);
+        }
+        None
     }
 }
 
@@ -305,6 +385,14 @@ fn topbar(p: &mut Painter<'_>, th: &Theme, f: &Frame<'_>, r: Rect) {
         icons::draw(p, ic, Rect::new(rx - 22.0, cy - 8.0, rx - 6.0, cy + 8.0), c.text_secondary);
         rx -= 34.0;
     }
+    for (b, br) in dock_buttons(r) {
+        let on = match b {
+            DockButton::Left => f.dock.side_open(Side::Left),
+            DockButton::Right => f.dock.side_open(Side::Right),
+            DockButton::Panel => f.dock.zoom != Some(Zoom::Main) && f.dock.panel_open,
+        };
+        dock::draw_glyph(p, b, br, on, if on { c.text_strong } else { c.text_secondary });
+    }
     let search = search_box(r);
     p.rrect(search, 5.0, c.bg_control);
     p.rrect_stroke(search.inset(-0.5), 5.0, 1.0, c.border_default);
@@ -321,13 +409,14 @@ fn topbar(p: &mut Painter<'_>, th: &Theme, f: &Frame<'_>, r: Rect) {
 /// Draws a whole frame of `w`×`h` logical pixels into `scene`.
 pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: f64, h: f64) -> Drawn {
     let mut p = Painter { scene, fonts };
-    let sl = ShellLayout::new(w, h, f.panel_h);
+    let sl = ShellLayout::new(w, h, &f.dock);
     p.rect(Rect::new(0.0, 0.0, w, h), th.c.bg_base);
     topbar(&mut p, th, f, sl.topbar);
     let al = ArrangeLayout::new(f.doc, f.arrange, sl.arrange);
     let mut gl = None;
     let mut ssl = None;
     match f.view {
+        _ if !sl.main_shown() => {}
         MainView::Session => {
             p.clip(sl.arrange, |p| {
                 ssl = Some(crate::session::draw(
@@ -364,7 +453,9 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
             }
         }
     }
-    p.rrect_stroke(sl.arrange.inset(0.5), 0.0, 1.0, th.c.border_default);
+    if sl.main_shown() {
+        p.rrect_stroke(sl.arrange.inset(0.5), 0.0, 1.0, th.c.border_default);
+    }
     let mut ml = None;
     let mut rl = None;
     let mut ae = None;
@@ -375,7 +466,16 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
         MainView::Grid(g) => Some(g),
         MainView::Arrange | MainView::Session => None,
     };
-    if sl.panel.height() > 0.0 {
+    if sl.panel.height() > 0.0 && !sl.panel_open() {
+        // collapsed: the tab bar, to click a tab and bring it back
+        p.clip(sl.panel, |p| {
+            let (bar, x) = crate::panel::draw_bar(p, th, sl.panel, f.panel);
+            let hint = if cfg!(target_os = "macos") { "cmd j: open" } else { "ctrl j: open" };
+            p.text(x, bar.center().y, hint, &TextStyle::mono(11.0, th.c.text_secondary), Align::Left);
+            dock::draw_panel_buttons(p, th, sl.panel, &f.dock);
+        });
+        p.rrect_stroke(sl.panel.inset(0.5), 0.0, 1.0, th.c.border_default);
+    } else if sl.panel.height() > 0.0 {
         p.clip(sl.panel, |p| match f.panel {
             PanelView::Clip => {
                 let clip = f.arrange.selected_clip;
@@ -393,13 +493,18 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
             PanelView::Mixer => {
                 ml = Some(mixer::draw(p, th, f.doc, f.arrange.selected_track, f.levels, f.mixer_scroll, sl.panel))
             }
-            PanelView::Macros => {
-                let track = f.arrange.selected_track;
-                mc = Some(crate::macros::draw(p, th, f.doc, track, on_screen, f.learn, sl.panel))
-            }
-            PanelView::Bank => bk = Some(crate::bank::draw(p, th, f.doc, f.bank, sl.panel)),
         });
+        p.clip(sl.panel, |p| dock::draw_panel_buttons(p, th, sl.panel, &f.dock));
         p.rrect_stroke(sl.panel.inset(0.5), 0.0, 1.0, th.c.border_default);
+    }
+    if let Some(r) = sl.left {
+        p.clip(r, |p| bk = Some(crate::bank::draw(p, th, f.doc, f.bank, r)));
+        p.rrect_stroke(r.inset(0.5), 0.0, 1.0, th.c.border_default);
+    }
+    if let Some(r) = sl.right {
+        let track = f.arrange.selected_track;
+        p.clip(r, |p| mc = Some(crate::macros::draw(p, th, f.doc, track, on_screen, f.learn, f.macro_scroll, r)));
+        p.rrect_stroke(r.inset(0.5), 0.0, 1.0, th.c.border_default);
     }
     if let Some((clip, at, target)) = f.drag_clip {
         if let Some((r, ok)) = target {

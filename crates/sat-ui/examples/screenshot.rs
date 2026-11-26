@@ -6,14 +6,18 @@
 //! argument `grid` shows the selected clip's source grid instead of the arrangement.
 //! `SAT_PALETTE=<query>` draws the command palette open with that query.
 //! `SAT_GRID_MENU=1` draws a grid view with its add-module menu open.
+//! `SAT_DOCK=<words>` sets the docked areas: `noleft`, `right` (the inspector;
+//! `macros` also opens it), `collapsed`, `max` (panel maximized), `focus`
+//! (main view zoomed), `tall` (a 480 px panel).
 
 use sat_doc::sat_time::Ticks;
 use sat_ui::arrange::{ArrangeState, TransportView};
+use sat_ui::dock::{Dock, Zoom};
 use sat_ui::gfx::{Gpu, scaled};
 use sat_ui::paint::{Fonts, color};
 use sat_ui::panel::PanelView;
 use sat_ui::piano_roll::RollView;
-use sat_ui::shell::{self, Frame, MainView, PANEL_H};
+use sat_ui::shell::{self, Frame, MainView};
 use sat_ui::steps::StepView;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -23,9 +27,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let view = args.next().unwrap_or_default();
     let panel = match view.as_str() {
         "mixer" => PanelView::Mixer,
-        "macros" => PanelView::Macros,
-        "bank" => PanelView::Bank,
         _ => PanelView::Clip,
+    };
+    let words = std::env::var("SAT_DOCK").unwrap_or_default();
+    let has = |w: &str| words.split(',').any(|x| x.trim() == w);
+    let dock = Dock {
+        left_open: !has("noleft"),
+        right_open: has("right") || view == "macros",
+        panel_open: !has("collapsed"),
+        panel_h: if has("tall") { 480.0 } else { sat_ui::dock::PANEL_H },
+        zoom: if has("max") {
+            Some(Zoom::Panel)
+        } else if has("focus") {
+            Some(Zoom::Main)
+        } else {
+            None
+        },
+        ..Default::default()
     };
     let mut demo = sat_ui::demo::demo();
     if let Some(c) = demo.doc.clips.values().find(|c| c.name == view) {
@@ -73,7 +91,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         name: "untitled set",
         arrange: &state,
         transport: TransportView { playhead: Ticks(6 * 3840 + 960 + 240), playing: true, recording: false },
-        panel_h: PANEL_H,
+        dock,
+        macro_scroll: 0.0,
         panel,
         mixer_scroll: 0.0,
         levels: &levels,

@@ -350,10 +350,11 @@ pub fn clip_bar<'d>(
     Some(clip)
 }
 
-/// The clip bar's "open source grid" button, for the bottom panel at `r`.
+/// The clip bar's "open source grid" button, for the bottom panel at `r`
+/// (left of the panel's own maximize and collapse buttons).
 pub fn open_grid_button(r: Rect) -> Rect {
     let cy = r.y0 + TABS_H / 2.0;
-    Rect::new(r.x1 - 168.0, cy - 13.0, r.x1 - 40.0, cy + 13.0)
+    Rect::new(r.x1 - 204.0, cy - 13.0, r.x1 - 76.0, cy + 13.0)
 }
 
 /// Where the playhead is inside `clip`, if it is inside a placement of it.

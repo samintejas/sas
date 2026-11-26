@@ -14,6 +14,7 @@ pub mod automation;
 pub mod bank;
 pub mod controls;
 pub mod demo;
+pub mod dock;
 pub mod gfx;
 pub mod grid;
 pub mod icons;

@@ -28,6 +28,12 @@ pub enum Action {
     Select(TrackId),
     /// Show a bottom panel page.
     Panel(PanelView),
+    /// Show or hide a docked area.
+    Dock(crate::dock::DockButton),
+    /// Maximize the bottom panel, or restore it.
+    Maximize,
+    /// Zoom the main view to the whole window, or restore.
+    Focus,
     /// Play or stop.
     PlayStop,
     /// Loop on or off.
@@ -96,8 +102,23 @@ pub fn entries(doc: &Document) -> Vec<Entry> {
     out.extend([
         Entry { label: "clip editor".into(), hint: "tab", action: Action::Panel(PanelView::Clip) },
         Entry { label: "mixer".into(), hint: "tab", action: Action::Panel(PanelView::Mixer) },
-        Entry { label: "macros".into(), hint: "tab", action: Action::Panel(PanelView::Macros) },
-        Entry { label: "clip bank".into(), hint: "tab", action: Action::Panel(PanelView::Bank) },
+        Entry {
+            label: "clip bank · left sidebar".into(),
+            hint: "ctrl b",
+            action: Action::Dock(crate::dock::DockButton::Left),
+        },
+        Entry {
+            label: "macros · inspector · right sidebar".into(),
+            hint: "ctrl alt b",
+            action: Action::Dock(crate::dock::DockButton::Right),
+        },
+        Entry {
+            label: "bottom panel · collapse / open".into(),
+            hint: "ctrl j",
+            action: Action::Dock(crate::dock::DockButton::Panel),
+        },
+        Entry { label: "bottom panel · maximize".into(), hint: "ctrl space", action: Action::Maximize },
+        Entry { label: "focus main view · hide panels".into(), hint: "ctrl space", action: Action::Focus },
         Entry { label: "play / stop".into(), hint: "space", action: Action::PlayStop },
         Entry { label: "loop on / off".into(), hint: "l", action: Action::Loop },
         Entry { label: "undo".into(), hint: "ctrl z", action: Action::Undo },

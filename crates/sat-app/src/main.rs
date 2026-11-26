@@ -7,6 +7,12 @@
 //! - click a clip to edit it in the bottom panel; click the ruler to move the playhead
 //! - drag faders and knobs (shift for fine steps, double-click to reset);
 //!   click m / s / arm buttons; tab switches the bottom panel between clip and mixer
+//! - docked areas: drag the bottom panel's top edge or a sidebar's inner edge to
+//!   resize (drag it far to close; double-click the edge to collapse / close);
+//!   ctrl j collapses or opens the bottom panel, ctrl b the clip bank (left),
+//!   ctrl alt b the inspector with the selected track's macros (right);
+//!   ctrl space maximizes the area under the pointer (the panel over the main
+//!   view, or the main view over everything), again restores
 //! - piano roll: draw notes by clicking (drag to set the length), drag notes to
 //!   move them, drag their right edge to resize, drag in the velocity lane;
 //!   double-click deletes; the select tool drags a box; delete, arrows
@@ -54,6 +60,7 @@ use sat_ui::arrange_edit::{self, Span};
 use sat_ui::automation;
 use sat_ui::bank::{BankHit, BankLayout, BankView};
 use sat_ui::controls::{self, SILENT_DB};
+use sat_ui::dock::{Dock, DockButton, Handle, PanelButton, Side, Zoom};
 use sat_ui::grid::{self, GridHit, GridLayout, GridView};
 use sat_ui::mixer::{Knob, Levels, MixHit, MixerLayout};
 use sat_ui::paint::{Fonts, color};
@@ -62,7 +69,7 @@ use sat_ui::panel::{self, PanelView, Tab};
 use sat_ui::piano_roll::{self, RollGeom, RollHit, RollView, Tool, clip_notes, next_snap};
 use sat_ui::roll_edit::{self, Edited};
 use sat_ui::session::{SessionHit, SessionLayout, SessionView};
-use sat_ui::shell::{self, Frame, MainView, PANEL_H, ShellLayout, TransportButton, ViewButton};
+use sat_ui::shell::{self, Frame, MainView, ShellLayout, TransportButton, ViewButton};
 use sat_ui::steps::{StepGeom, StepHit, StepView};
 use vello::kurbo::{Point, Rect, Vec2};
 use vello::util::{RenderContext, RenderSurface};
@@ -369,6 +376,12 @@ struct App {
     history: History,
     arrange: ArrangeState,
     panel: PanelView,
+    /// Which docked areas show, and their sizes.
+    dock: Dock,
+    /// A resize handle being dragged.
+    dock_drag: Option<Handle>,
+    /// Vertical scroll of the inspector.
+    macro_scroll: f64,
     mixer_scroll: f64,
     levels: Levels,
     playback: Playback,
@@ -416,6 +429,8 @@ struct App {
     /// The last press was in the bottom panel (keys go to its editor), else
     /// in the main view (keys edit clips there).
     panel_focus: bool,
+    /// The last press was in the clip bank (delete removes its selected clip).
+    bank_focus: bool,
     /// The pointer shape shown, so it is only set when it changes.
     cursor_icon: winit::window::CursorIcon,
     /// Length of the last drawn or resized note.
@@ -703,7 +718,8 @@ impl App {
                 playing: self.playback.playing,
                 recording: self.rec.is_some(),
             },
-            panel_h: PANEL_H,
+            dock: self.dock,
+            macro_scroll: self.macro_scroll,
             panel: self.panel,
             mixer_scroll: self.mixer_scroll,
             levels: &self.levels,
@@ -737,11 +753,14 @@ impl App {
         self.roll_geom = drawn.roll;
         self.audio_layout = drawn.audio;
         self.step_geom = drawn.steps;
-        if matches!(self.view, MainView::Grid(_)) && drawn.grid.is_none() {
+        if matches!(self.view, MainView::Grid(_)) && drawn.grid.is_none() && drawn.shell.main_shown() {
             // the track went away (undo): back to the arrangement
             self.view = MainView::Arrange;
         }
         self.grid_layout = drawn.grid;
+        if let Some(m) = &drawn.macros {
+            self.macro_scroll = self.macro_scroll.min(m.max_scroll);
+        }
         self.macro_layout = drawn.macros;
         self.session_layout = drawn.session;
         self.palette_layout = drawn.palette;
@@ -1244,10 +1263,38 @@ impl App {
             }
             return;
         }
-        self.panel_focus = self.shell.is_some_and(|sl| sl.panel.contains(pt));
-        if let Some(sl) = self.shell
-            && sl.panel.contains(pt)
+        let Some(sl) = self.shell else { return };
+        if let Some(h) = sl.handle_at(pt) {
+            if double {
+                match h {
+                    Handle::Panel => self.dock.toggle_panel(),
+                    Handle::Left => self.dock.set_side(Side::Left, false),
+                    Handle::Right => self.dock.set_side(Side::Right, false),
+                }
+            } else {
+                self.dock_drag = Some(h);
+            }
+            return;
+        }
+        self.panel_focus = sl.panel.contains(pt);
+        self.bank_focus = sl.left.is_some_and(|r| r.contains(pt));
+        if let Some(r) = sl.left
+            && r.contains(pt)
         {
+            if sat_ui::dock::close_button(r).contains(pt) {
+                return self.dock.set_side(Side::Left, false);
+            }
+            return self.press_bank(pt, double);
+        }
+        if let Some(r) = sl.right
+            && r.contains(pt)
+        {
+            if sat_ui::dock::close_button(r).contains(pt) {
+                return self.dock.set_side(Side::Right, false);
+            }
+            return self.press_macros(pt, double);
+        }
+        if sl.panel.contains(pt) {
             return self.press_panel(sl, pt, double);
         }
         if let Some(sl) = self.shell
@@ -1281,7 +1328,11 @@ impl App {
                 Some(ViewButton::Instrument) => self.open_grid(self.arrange.selected_track, GridKind::Instrument),
                 Some(ViewButton::Fx) => self.open_grid(self.arrange.selected_track, GridKind::Fx),
                 _ if shell::search_box(sl.topbar).contains(pt) => self.palette = Some(PaletteView::default()),
-                _ => {}
+                _ => {
+                    if let Some((b, _)) = shell::dock_buttons(sl.topbar).into_iter().find(|(_, r)| r.contains(pt)) {
+                        self.toggle_dock(b);
+                    }
+                }
             }
             return;
         }
@@ -1675,7 +1726,13 @@ impl App {
     /// The pointer shape for what is under it: a resize arrow on clip edges.
     fn update_cursor(&mut self) {
         use winit::window::CursorIcon;
+        let handle = self.dock_drag.or_else(|| {
+            let busy = self.drag.is_some() || self.clip_drag.is_some() || self.bank_drag.is_some();
+            self.shell.filter(|_| !busy && self.palette.is_none()).and_then(|sl| sl.handle_at(self.cursor))
+        });
         let icon = match &self.clip_drag {
+            _ if handle == Some(Handle::Panel) => CursorIcon::RowResize,
+            _ if handle.is_some() => CursorIcon::ColResize,
             Some(ClipDrag::Trim { .. }) => CursorIcon::EwResize,
             Some(ClipDrag::Move { .. }) => CursorIcon::Grabbing,
             None if self.view == MainView::Arrange && self.palette.is_none() => {
@@ -1707,12 +1764,32 @@ impl App {
     }
 
     fn press_panel(&mut self, sl: ShellLayout, pt: Point, double: bool) {
-        match panel::hit_tab(sl.panel, pt) {
-            Some(Tab::Clip) => return self.panel = PanelView::Clip,
-            Some(Tab::Mixer) => return self.panel = PanelView::Mixer,
-            Some(Tab::Macros) => return self.panel = PanelView::Macros,
-            Some(Tab::Bank) => return self.panel = PanelView::Bank,
+        match sat_ui::dock::panel_buttons(sl.panel).into_iter().find(|(_, r)| r.contains(pt)).map(|(b, _)| b) {
+            Some(PanelButton::Maximize) => return self.dock.toggle_zoom(Zoom::Panel),
+            Some(PanelButton::Collapse) => return self.dock.toggle_panel(),
             None => {}
+        }
+        let tab = panel::hit_tab(sl.panel, pt);
+        if let Some(t) = tab {
+            self.panel = match t {
+                Tab::Clip => PanelView::Clip,
+                Tab::Mixer => PanelView::Mixer,
+            };
+            if !sl.panel_open() {
+                self.dock.open_panel();
+            }
+            return;
+        }
+        if pt.y < sl.panel.y0 + panel::TABS_H {
+            // double-click on the tab bar maximizes, like a title bar
+            if double {
+                self.dock.toggle_zoom(Zoom::Panel);
+            } else if !sl.panel_open() {
+                self.dock.open_panel();
+            }
+            if !sl.panel_open() || double {
+                return;
+            }
         }
         if self.panel == PanelView::Clip {
             if piano_roll::open_grid_button(sl.panel).contains(pt) {
@@ -1738,12 +1815,6 @@ impl App {
                 return self.press_steps(pt, double);
             }
             return self.press_roll(pt, double);
-        }
-        if self.panel == PanelView::Bank {
-            return self.press_bank(pt, double);
-        }
-        if self.panel == PanelView::Macros {
-            return self.press_macros(pt, double);
         }
         let Some(m) = &self.mixer else { return };
         match m.hit(pt) {
@@ -2263,7 +2334,13 @@ impl App {
             Action::Arrange => self.view = MainView::Arrange,
             Action::Grid(t, kind) => self.open_grid(Some(t), kind),
             Action::Select(t) => self.select_track(t),
-            Action::Panel(p) => self.panel = p,
+            Action::Panel(p) => {
+                self.panel = p;
+                self.dock.open_panel();
+            }
+            Action::Dock(b) => self.toggle_dock(b),
+            Action::Maximize => self.dock.toggle_zoom(Zoom::Panel),
+            Action::Focus => self.dock.toggle_zoom(Zoom::Main),
             Action::PlayStop => self.playback.toggle(),
             Action::Loop => self.toggle_loop(),
             Action::Undo | Action::Redo => self.undo(a == Action::Redo),
@@ -2271,6 +2348,29 @@ impl App {
             Action::Freeze(t) => self.toggle_freeze(t),
         }
         self.update_title();
+    }
+
+    /// Shows or hides a docked area.
+    fn toggle_dock(&mut self, b: DockButton) {
+        match b {
+            DockButton::Left => self.dock.toggle_side(Side::Left),
+            DockButton::Right => self.dock.toggle_side(Side::Right),
+            DockButton::Panel => self.dock.toggle_panel(),
+        }
+    }
+
+    /// The window's size in logical pixels.
+    fn window_size(&self) -> (f64, f64) {
+        let Some(g) = &self.gfx else { return (1440.0, 900.0) };
+        let s = g.window.inner_size();
+        let k = g.window.scale_factor();
+        (s.width as f64 / k, s.height as f64 / k)
+    }
+
+    fn dock_drag_to(&mut self) {
+        let Some(h) = self.dock_drag else { return };
+        let (w, hh) = self.window_size();
+        self.dock.drag(h, self.cursor, w, hh);
     }
 
     fn toggle_loop(&mut self) {
@@ -2305,8 +2405,22 @@ impl App {
         if self.grid_key(key) {
             return self.update_title();
         }
-        if self.panel_focus
-            && self.panel == PanelView::Bank
+        let ctrl = self.mods.control_key() || self.mods.super_key();
+        match key {
+            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("b") => {
+                let side = if self.mods.alt_key() { Side::Right } else { Side::Left };
+                return self.dock.toggle_side(side);
+            }
+            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("j") => return self.dock.toggle_panel(),
+            Key::Named(NamedKey::Space) if ctrl => {
+                // maximize the area under the pointer; again restores
+                let over_panel = self.shell.is_some_and(|sl| sl.panel.contains(self.cursor));
+                return self.dock.toggle_zoom(if over_panel { Zoom::Panel } else { Zoom::Main });
+            }
+            _ => {}
+        }
+        if self.bank_focus
+            && self.dock.side_open(Side::Left)
             && matches!(key, Key::Named(NamedKey::Delete | NamedKey::Backspace))
             && let Some(c) = self.bank.selected.take()
         {
@@ -2325,10 +2439,11 @@ impl App {
             Key::Named(NamedKey::Space) => self.toggle_play(),
             Key::Named(NamedKey::Home) => self.playback.locate(Ticks::ZERO),
             Key::Named(NamedKey::Tab) => {
-                // clip, mixer, macros (shift goes back)
-                let order = [PanelView::Clip, PanelView::Mixer, PanelView::Macros, PanelView::Bank];
-                let i = order.iter().position(|p| *p == self.panel).unwrap_or(0);
-                self.panel = order[(i + if shift { 3 } else { 1 }) % 4];
+                // clip and mixer; a collapsed panel opens
+                if self.shell.is_some_and(|sl| sl.panel_open()) {
+                    self.panel = if self.panel == PanelView::Clip { PanelView::Mixer } else { PanelView::Clip };
+                }
+                self.dock.open_panel();
             }
             Key::Character(c) if ctrl && matches!(c.as_str(), "1" | "2" | "3" | "4" | "5") => match c.as_str() {
                 "1" => self.view = MainView::Session,
@@ -2376,12 +2491,23 @@ impl App {
             return;
         }
         if let Some(sl) = self.shell
+            && sl.left.is_some_and(|r| r.contains(self.cursor))
+        {
+            let max = self.bank_layout.as_ref().map_or(0.0, |b| b.max_scroll);
+            self.bank.scroll = (self.bank.scroll - dy).clamp(0.0, max);
+            return;
+        }
+        if let Some(sl) = self.shell
+            && sl.right.is_some_and(|r| r.contains(self.cursor))
+        {
+            let max = self.macro_layout.as_ref().map_or(0.0, |m| m.max_scroll);
+            self.macro_scroll = (self.macro_scroll - dy).clamp(0.0, max);
+            return;
+        }
+        if let Some(sl) = self.shell
             && sl.panel.contains(self.cursor)
         {
-            if self.panel == PanelView::Bank {
-                let max = self.bank_layout.as_ref().map_or(0.0, |b| b.max_scroll);
-                self.bank.scroll = (self.bank.scroll - dy).clamp(0.0, max);
-            } else if self.panel == PanelView::Mixer {
+            if self.panel == PanelView::Mixer {
                 let d = if dx.abs() > dy.abs() { dx } else { dy };
                 let max = self.mixer.as_ref().map(|m| m.max_scroll).unwrap_or(0.0);
                 self.mixer_scroll = (self.mixer_scroll - d).clamp(0.0, max);
@@ -2471,7 +2597,9 @@ impl ApplicationHandler for App {
                     || self.audio_drag.is_some()
                     || self.clip_drag.is_some()
                     || self.auto_drag.is_some()
-                    || self.bank_drag.is_some();
+                    || self.bank_drag.is_some()
+                    || self.dock_drag.is_some();
+                self.dock_drag_to();
                 self.drag_to();
                 self.clip_drag_to();
                 self.auto_drag_to();
@@ -2483,6 +2611,7 @@ impl ApplicationHandler for App {
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => match state {
                 ElementState::Pressed => self.press(),
                 ElementState::Released => {
+                    self.dock_drag = None;
                     if let Some((clip, from)) = self.bank_drag.take()
                         && (self.cursor - from).hypot() > 4.0
                     {
@@ -2635,6 +2764,9 @@ fn main() {
         history: History::new(doc, 500),
         arrange,
         panel: PanelView::Clip,
+        dock: Dock::default(),
+        dock_drag: None,
+        macro_scroll: 0.0,
         mixer_scroll: 0.0,
         levels: HashMap::new(),
         playback,
@@ -2673,6 +2805,7 @@ fn main() {
         clip_drag: None,
         auto_drag: None,
         panel_focus: false,
+        bank_focus: false,
         cursor_icon: winit::window::CursorIcon::Default,
         note_len: Ticks::sixteenths(1),
         last_click: None,

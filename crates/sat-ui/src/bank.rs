@@ -1,5 +1,6 @@
-//! The bottom panel's clips page: the clip bank. Every clip in the project,
-//! a row per track, with how often the arrangement and the session use it.
+//! The left sidebar's clip bank. Every clip in the project, grouped by track
+//! with the cards wrapping to the sidebar's width, and how often the
+//! arrangement and the session use each.
 //! Clips are dragged from here onto their track's lane or a session slot;
 //! a clip deleted from the arrangement stays here, unused, until it is
 //! deleted from the bank.
@@ -11,16 +12,19 @@ use vello::kurbo::{Point, Rect};
 
 use crate::icons::{self, Icon};
 use crate::paint::{Align, Painter, TextStyle};
-use crate::panel::{self, PanelView, TABS_H};
+use crate::panel::TABS_H;
 
-/// Width of the track label column.
-pub const LABEL_W: f64 = 132.0;
-/// A clip card's size.
+/// Width of the card dragged out of the bank.
 pub const CARD_W: f64 = 132.0;
 /// A clip card's height.
 pub const CARD_H: f64 = 46.0;
+/// Narrowest a card in the bank gets before the grid drops a column.
+pub const MIN_CARD_W: f64 = 104.0;
+/// Height of a track's heading.
+pub const HEAD_H: f64 = 26.0;
+/// Height of the hint line at the bottom.
+pub const FOOT_H: f64 = 26.0;
 const GAP: f64 = 6.0;
-const ROW_H: f64 = CARD_H + 8.0;
 
 /// Scroll and selection of the clip bank.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -66,16 +70,16 @@ pub struct CardBox {
     pub delete: Option<Rect>,
 }
 
-/// One track's row.
+/// One track's group: a heading and its cards.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BankRow {
     /// The track.
     pub track: TrackId,
-    /// The row.
+    /// The group, heading included.
     pub rect: Rect,
     /// Its clips.
     pub cards: Vec<CardBox>,
-    /// The add-clip card at the end.
+    /// The add-clip button in the heading.
     pub add: Rect,
 }
 
@@ -95,8 +99,10 @@ pub enum BankHit {
 /// The clip bank's geometry.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BankLayout {
-    /// The area below the tab bar.
+    /// The scrolling area between the header and the hint line.
     pub body: Rect,
+    /// Cards per line.
+    pub cols: usize,
     /// Track rows, top to bottom.
     pub rows: Vec<BankRow>,
     /// How far it can scroll.
@@ -104,37 +110,46 @@ pub struct BankLayout {
 }
 
 impl BankLayout {
-    /// Lays out the bank of `doc` in the panel `r`.
+    /// Lays out the bank of `doc` in the sidebar `r`.
     pub fn new(doc: &Document, view: &BankView, r: Rect) -> BankLayout {
-        let body = Rect::new(r.x0, r.y0 + TABS_H, r.x1, r.y1);
+        let body = Rect::new(r.x0, r.y0 + TABS_H, r.x1, (r.y1 - FOOT_H).max(r.y0 + TABS_H));
         let tracks: Vec<TrackId> =
             doc.tracks_in_order().into_iter().filter(|t| doc.tracks[t].kind == TrackKind::Track).collect();
-        let content = tracks.len() as f64 * ROW_H + 12.0;
+        let avail = (body.width() - 20.0).max(MIN_CARD_W);
+        let cols = (((avail + GAP) / (MIN_CARD_W + GAP)).floor() as usize).max(1);
+        let cw = (avail - GAP * (cols - 1) as f64) / cols as f64;
+        let height = |n: usize| HEAD_H + n.div_ceil(cols).max(1) as f64 * (CARD_H + GAP) + 8.0;
+        let content: f64 = tracks.iter().map(|t| height(doc.clips_on(*t).count())).sum::<f64>() + 8.0;
         let max_scroll = (content - body.height()).max(0.0);
         let scroll = view.scroll.clamp(0.0, max_scroll);
+        let mut y = body.y0 + 6.0 - scroll;
         let rows = tracks
             .into_iter()
-            .enumerate()
-            .map(|(i, t)| {
-                let y = body.y0 + 6.0 + i as f64 * ROW_H - scroll;
-                let rect = Rect::new(body.x0 + 8.0, y, body.x1 - 8.0, y + ROW_H - 2.0);
-                let mut x = rect.x0 + LABEL_W;
+            .map(|t| {
+                let n = doc.clips_on(t).count();
+                let rect = Rect::new(body.x0 + 6.0, y, body.x1 - 6.0, y + height(n));
+                let x0 = body.x0 + 10.0;
                 let cards = doc
                     .clips_on(t)
-                    .map(|c| {
-                        let card = Rect::new(x, y + 3.0, x + CARD_W, y + 3.0 + CARD_H);
-                        x += CARD_W + GAP;
+                    .enumerate()
+                    .map(|(i, c)| {
+                        let (col, line) = ((i % cols) as f64, (i / cols) as f64);
+                        let cx = x0 + col * (cw + GAP);
+                        let cy = y + HEAD_H + line * (CARD_H + GAP);
+                        let card = Rect::new(cx, cy, cx + cw, cy + CARD_H);
                         let delete = uses(doc, c.id)
                             .unused()
                             .then(|| Rect::new(card.x1 - 18.0, card.y0 + 1.0, card.x1 - 2.0, card.y0 + 15.0));
                         CardBox { clip: c.id, rect: card, delete }
                     })
                     .collect();
-                let add = Rect::new(x, y + 3.0, x + 36.0, y + 3.0 + CARD_H);
+                let hy = y + HEAD_H / 2.0;
+                let add = Rect::new(rect.x1 - 26.0, hy - 10.0, rect.x1 - 4.0, hy + 10.0);
+                y = rect.y1;
                 BankRow { track: t, rect, cards, add }
             })
             .collect();
-        BankLayout { body, rows, max_scroll }
+        BankLayout { body, cols, rows, max_scroll }
     }
 
     /// What is under `pt`.
@@ -218,53 +233,55 @@ pub fn draw_card(p: &mut Painter<'_>, th: &Theme, doc: &Document, clip: ClipId, 
     }
 }
 
-/// Draws the clips page and returns its layout.
+/// Draws the clip bank in the sidebar `r` and returns its layout.
 pub fn draw(p: &mut Painter<'_>, th: &Theme, doc: &Document, view: &BankView, r: Rect) -> BankLayout {
     let c = &th.c;
     let l = BankLayout::new(doc, view, r);
-    let (bar, x) = panel::draw_bar(p, th, r, PanelView::Bank);
-    let cy = bar.center().y;
     let n = doc.clips.len();
     let unused = doc.clips.keys().filter(|k| uses(doc, **k).unused()).count();
-    let w = p.text(x, cy, "clip bank", &TextStyle::mono(12.0, c.text_max).medium(), Align::Left);
-    p.text(
-        x + w + 10.0,
-        cy,
-        &format!("{n} clips · {unused} unused · drag a clip onto its track's lane or a session slot · double-click: at the playhead"),
-        &TextStyle::mono(11.0, c.text_secondary),
-        Align::Left,
-    );
+    let note = if unused > 0 { format!("{n} · {unused} unused") } else { format!("{n}") };
+    crate::dock::side_header(p, th, r, None, "clip bank", &note, crate::dock::close_button(r).x0 - 6.0);
     p.clip(l.body, |p| {
         for row in &l.rows {
             let Some(t) = doc.tracks.get(&row.track) else { continue };
             let tc = th.track(t.color.0);
-            p.rect(Rect::new(row.rect.x0, row.rect.y0 + 4.0, row.rect.x0 + 3.0, row.rect.y1 - 6.0), tc);
+            let hy = row.rect.y0 + HEAD_H / 2.0;
+            p.rrect(Rect::new(row.rect.x0 + 4.0, hy - 5.0, row.rect.x0 + 7.0, hy + 5.0), 1.5, tc);
+            let k = doc.clips_on(row.track).count();
+            let count = format!("{k}");
+            let cw = p.text(row.add.x0 - 8.0, hy, &count, &TextStyle::mono(10.5, c.text_secondary), Align::Right);
             p.text_fit(
-                row.rect.x0 + 12.0,
-                row.rect.y0 + 18.0,
+                row.rect.x0 + 14.0,
+                hy,
                 &t.name,
                 &TextStyle::sans(12.5, c.text_strong).medium(),
-                LABEL_W - 20.0,
+                (row.add.x0 - 16.0 - cw - row.rect.x0 - 14.0).max(0.0),
             );
-            let k = doc.clips_on(row.track).count();
-            p.text(
-                row.rect.x0 + 12.0,
-                row.rect.y0 + 36.0,
-                &format!("{k} clip{}", if k == 1 { "" } else { "s" }),
-                &TextStyle::mono(10.5, c.text_secondary),
-                Align::Left,
-            );
+            p.rrect(row.add, 4.0, c.bg_control);
+            p.rrect_stroke(row.add.inset(-0.5), 4.0, 1.0, c.border_default);
+            icons::draw(p, Icon::Plus, row.add.inset(-6.0), c.text_secondary);
             for card in &row.cards {
                 draw_card(p, th, doc, card.clip, card.rect, view.selected == Some(card.clip));
                 if let Some(d) = card.delete {
                     icons::draw(p, Icon::Close, d.inset(-4.0), c.on_accent_primary);
                 }
             }
-            p.rrect(row.add, 4.0, c.bg_control);
-            p.rrect_stroke(row.add.inset(-0.5), 4.0, 1.0, c.border_default);
-            icons::draw(p, Icon::Plus, row.add.inset(-12.0), c.text_secondary);
-            p.hline(row.rect.x0, row.rect.x1, row.rect.y1, c.border_subtle);
+            p.hline(row.rect.x0, row.rect.x1, row.rect.y1 - 1.0, c.border_subtle);
         }
+    });
+    if l.max_scroll > 0.0 {
+        let track = Rect::new(r.x1 - 4.0, l.body.y0 + 2.0, r.x1 - 2.0, l.body.y1 - 2.0);
+        let frac = l.body.height() / (l.body.height() + l.max_scroll);
+        let at = view.scroll.clamp(0.0, l.max_scroll) / l.max_scroll;
+        let th_h = (track.height() * frac).max(24.0);
+        let y = track.y0 + (track.height() - th_h) * at;
+        p.rrect(Rect::new(track.x0, y, track.x1, y + th_h), 1.0, c.border_strong.alpha(0.6));
+    }
+    let foot = Rect::new(r.x0, l.body.y1, r.x1, r.y1);
+    p.hline(foot.x0, foot.x1, foot.y0, c.border_subtle);
+    p.clip(foot, |p| {
+        let hint = "drag onto a lane · double-click places";
+        p.text(foot.x0 + 12.0, foot.center().y, hint, &TextStyle::mono(10.0, c.text_secondary), Align::Left);
     });
     l
 }
@@ -276,13 +293,20 @@ mod tests {
     #[test]
     fn every_clip_has_a_card_and_hits_find_them() {
         let doc = crate::demo::demo().doc;
-        let l = BankLayout::new(&doc, &BankView::default(), Rect::new(0.0, 0.0, 4000.0, 2000.0));
+        let l = BankLayout::new(&doc, &BankView::default(), Rect::new(0.0, 0.0, 264.0, 4000.0));
+        assert_eq!(l.cols, 2, "two cards a line in a default sidebar");
         let cards: usize = l.rows.iter().map(|r| r.cards.len()).sum();
         let on_tracks = doc.clips.values().filter(|c| doc.tracks[&c.track].kind == TrackKind::Track).count();
         assert_eq!(cards, on_tracks);
         let first = l.rows.iter().find_map(|r| r.cards.first()).unwrap();
         assert_eq!(l.hit(first.rect.center()), BankHit::Card(first.clip));
         assert_eq!(l.hit(l.rows[0].add.center()), BankHit::Add(l.rows[0].track));
+        for row in &l.rows {
+            assert!(row.cards.iter().all(|c| c.rect.x1 <= 264.0 && c.rect.y0 >= row.rect.y0 + HEAD_H));
+        }
+        // wider, more to a line
+        let wide = BankLayout::new(&doc, &BankView::default(), Rect::new(0.0, 0.0, 600.0, 4000.0));
+        assert_eq!(wide.cols, 5);
     }
 
     #[test]

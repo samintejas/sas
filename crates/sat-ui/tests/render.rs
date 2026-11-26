@@ -11,7 +11,7 @@ use sat_ui::mixer::Levels;
 use sat_ui::paint::{Fonts, color};
 use sat_ui::panel::PanelView;
 use sat_ui::piano_roll::RollView;
-use sat_ui::shell::{self, Frame, PANEL_H};
+use sat_ui::shell::{self, Frame};
 use vello::wgpu;
 
 fn gpu() -> Option<Gpu> {
@@ -51,7 +51,8 @@ fn renders_the_arrange_view() {
         name: "test",
         arrange: &state,
         transport: TransportView { playhead, playing: true, recording: false },
-        panel_h: PANEL_H,
+        dock: Default::default(),
+        macro_scroll: 0.0,
         panel: PanelView::Clip,
         mixer_scroll: 0.0,
         levels: &levels,
@@ -112,7 +113,8 @@ fn renders_the_mixer() {
         name: "test",
         arrange: &state,
         transport: TransportView::default(),
-        panel_h: PANEL_H,
+        dock: Default::default(),
+        macro_scroll: 0.0,
         panel: PanelView::Mixer,
         mixer_scroll: 0.0,
         levels: &levels,
