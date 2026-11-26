@@ -18,12 +18,8 @@ const W: f64 = 520.0;
 /// What a palette entry does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
-    /// Show the session view.
-    Session,
     /// Show the arrangement.
     Arrange,
-    /// Show or hide the clip launcher beside the arrangement.
-    Launcher,
     /// Show one of a track's grids.
     Grid(TrackId, GridKind),
     /// Select a track.
@@ -80,11 +76,7 @@ fn kind_name(k: GridKind) -> &'static str {
 
 /// Every entry, before filtering.
 pub fn entries(doc: &Document) -> Vec<Entry> {
-    let mut out = vec![
-        Entry { label: "session".into(), hint: "ctrl 1", action: Action::Session },
-        Entry { label: "arrange".into(), hint: "ctrl 2", action: Action::Arrange },
-        Entry { label: "clip launcher beside arrangement".into(), hint: "ctrl u", action: Action::Launcher },
-    ];
+    let mut out = vec![Entry { label: "arrange".into(), hint: "ctrl 2", action: Action::Arrange }];
     for t in doc.tracks_in_order() {
         let tr = &doc.tracks[&t];
         let name = if tr.kind == TrackKind::Master { "master".to_string() } else { tr.name.clone() };
@@ -109,11 +101,6 @@ pub fn entries(doc: &Document) -> Vec<Entry> {
             label: "clip bank · left sidebar".into(),
             hint: "ctrl b",
             action: Action::Dock(crate::dock::DockButton::Left),
-        },
-        Entry {
-            label: "macros · inspector · right sidebar".into(),
-            hint: "ctrl alt b",
-            action: Action::Dock(crate::dock::DockButton::Right),
         },
         Entry {
             label: "bottom panel · collapse / open".into(),

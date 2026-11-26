@@ -134,6 +134,9 @@ pub struct Strip {
     pub pan_lane: Option<Automation>,
     /// Post-fader peak meter, if anyone is watching.
     pub meter: Option<Arc<Meter>>,
+    /// The track's automation comes from the launcher: the arrangement's
+    /// lanes are ignored and the base values play.
+    pub launcher: bool,
     gains: (Smooth, Smooth),
 }
 
@@ -147,6 +150,7 @@ impl Strip {
             gain_lane,
             pan_lane: None,
             meter: None,
+            launcher: false,
             gains: (Smooth::new(0.0), Smooth::new(0.0)),
         };
         let (l, r) = s.target_gains(None);
@@ -172,6 +176,7 @@ impl Strip {
         if self.mute {
             return (0.0, 0.0);
         }
+        let pos = pos.filter(|_| !self.launcher);
         let db = match (pos, &self.gain_lane) {
             (Some(p), Some(lane)) => lane.value_at(p).unwrap_or(self.gain_db),
             _ => self.gain_db,
@@ -190,7 +195,7 @@ impl Strip {
         // automated gain is read every sample and followed by a per-sample
         // glide (so jumps, at a hold point or a lane's ends, do not click),
         // which makes a render come out the same whatever the block sizes
-        if let (Some(p), true, false) = (pos, self.gain_lane.is_some(), self.mute) {
+        if let (Some(p), true, false) = (pos, self.gain_lane.is_some() && !self.launcher, self.mute) {
             let (mut pl, mut pr) = (0f32, 0f32);
             let (mut gl, mut gr) = (self.gains.0.cur, self.gains.1.cur);
             for (k, i) in (off..off + len).enumerate() {
@@ -459,7 +464,11 @@ impl Schedule {
                         (NodeKind::Instrument(n), NodeKind::Instrument(o)) => n.adopt(o),
                         (NodeKind::Fx(n), NodeKind::Fx(o)) => n.adopt(o),
                         (NodeKind::Monitor(n), NodeKind::Monitor(o)) => n.adopt(o),
-                        (NodeKind::Strip(n), NodeKind::Strip(o)) => n.gains = o.gains,
+                        (NodeKind::Strip(n), NodeKind::Strip(o)) => {
+                            n.gains = o.gains;
+                            n.launcher = o.launcher;
+                        }
+                        (NodeKind::Audio(n), NodeKind::Audio(o)) => n.adopt(o),
                         _ => {}
                     }
                     a += 1;
@@ -481,6 +490,43 @@ impl Schedule {
         }
     }
 
+    /// Hands one of a track's nodes to the launcher (`launcher`) from
+    /// timeline sample `at`, or back to the arrangement: an instrument
+    /// stops its arrangement notes (and plays only launched clips), an
+    /// audio player fades its arrangement audio out, a strip ignores its
+    /// arrangement automation. Returns false if the node is not one of those.
+    pub fn source(&mut self, id: NodeId, launcher: bool, at: i64) -> bool {
+        let Some(i) = self.index_of(id) else { return false };
+        let n = &mut self.nodes[i];
+        match &mut n.kind {
+            NodeKind::Synth(s) if launcher => {
+                if !s.seq_mut().following() {
+                    s.seq_mut().launch(None, at);
+                }
+            }
+            NodeKind::Instrument(s) if launcher => {
+                if !s.seq_mut().following() {
+                    s.seq_mut().launch(None, at);
+                }
+            }
+            NodeKind::Synth(s) => {
+                if s.seq_mut().back_to_arrangement() {
+                    s.release_all();
+                }
+            }
+            NodeKind::Instrument(s) => {
+                if s.seq_mut().back_to_arrangement() {
+                    s.release_all();
+                }
+            }
+            NodeKind::Audio(a) if launcher => a.follow_launcher(at),
+            NodeKind::Audio(a) => a.back_to_arrangement(),
+            NodeKind::Strip(s) => s.launcher = launcher,
+            _ => return false,
+        }
+        true
+    }
+
     /// Starts or releases a live note on an instrument node. Returns false
     /// if the node does not play notes.
     pub fn live(&mut self, id: NodeId, pitch: u8, velocity: f32, on: bool) -> bool {
@@ -497,6 +543,11 @@ impl Schedule {
     /// Hands every track back to the arrangement.
     pub(crate) fn back_to_arrangement(&mut self) {
         for n in &mut self.nodes {
+            match &mut n.kind {
+                NodeKind::Audio(a) => a.back_to_arrangement(),
+                NodeKind::Strip(s) => s.launcher = false,
+                _ => {}
+            }
             let cut = match &mut n.kind {
                 NodeKind::Synth(s) => s.seq_mut().back_to_arrangement(),
                 NodeKind::Instrument(s) => s.seq_mut().back_to_arrangement(),
@@ -595,6 +646,11 @@ mod tests {
         assert!(l > 1.4 && r.abs() < 1e-6, "{l} {r}");
         // past the last point the strip's own (centre) pan plays
         let (l, r) = s.target_gains(Some(2000));
+        assert!((l - r).abs() < 1e-6, "{l} {r}");
+        // automation from the launcher: the arrangement's lane is ignored
+        let mut s = s;
+        s.launcher = true;
+        let (l, r) = s.target_gains(Some(500));
         assert!((l - r).abs() < 1e-6, "{l} {r}");
     }
 }

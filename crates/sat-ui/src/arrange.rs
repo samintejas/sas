@@ -7,14 +7,12 @@ use sat_doc::*;
 use sat_theme::{Rgba, Theme};
 use vello::kurbo::{Point, Rect};
 
-use crate::controls;
 use crate::icons::{self, Icon};
-use crate::mixer::Levels;
 use crate::paint::{Align, Painter, TextStyle};
 use crate::session::{SessionHit, SessionView};
 
 /// Width of the track header column.
-pub const HEADER_W: f64 = 220.0;
+pub const HEADER_W: f64 = 196.0;
 /// Height of the ruler.
 pub const RULER_H: f64 = 44.0;
 /// Height of the arrange toolbar row.
@@ -88,7 +86,7 @@ impl Default for ArrangeState {
             hidden_lanes: BTreeSet::new(),
             active_point: None,
             track_h: TRACK_H,
-            launcher: false,
+            launcher: true,
         }
     }
 }
@@ -132,16 +130,14 @@ pub struct Row {
     pub h: f64,
     /// Nesting depth in the group tree.
     pub depth: usize,
-    /// The header shows the track's monitor switch (armed, or not on auto).
-    pub monitor: bool,
     /// Height of the clip part (a track's row above its take lanes).
     pub clip_h: f64,
 }
 
 impl Row {
-    /// A track row too short for its fader line: one line of controls.
+    /// A track row too short for its instrument line: just the name line.
     pub fn compact(&self) -> bool {
-        self.kind == RowKind::Track && self.clip_h < TRACK_H
+        self.kind == RowKind::Track && self.clip_h < 40.0
     }
 }
 
@@ -210,16 +206,9 @@ pub enum Hit {
     },
     /// A track header (outside its controls).
     Header(TrackId),
-    /// A header's mute button.
-    Mute(TrackId),
-    /// A header's solo button.
-    Solo(TrackId),
-    /// A header's record-arm button.
-    Arm(TrackId),
-    /// A part of a header's monitor switch.
-    Monitor(TrackId, Monitor),
-    /// A header's fader.
-    Fader(TrackId),
+    /// A half of a header's source switch: the track's clips or its
+    /// automation, from the launcher or the arrangement.
+    Source(TrackId, crate::session::Part),
     /// A take lane of an audio clip, at a clip time.
     Take {
         /// The placement.
@@ -280,8 +269,6 @@ pub enum Hit {
     Lane(TrackId, Ticks),
     /// The ruler, at a tick.
     Ruler(Ticks),
-    /// The toolbar's launcher button: show or hide the clip launcher.
-    Launcher,
     /// A slot or scene in the clip launcher beside the timeline.
     Session(SessionHit),
     /// Nothing.
@@ -310,12 +297,14 @@ pub struct ArrangeLayout {
     pub snap: Rect,
     /// Visible automation lanes.
     pub autos: Vec<AutoBox>,
-    /// The toolbar's launcher button.
-    pub launcher_button: Rect,
     /// The clip launcher beside the timeline, when shown (below the ruler).
     pub launcher: Option<Rect>,
     /// The launcher's scene heads, in the ruler band.
     pub scene_heads: Vec<(SceneId, Rect)>,
+    /// The launcher's "+ scene" head after the last scene.
+    pub add_scene: Option<Rect>,
+    /// The launcher's "stop all" button, in the ruler band.
+    pub stop_all: Option<Rect>,
     origin: Ticks,
     px_per_tick: f64,
 }
@@ -351,12 +340,6 @@ pub fn snap_button(bounds: Rect) -> Rect {
 /// Width of a scene column in the launcher beside the timeline.
 pub const SLOT_W: f64 = 92.0;
 
-/// Where the toolbar's launcher button is in an arrange tile at `bounds`.
-pub fn launcher_button(bounds: Rect) -> Rect {
-    let s = snap_button(bounds);
-    Rect::new(s.x0 - 52.0 - 84.0, s.y0, s.x0 - 52.0, s.y1)
-}
-
 /// Default height of the clip part of a track row.
 pub const TRACK_H: f64 = 52.0;
 
@@ -376,7 +359,7 @@ impl ArrangeLayout {
         let hx = bounds.x0 + HEADER_W;
         // the launcher takes up to half the width beside the headers
         let lw = if st.launcher {
-            (doc.scenes.len().max(1) as f64 * SLOT_W + 8.0).min(((bounds.x1 - hx) * 0.5).max(0.0))
+            ((doc.scenes.len() as f64 + 0.5) * SLOT_W + 8.0).min(((bounds.x1 - hx) * 0.5).max(0.0))
         } else {
             0.0
         };
@@ -438,9 +421,7 @@ impl ArrangeLayout {
                 row_height(kind)
             };
             let h = clip_h + if lanes > 0 { lanes as f64 * TAKE_H + 4.0 } else { 0.0 };
-            let tr = &doc.tracks[&t];
-            let monitor = kind == RowKind::Track && (tr.armed || tr.monitor != Monitor::Auto) && clip_h >= TRACK_H;
-            rows.push(Row { track: t, kind, y, h, depth: depth(t), monitor, clip_h });
+            rows.push(Row { track: t, kind, y, h, depth: depth(t), clip_h });
             y += h;
             if matches!(kind, RowKind::Track | RowKind::Group) && !st.hidden_lanes.contains(&t) {
                 for target in crate::automation::lane_targets(t) {
@@ -452,7 +433,6 @@ impl ArrangeLayout {
                             y,
                             h: row_height(k),
                             depth: depth(t),
-                            monitor: false,
                             clip_h: row_height(k),
                         });
                         y += row_height(k);
@@ -470,8 +450,12 @@ impl ArrangeLayout {
             takes: Vec::new(),
             snap: snap_button(bounds),
             autos: Vec::new(),
-            launcher_button: launcher_button(bounds),
             launcher,
+            add_scene: launcher.map(|_| {
+                let x = hx + 4.0 + doc.scenes.len() as f64 * SLOT_W;
+                Rect::new(x, top + RULER_H - 26.0, x + SLOT_W * 0.5 - 4.0, top + RULER_H - 4.0)
+            }),
+            stop_all: launcher.map(|l| Rect::new(l.x1 - 24.0, top + 3.0, l.x1 - 6.0, top + 15.0)),
             scene_heads,
             origin: st.origin,
             px_per_tick,
@@ -584,11 +568,14 @@ impl ArrangeLayout {
 
     /// What is under `pt`; with `doc`, the launcher's slots resolve to their clips.
     pub fn hit_with(&self, doc: Option<&Document>, pt: Point) -> Hit {
-        if self.launcher_button.contains(pt) {
-            return Hit::Launcher;
-        }
         if let Some((s, _)) = self.scene_heads.iter().find(|(_, r)| r.contains(pt)) {
             return Hit::Session(SessionHit::Scene(*s));
+        }
+        if self.add_scene.is_some_and(|r| r.contains(pt)) {
+            return Hit::Session(SessionHit::AddScene);
+        }
+        if self.stop_all.is_some_and(|r| r.contains(pt)) {
+            return Hit::Session(SessionHit::StopAll);
         }
         if let (Some(l), Some(doc)) = (self.launcher, doc)
             && l.contains(pt)
@@ -665,20 +652,11 @@ impl ArrangeLayout {
             if let (true, RowKind::Lane(id)) = (inside(hc.lane_remove), row.kind) {
                 return Hit::LaneRemove(id);
             }
-            if inside(hc.mute) {
-                return Hit::Mute(t);
+            if inside(hc.clips_src) {
+                return Hit::Source(t, crate::session::Part::Clips);
             }
-            if inside(hc.solo) {
-                return Hit::Solo(t);
-            }
-            if inside(hc.arm) {
-                return Hit::Arm(t);
-            }
-            if let Some((m, _)) = hc.monitor.and_then(|r| monitor_parts(r).into_iter().find(|(_, p)| p.contains(pt))) {
-                return Hit::Monitor(t, m);
-            }
-            if hc.fader.is_some_and(|f| pt.x >= f.x0 - 6.0 && pt.x <= f.x1 + 6.0 && (pt.y - f.y).abs() <= 7.0) {
-                return Hit::Fader(t);
+            if inside(hc.auto_src) {
+                return Hit::Source(t, crate::session::Part::Automation);
             }
             return Hit::Header(t);
         }
@@ -689,118 +667,44 @@ impl ArrangeLayout {
     }
 }
 
-/// A horizontal header fader: travel from `x0` (silent) to `x1` (+6 dB) at height `y`.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct HFader {
-    /// Left end.
-    pub x0: f64,
-    /// Right end.
-    pub x1: f64,
-    /// Centre line.
-    pub y: f64,
-}
-
-impl HFader {
-    /// Fader position (0–1) at screen x.
-    pub fn pos_at(&self, x: f64) -> f64 {
-        ((x - self.x0) / (self.x1 - self.x0).max(1.0)).clamp(0.0, 1.0)
-    }
-
-    /// Screen x of a position.
-    pub fn x_of(&self, pos: f64) -> f64 {
-        self.x0 + (self.x1 - self.x0) * pos.clamp(0.0, 1.0)
-    }
-}
-
-/// Where a row's header controls are. Drawing and hit testing both use it.
+/// The controls in a header.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct HeaderControls {
-    /// Mute button.
-    pub mute: Option<Rect>,
-    /// Solo button.
-    pub solo: Option<Rect>,
-    /// Record-arm button.
-    pub arm: Option<Rect>,
-    /// Fader.
-    pub fader: Option<HFader>,
-    /// Meter.
-    pub meter: Option<Rect>,
     /// The automation button: show, hide or start the track's lanes.
     pub auto: Option<Rect>,
+    /// The source switch's clips half: launcher or arrangement.
+    pub clips_src: Option<Rect>,
+    /// The source switch's automation half: launcher or arrangement.
+    pub auto_src: Option<Rect>,
     /// A lane header's add-lane button.
     pub lane_add: Option<Rect>,
     /// A lane header's remove-lane button.
     pub lane_remove: Option<Rect>,
-    /// The monitor switch: in, auto, off.
-    pub monitor: Option<Rect>,
 }
 
-/// The monitor modes, in the order the switch shows them.
-pub const MONITOR_MODES: [(Monitor, &str); 3] = [(Monitor::In, "in"), (Monitor::Auto, "auto"), (Monitor::Off, "off")];
-
-/// The three parts of a monitor switch.
-pub fn monitor_parts(r: Rect) -> [(Monitor, Rect); 3] {
-    let w = r.width() / 3.0;
-    let mut k = 0.0;
-    MONITOR_MODES.map(|(m, _)| {
-        let x = r.x0 + w * k;
-        k += 1.0;
-        (m, Rect::new(x, r.y0, x + w, r.y1))
-    })
-}
-
-/// The header controls of `row` in the header column `headers`.
+/// The header controls of `row` in the header column `headers`. Mute,
+/// solo, arm, monitoring and the fader live in the mixer; a header names
+/// the track and says where its clips and automation come from.
 pub fn header_controls(row: &Row, headers: Rect) -> HeaderControls {
     let (x1, y0, y1) = (headers.x1, row.y, row.y + row.h);
-    let indent = 14.0 + 10.0 * row.depth as f64;
-    let button = |x: f64, cy: f64| Some(Rect::new(x, cy - 11.0, x + 22.0, cy + 11.0));
     match row.kind {
         RowKind::Group => {
             let cy = y0 + 17.0;
-            HeaderControls {
-                mute: button(x1 - 98.0, cy),
-                solo: button(x1 - 72.0, cy),
-                arm: None,
-                fader: Some(HFader { x0: headers.x0 + indent, x1: x1 - 50.0, y: y0 + 33.0 }),
-                meter: Some(Rect::new(x1 - 16.0, y0 + 12.0, x1 - 9.0, y1 - 8.0)),
-                auto: button(x1 - 46.0, cy),
-                ..Default::default()
-            }
-        }
-        RowKind::Track if row.compact() => {
-            // one line: name, buttons and a short meter
-            let cy = y0 + row.clip_h / 2.0;
-            let small = |x: f64| Some(Rect::new(x, cy - 9.0, x + 20.0, cy + 9.0));
-            HeaderControls {
-                mute: small(x1 - 94.0),
-                solo: small(x1 - 70.0),
-                arm: small(x1 - 46.0),
-                fader: None,
-                meter: Some(Rect::new(x1 - 16.0, y0 + 5.0, x1 - 9.0, y0 + row.clip_h - 5.0)),
-                auto: small(x1 - 118.0),
-                monitor: None,
-                ..Default::default()
-            }
+            HeaderControls { auto: Some(Rect::new(x1 - 30.0, cy - 9.0, x1 - 10.0, cy + 9.0)), ..Default::default() }
         }
         RowKind::Track => {
-            let cy = y0 + 17.0;
+            let cy = if row.compact() { y0 + row.clip_h / 2.0 } else { y0 + 17.0 };
+            // the source switch is a pair of icons; the lanes button lines
+            // up with a group's
+            let icon = |x: f64| Some(Rect::new(x, cy - 9.0, x + 20.0, cy + 9.0));
             HeaderControls {
-                mute: button(x1 - 98.0, cy),
-                solo: button(x1 - 72.0, cy),
-                arm: button(x1 - 46.0, cy),
-                fader: Some(HFader { x0: x1 - 98.0, x1: x1 - 30.0, y: y0 + TRACK_H - 13.0 }),
-                meter: Some(Rect::new(x1 - 16.0, y0 + 10.0, x1 - 9.0, y0 + TRACK_H - 6.0)),
-                auto: button(x1 - 124.0, cy),
-                monitor: row.monitor.then(|| {
-                    let cy = y0 + TRACK_H - 13.0;
-                    Rect::new(headers.x0 + indent - 2.0, cy - 9.0, headers.x0 + indent + 94.0, cy + 9.0)
-                }),
+                auto: icon(x1 - 30.0),
+                clips_src: icon(x1 - 78.0),
+                auto_src: icon(x1 - 57.0),
                 ..Default::default()
             }
         }
-        RowKind::Return | RowKind::Master => {
-            HeaderControls { mute: button(x1 - 32.0, (y0 + y1) / 2.0), ..Default::default() }
-        }
+        RowKind::Return | RowKind::Master => HeaderControls::default(),
         RowKind::Lane(_) => {
             let cy = (y0 + y1) / 2.0;
             let small = |x: f64| Some(Rect::new(x, cy - 9.0, x + 18.0, cy + 9.0));
@@ -838,25 +742,6 @@ fn small_button(p: &mut Painter<'_>, th: &Theme, r: Rect, label: &str, on: Optio
     r
 }
 
-fn fader(p: &mut Painter<'_>, th: &Theme, f: HFader, gain_db: f32) {
-    let (x0, y) = (f.x0, f.y);
-    p.rrect(Rect::new(x0, y - 1.5, f.x1, y + 1.5), 1.5, Rgba::hex(0x262626));
-    let tx = f.x_of(controls::fader_pos(gain_db));
-    p.rrect(Rect::new(x0, y - 1.5, tx, y + 1.5), 1.5, th.c.text_secondary.alpha(0.6));
-    p.circle(Point::new(tx, y), 5.0, Rgba::hex(0xd8d8d8));
-    p.circle_stroke(Point::new(tx, y), 5.0, 1.0, Rgba::hex(0x050505));
-}
-
-fn meter(p: &mut Painter<'_>, th: &Theme, r: Rect, (l, rr): (f32, f32)) {
-    let h = r.height();
-    let (a, b) = (r.x0, r.x0 + 4.0);
-    p.rect(Rect::new(a, r.y0, a + 3.0, r.y1), Rgba::hex(0x1a1a1a));
-    p.rect(Rect::new(b, r.y0, b + 3.0, r.y1), Rgba::hex(0x1a1a1a));
-    let fill = th.c.accent_success;
-    p.rect(Rect::new(a, r.y1 - h * controls::meter_pos(l), a + 3.0, r.y1), fill);
-    p.rect(Rect::new(b, r.y1 - h * controls::meter_pos(rr), b + 3.0, r.y1), fill);
-}
-
 /// Draws the arrange view.
 #[allow(clippy::too_many_arguments)]
 pub fn draw(
@@ -865,7 +750,6 @@ pub fn draw(
     doc: &Document,
     st: &ArrangeState,
     tr: &TransportView,
-    levels: &Levels,
     sounds: &sat_disk::Pool,
     session: &SessionView,
     l: &ArrangeLayout,
@@ -879,8 +763,8 @@ pub fn draw(
     let ty = b.y0 + TOOLBAR_H / 2.0;
     let tracks = doc.tracks.values().filter(|t| t.kind == TrackKind::Track).count();
     let bars = doc.placements.values().map(|pl| pl.start.0 + pl.length.0).max().unwrap_or(0).max(0).div_euclid(PPQ * 4);
-    crate::area::note(p, th, hx, ty, &format!("{tracks} tracks · {bars} bars"), l.launcher_button.x0 - 12.0 - hx);
-    crate::area::button(p, th, l.launcher_button, "launcher", st.launcher);
+    let note_end = if session.any_launcher() { crate::session::back_button(b).x0 } else { snap_button(b).x0 - 52.0 };
+    crate::area::note(p, th, hx, ty, &format!("{tracks} tracks · {bars} bars"), note_end - 12.0 - hx);
     let mut x = b.x1 - 12.0;
     for icon in [Icon::Plus, Icon::Search] {
         let r = Rect::new(x - 26.0, ty - 11.0, x, ty + 11.0);
@@ -967,7 +851,7 @@ pub fn draw(
             if row.y + row.h < l.timeline.y0 || row.y > b.y1 {
                 continue;
             }
-            draw_row(p, th, doc, st, levels, l, row);
+            draw_row(p, th, doc, st, session, l, row);
         }
         let tempo = doc.tempo_map().ok();
         for cb in &l.clips {
@@ -1014,7 +898,7 @@ fn draw_row(
     th: &Theme,
     doc: &Document,
     st: &ArrangeState,
-    levels: &Levels,
+    session: &SessionView,
     l: &ArrangeLayout,
     row: &Row,
 ) {
@@ -1026,7 +910,6 @@ fn draw_row(
     let selected = st.selected_track == Some(row.track) && row.kind == RowKind::Track;
     let indent = 14.0 + 10.0 * row.depth as f64;
     let hc = header_controls(row, l.headers);
-    let level = levels.get(&row.track).copied().unwrap_or((0.0, 0.0));
     match row.kind {
         RowKind::Track | RowKind::Group => {
             p.rect(hr, if selected { c.bg_raised } else { c.bg_surface });
@@ -1057,12 +940,7 @@ fn draw_row(
                     &TextStyle::mono(10.0, c.text_secondary),
                     Align::Center,
                 );
-                draw_mute_solo(p, th, &hc, t);
                 draw_auto_button(p, th, doc, st, &hc, t);
-                if let (Some(f), Some(m)) = (hc.fader, hc.meter) {
-                    fader(p, th, f, t.mixer.gain_db);
-                    meter(p, th, m, level);
-                }
                 // children summary: one bar per child track's placements
                 let kids: Vec<&Track> = t.children.iter().map(|k| &doc.tracks[k]).collect();
                 let n = kids.len().max(1) as f64;
@@ -1078,45 +956,19 @@ fn draw_row(
                 }
             } else {
                 let cy = if row.compact() { hr.y0 + row.clip_h / 2.0 } else { hr.y0 + 17.0 };
-                p.text_fit(hr.x0 + indent, cy, &t.name, &TextStyle::sans(13.0, c.text_strong).medium(), 70.0);
-                if row.compact() {
-                    // no second line
-                } else if let Some(mr) = hc.monitor {
-                    p.rrect_stroke(mr.inset(-0.5), 4.0, 1.0, c.border_default);
-                    for ((m, part), (_, label)) in monitor_parts(mr).into_iter().zip(MONITOR_MODES) {
-                        let on = t.monitor == m;
-                        if on {
-                            p.rrect(part.inset(-2.0), 3.0, c.bg_fill);
-                        }
-                        let col = if on { c.accent_primary } else { c.text_secondary };
-                        p.text(part.center().x, part.center().y, label, &TextStyle::mono(10.5, col), Align::Center);
-                    }
-                } else {
+                let name_w = hc.auto.map_or(hr.width(), |r| r.x0 - 6.0 - hr.x0 - indent);
+                p.text_fit(hr.x0 + indent, cy, &t.name, &TextStyle::sans(13.0, c.text_strong).medium(), name_w);
+                if !row.compact() {
                     p.text_fit(
                         hr.x0 + indent,
-                        hr.y0 + TRACK_H - 13.0,
+                        hr.y0 + 35.0,
                         &track_label(doc, t),
                         &TextStyle::sans(11.5, c.text_secondary),
-                        hr.width() - indent - 112.0,
+                        hr.width() - indent - 12.0,
                     );
                 }
-                draw_mute_solo(p, th, &hc, t);
                 draw_auto_button(p, th, doc, st, &hc, t);
-                if let Some(ar) = hc.arm {
-                    let arm = small_button(p, th, ar, "", t.armed.then_some(c.accent_danger));
-                    if t.armed {
-                        p.rrect(arm, 3.0, c.accent_danger);
-                        p.circle(arm.center(), 3.5, c.on_accent_danger);
-                    } else {
-                        p.circle_stroke(arm.center(), 4.0, 1.0, c.text_primary);
-                    }
-                }
-                if let Some(f) = hc.fader {
-                    fader(p, th, f, t.mixer.gain_db);
-                }
-                if let Some(m) = hc.meter {
-                    meter(p, th, m, level);
-                }
+                draw_source_switch(p, th, &hc, session, row.track);
                 draw_take_names(p, th, doc, st, row, hr);
             }
             if selected {
@@ -1193,7 +1045,6 @@ fn draw_row(
                     Rect::new(field.x1 - 16.0, cy - 4.0, field.x1 - 6.0, cy + 4.0),
                     c.text_secondary,
                 );
-                draw_mute_solo(p, th, &hc, t);
             }
             if let Some(a) = l.autos.iter().find(|a| (a.rect.y0 - row.y).abs() < 0.5) {
                 draw_automation(p, th, doc, st, a);
@@ -1231,6 +1082,21 @@ fn draw_launcher(
             let tri = Rect::new(h.x0 + 6.0, h.center().y - 4.5, h.x0 + 15.0, h.center().y + 4.5);
             icons::draw(p, Icon::Play, tri, if on { c.accent_primary } else { c.text_secondary });
             p.text_fit(h.x0 + 20.0, h.center().y, name, &TextStyle::mono(11.0, c.text_strong), h.width() - 24.0);
+        }
+        if let Some(a) = l.add_scene {
+            p.rrect(a, 3.0, c.bg_surface.alpha(0.7));
+            p.rrect_stroke(a.inset(-0.5), 3.0, 1.0, c.border_subtle);
+            icons::draw(
+                p,
+                Icon::Plus,
+                Rect::new(a.center().x - 5.0, a.center().y - 5.0, a.center().x + 5.0, a.center().y + 5.0),
+                c.text_secondary,
+            );
+        }
+        if let Some(s) = l.stop_all {
+            let any = !session.playing.is_empty();
+            let sq = Rect::new(s.center().x - 4.0, s.center().y - 4.0, s.center().x + 4.0, s.center().y + 4.0);
+            p.rect(sq, if any { c.text_max } else { c.text_secondary.alpha(0.6) });
         }
     });
     let body = Rect::new(lr.x0, lr.y0, lr.x1, lr.y1);
@@ -1280,6 +1146,27 @@ fn draw_launcher(
     p.vline(lr.x1, l.ruler.y0, lr.y1, c.border_default);
 }
 
+/// The two halves of a track's source switch: "clip" and "auto", lit
+/// (accent) while that part comes from the launcher, dim while it plays
+/// the arrangement.
+fn draw_source_switch(p: &mut Painter<'_>, th: &Theme, hc: &HeaderControls, session: &SessionView, t: TrackId) {
+    let c = &th.c;
+    let (Some(a), Some(b)) = (hc.clips_src, hc.auto_src) else { return };
+    // one pill holding both halves; a half lit in the accent plays from the launcher
+    let pill = a.union(b);
+    p.rrect(pill, 4.0, c.bg_control);
+    p.rrect_stroke(pill.inset(-0.5), 4.0, 1.0, c.border_default);
+    for (r, icon, on) in
+        [(a, Icon::Clip, session.following.contains(&t)), (b, Icon::Envelope, session.auto.contains(&t))]
+    {
+        if on {
+            p.rrect(r, 4.0, c.accent_primary.alpha(0.2));
+            p.rrect_stroke(r.inset(-0.5), 4.0, 1.0, c.accent_primary.alpha(0.8));
+        }
+        icons::draw(p, icon, r.inset(-4.0), if on { c.accent_primary } else { c.text_secondary });
+    }
+}
+
 /// The automation button: lit while the track's lanes show.
 fn draw_auto_button(
     p: &mut Painter<'_>,
@@ -1294,15 +1181,6 @@ fn draw_auto_button(
     let on = has && !st.hidden_lanes.contains(&t.id);
     small_button(p, th, r, "", on.then_some(th.c.accent_primary));
     icons::draw(p, Icon::Pulse, r.inset(-5.0), if on { th.c.accent_primary } else { th.c.text_primary });
-}
-
-fn draw_mute_solo(p: &mut Painter<'_>, th: &Theme, hc: &HeaderControls, t: &Track) {
-    if let Some(r) = hc.mute {
-        small_button(p, th, r, "m", t.mixer.mute.then_some(th.c.accent_warning));
-    }
-    if let Some(r) = hc.solo {
-        small_button(p, th, r, "s", t.mixer.solo.then_some(th.c.accent_info));
-    }
 }
 
 /// Draws a lane: its curve between breakpoints and, outside them, the

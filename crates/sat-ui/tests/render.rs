@@ -101,8 +101,9 @@ fn renders_the_arrange_view() {
     let col = theme.track(d.doc.clips[&d.selected].color.0);
     let probe = (cb.rect.x0 as u32 + 3, cb.rect.y0 as u32 + 12);
     assert!(near(img.pixel(probe.0, probe.1), col), "clip header {:?} vs {col:?}", img.pixel(probe.0, probe.1));
-    // and it has the accent selection ring just outside its edge
-    let ring = img.pixel(cb.rect.center().x as u32, cb.rect.y0 as u32);
+    // and it has the accent selection ring just outside its edge (probed
+    // near its start: with the launcher open the clip runs past the window)
+    let ring = img.pixel(cb.rect.x0 as u32 + 24, cb.rect.y0 as u32);
     assert!(near(ring, theme.c.accent_primary), "ring {ring:?}");
     // the window background is the base colour
     assert!(near(img.pixel(1, h - 1), theme.c.bg_base));

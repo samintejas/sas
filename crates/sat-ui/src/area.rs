@@ -30,8 +30,6 @@ pub enum Slot {
     Panel,
     /// The left sidebar.
     Left,
-    /// The right sidebar.
-    Right,
 }
 
 /// What an area shows.
@@ -39,8 +37,6 @@ pub enum Slot {
 pub enum EditorType {
     /// The arrangement.
     Arrange,
-    /// The session's clip launcher.
-    Session,
     /// The selected track's source grid.
     SourceGrid,
     /// The selected track's instrument grid.
@@ -66,7 +62,6 @@ impl EditorType {
     pub fn label(self) -> &'static str {
         match self {
             EditorType::Arrange => "arrange",
-            EditorType::Session => "session",
             EditorType::SourceGrid => "source grid",
             EditorType::InstrumentGrid => "instrument",
             EditorType::FxGrid => "fx grid",
@@ -83,7 +78,6 @@ impl EditorType {
     pub fn icon(self) -> Icon {
         match self {
             EditorType::Arrange => Icon::Lines,
-            EditorType::Session => Icon::Grid,
             EditorType::SourceGrid => Icon::Panel,
             EditorType::InstrumentGrid => Icon::Gear,
             EditorType::FxGrid => Icon::Sliders,
@@ -99,7 +93,6 @@ impl EditorType {
     /// The keyboard shortcut shown in the menu.
     pub fn hint(self) -> &'static str {
         match self {
-            EditorType::Session => "ctrl 1",
             EditorType::Arrange => "ctrl 2",
             EditorType::SourceGrid => "ctrl 3",
             EditorType::InstrumentGrid => "ctrl 4",
@@ -113,9 +106,9 @@ impl EditorType {
     pub fn choices(slot: Slot) -> &'static [EditorType] {
         use EditorType::*;
         match slot {
-            Slot::Main => &[Arrange, Session, SourceGrid, InstrumentGrid, FxGrid],
+            Slot::Main => &[Arrange, SourceGrid, InstrumentGrid, FxGrid],
             Slot::Panel => &[Clip, Mixer],
-            Slot::Left | Slot::Right => &[Browser, Bank, Outliner, Inspector],
+            Slot::Left => &[Browser, Bank, Outliner, Inspector],
         }
     }
 }

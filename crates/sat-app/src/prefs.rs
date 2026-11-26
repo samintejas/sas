@@ -52,18 +52,12 @@ impl Prefs {
                 "snap" => p.snap = if v == "off" { None } else { v.parse().ok().map(Ticks).or(p.snap) },
                 "note_len" => p.note_len = v.parse().ok().filter(|t| *t > 0).map_or(p.note_len, Ticks),
                 "left_open" => p.dock.left_open = flag.unwrap_or(p.dock.left_open),
-                "right_open" => p.dock.right_open = flag.unwrap_or(p.dock.right_open),
                 "panel_open" => p.dock.panel_open = flag.unwrap_or(p.dock.panel_open),
                 "left_w" => p.dock.left_w = num.map_or(p.dock.left_w, |w| w.clamp(160.0, 900.0)),
-                "right_w" => p.dock.right_w = num.map_or(p.dock.right_w, |w| w.clamp(160.0, 900.0)),
                 "roll_h" => p.dock.roll_h = num.map_or(p.dock.roll_h, |h| h.clamp(120.0, 1400.0)),
                 "left_shows" => p.dock.left_shows = side(v).unwrap_or(p.dock.left_shows),
-                "right_shows" => p.dock.right_shows = side(v).unwrap_or(p.dock.right_shows),
                 _ => {}
             }
-        }
-        if p.dock.left_shows == p.dock.right_shows {
-            p.dock.right_shows = Dock::default().right_shows;
         }
         p
     }
@@ -73,17 +67,14 @@ impl Prefs {
         let d = &self.dock;
         format!(
             "# sat settings\nui_scale = {:.2}\nsnap = {}\nnote_len = {}\n\
-             left_open = {}\nleft_w = {:.0}\nleft_shows = {}\nright_open = {}\nright_w = {:.0}\n\
-             right_shows = {}\npanel_open = {}\nroll_h = {:.0}\n",
+             left_open = {}\nleft_w = {:.0}\nleft_shows = {}\n\
+             panel_open = {}\nroll_h = {:.0}\n",
             self.ui_scale,
             self.snap.map_or("off".to_string(), |t| t.0.to_string()),
             self.note_len.0,
             d.left_open,
             d.left_w,
             d.left_shows.label(),
-            d.right_open,
-            d.right_w,
-            d.right_shows.label(),
             d.panel_open,
             d.roll_h,
         )
@@ -114,7 +105,7 @@ mod tests {
         p.snap = None;
         p.dock.left_shows = EditorType::Browser;
         p.dock.left_w = 300.0;
-        p.dock.right_open = true;
+        p.dock.panel_open = false;
         let back = Prefs::parse(&p.to_text(), defaults());
         assert_eq!(back, p);
         let odd = Prefs::parse("ui_scale = lots\nwhat = 3\nleft_shows = mixer\nnonsense", defaults());

@@ -36,6 +36,9 @@ pub struct AudioPlayer {
     /// The timeline sample the next block would start at while playing, and
     /// how far a stop's fade-out has got.
     stopping: Option<(i64, usize)>,
+    /// From this timeline sample on, the track plays the launcher instead:
+    /// the arrangement's audio fades out there and stays silent.
+    launcher_from: Option<i64>,
 }
 
 /// Seconds a sound fades out over when the transport stops in it.
@@ -51,7 +54,28 @@ impl AudioPlayer {
     pub fn new(mut segs: Vec<AudioSeg>) -> AudioPlayer {
         segs.retain(|s| s.len > 0);
         segs.sort_by_key(|s| s.at);
-        AudioPlayer { segs, stopping: None }
+        AudioPlayer { segs, stopping: None, launcher_from: None }
+    }
+
+    /// Hands the track to the launcher from timeline sample `at`: the
+    /// arrangement's audio fades out there.
+    pub fn follow_launcher(&mut self, at: i64) {
+        self.launcher_from = Some(self.launcher_from.map_or(at, |f| f.min(at)));
+    }
+
+    /// Plays the arrangement's audio again.
+    pub fn back_to_arrangement(&mut self) {
+        self.launcher_from = None;
+    }
+
+    /// Whether the track has been handed to the launcher.
+    pub fn follows_launcher(&self) -> bool {
+        self.launcher_from.is_some()
+    }
+
+    /// Carries the launcher hand-over from the player this one replaces.
+    pub(crate) fn adopt(&mut self, old: &AudioPlayer) {
+        self.launcher_from = old.launcher_from;
     }
 
     /// The segments, by start.
@@ -80,6 +104,10 @@ impl AudioPlayer {
     /// frame of the block).
     fn add(&self, out: &mut crate::Buf, off: usize, t0: i64, len: usize, sr: f64, env: impl Fn(usize) -> f32) {
         let t1 = t0 + len as i64;
+        // handed to the launcher: fade out over a few ms, then silence
+        let fade_n = ((STOP_FADE_S * sr) as i64).max(1);
+        let cut = self.launcher_from.map(|f| (f, f + fade_n));
+        let t1 = cut.map_or(t1, |(_, end)| t1.min(end.max(t0)));
         // segments starting after this block are all later in the list
         let end = self.segs.partition_point(|s| s.at < t1);
         for s in &self.segs[..end] {
@@ -101,6 +129,10 @@ impl AudioPlayer {
                 let (l, r) = s.sound.at(s.src + rel as f64 * ratio);
                 let i = off + (t - t0) as usize;
                 let g = g * env((t - t0) as usize);
+                let g = match cut {
+                    Some((f, _)) if t >= f => g * (1.0 - (t - f) as f32 / fade_n as f32).max(0.0),
+                    _ => g,
+                };
                 out.l[i] += l * g;
                 out.r[i] += r * g;
             }
@@ -155,6 +187,20 @@ mod tests {
         assert!(v[2100..].iter().all(|x| *x == 0.0));
         // stateless: the same samples from any start
         assert_eq!(render(&mut p, 1024, 512), v[1024..1536].to_vec());
+    }
+
+    #[test]
+    fn handed_to_the_launcher_the_audio_fades_out_and_comes_back() {
+        let seg = AudioSeg { at: 0, len: 10_000, sound: dc(0.5, 10_000), src: 0.0, fade_in: 0, fade_out: 0, gain: 1.0 };
+        let mut p = AudioPlayer::new(vec![seg]);
+        p.follow_launcher(1_000);
+        assert!(p.follows_launcher());
+        let v = render(&mut p, 0, 3_072);
+        assert_eq!(v[999], 0.5);
+        assert!(v[1_100] < 0.5 && v[1_100] > 0.0, "a short fade, not a click");
+        assert!(v[2_000..].iter().all(|x| *x == 0.0));
+        p.back_to_arrangement();
+        assert_eq!(render(&mut p, 2_048, 64)[0], 0.5);
     }
 
     #[test]

@@ -84,25 +84,22 @@ fn position_display() {
 }
 
 #[test]
-fn header_controls_are_hit_where_they_are_drawn() {
+fn headers_name_the_track_and_switch_its_source() {
     use sat_ui::arrange::header_controls;
+    use sat_ui::session::Part;
     let (d, l) = layout();
     let row = *l.rows.iter().find(|r| r.kind == RowKind::Track).unwrap();
     let hc = header_controls(&row, l.headers);
     let t = row.track;
-    assert_eq!(l.hit(hc.mute.unwrap().center()), Hit::Mute(t));
-    assert_eq!(l.hit(hc.solo.unwrap().center()), Hit::Solo(t));
-    assert_eq!(l.hit(hc.arm.unwrap().center()), Hit::Arm(t));
-    let f = hc.fader.unwrap();
-    assert_eq!(l.hit(Point::new((f.x0 + f.x1) / 2.0, f.y + 2.0)), Hit::Fader(t));
-    assert!((f.pos_at(f.x_of(0.3)) - 0.3).abs() < 1e-9);
+    assert_eq!(l.hit(hc.clips_src.unwrap().center()), Hit::Source(t, Part::Clips));
+    assert_eq!(l.hit(hc.auto_src.unwrap().center()), Hit::Source(t, Part::Automation));
+    assert_eq!(l.hit(hc.auto.unwrap().center()), Hit::AutoToggle(t));
     // the name area is still the header
     assert_eq!(l.hit(Point::new(l.headers.x0 + 20.0, row.y + 17.0)), Hit::Header(t));
-    // returns and master have only a mute button
+    // returns and master have no controls: those live in the mixer
     let master = *l.rows.last().unwrap();
-    let hm = header_controls(&master, l.headers);
-    assert!(hm.solo.is_none() && hm.fader.is_none());
-    assert_eq!(l.hit(hm.mute.unwrap().center()), Hit::Mute(d.doc.master));
+    assert_eq!(header_controls(&master, l.headers), Default::default());
+    assert_eq!(master.track, d.doc.master);
 }
 
 #[test]
@@ -120,8 +117,8 @@ fn track_height_zoom_scales_rows_and_goes_compact() {
     let row = l.rows.iter().find(|r| r.kind == RowKind::Track).unwrap();
     assert!(row.compact());
     let hc = sat_ui::arrange::header_controls(row, l.headers);
-    assert!(hc.fader.is_none(), "a compact row has one line of controls");
-    assert_eq!(l.hit(hc.mute.unwrap().center()), Hit::Mute(row.track));
+    assert!((hc.clips_src.unwrap().center().y - (row.y + row.clip_h / 2.0)).abs() < 0.5, "one centred line");
+    assert_eq!(l.hit(hc.clips_src.unwrap().center()), Hit::Source(row.track, sat_ui::session::Part::Clips));
 }
 
 #[test]
@@ -134,7 +131,6 @@ fn the_launcher_sits_between_headers_and_timeline_and_hits_slots() {
     assert_eq!(lr.x0, l.headers.x1);
     assert_eq!(l.timeline.x0, lr.x1, "the timeline starts after the launcher");
     assert_eq!(l.scene_heads.len(), d.doc.scenes.len());
-    assert_eq!(l.hit_with(Some(&d.doc), l.launcher_button.center()), Hit::Launcher);
     let (s1, head) = l.scene_heads[0];
     assert_eq!(l.hit_with(Some(&d.doc), head.center()), Hit::Session(SessionHit::Scene(s1)));
     let drums = d.doc.tracks.values().find(|t| t.name == "drums").unwrap().id;
@@ -184,6 +180,19 @@ mod mixer {
         assert_eq!(first_ret.knobs.len(), 1);
         assert!(master.mute.is_none());
         assert_eq!(l.max_scroll, 0.0, "the demo fits");
+    }
+
+    #[test]
+    fn tracks_arm_and_monitor_in_the_mixer() {
+        let d = demo();
+        let l = MixerLayout::new(&d.doc, body(), 0.0);
+        let vox = d.doc.tracks.values().find(|t| t.name == "vox").unwrap().id;
+        let s = l.strip(vox).unwrap();
+        assert_eq!(l.hit(s.arm.unwrap().center()), MixHit::Arm(vox));
+        assert_eq!(l.hit(s.monitor.unwrap().center()), MixHit::Monitor(vox));
+        assert!(s.readout.y1 <= s.arm.unwrap().y0, "the readout sits above the record row");
+        let master = l.strips.last().unwrap();
+        assert!(master.arm.is_none() && master.monitor.is_none());
     }
 
     #[test]
@@ -612,22 +621,6 @@ fn audio_clips_show_take_lanes_and_fade_handles() {
     assert!(cb.rect.y1 <= verse.rect.y0, "lanes sit under the clip");
     // note clips have no fades
     assert!(l.clips.iter().filter(|c| d.doc.clips[&c.clip].audio.is_none()).all(|c| c.fades.is_none()));
-}
-
-#[test]
-fn armed_tracks_show_a_monitor_switch() {
-    let (mut d, l) = layout();
-    let vox = d.doc.tracks.values().find(|t| t.name == "vox").unwrap().id;
-    assert!(!l.rows.iter().find(|r| r.track == vox).unwrap().monitor, "the demo arms nothing");
-    sat_doc::apply(&mut d.doc, Op::SetTrackFlag { id: vox, flag: TrackFlag::Arm, on: true }).unwrap();
-    let l = ArrangeLayout::new(&d.doc, &ArrangeState::default(), Rect::new(0.0, 0.0, 1400.0, 700.0));
-    let row = l.rows.iter().find(|r| r.track == vox).unwrap();
-    assert!(row.monitor, "an armed track shows it");
-    let hc = sat_ui::arrange::header_controls(row, l.headers);
-    let parts = sat_ui::arrange::monitor_parts(hc.monitor.unwrap());
-    assert_eq!(l.hit(parts[2].1.center()), Hit::Monitor(vox, Monitor::Off));
-    let bass = d.doc.tracks.values().find(|t| t.name == "bass").unwrap().id;
-    assert!(!l.rows.iter().find(|r| r.track == bass).unwrap().monitor);
 }
 
 mod chords {

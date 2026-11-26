@@ -62,6 +62,12 @@ pub enum Icon {
     ChevronUp,
     /// A folder (browser).
     Folder,
+    /// A clip: a box with a header and notes.
+    Clip,
+    /// An automation envelope: a line through breakpoints.
+    Envelope,
+    /// Back to the arrangement: an arrow returning onto timeline rows.
+    BackToArrangement,
 }
 
 /// Draws `icon` centred in `r`.
@@ -227,6 +233,29 @@ pub fn draw(p: &mut Painter<'_>, icon: Icon, r: Rect, c: Rgba) {
             p.line(pt(-0.7, -0.1), pt(0.7, -0.1), 1.0, c);
         }
         Icon::ChevronUp => p.polyline(&[pt(-0.4, 0.2), pt(0.0, -0.2), pt(0.4, 0.2)], w, c),
+        Icon::Clip => {
+            let q = Rect::new(cx - 0.75 * s, cy - 0.55 * s, cx + 0.75 * s, cy + 0.55 * s);
+            p.rrect_stroke(q, 1.5, 1.0, c);
+            p.rect(Rect::new(q.x0, q.y0, q.x1, q.y0 + 0.28 * s), c);
+            p.line(pt(-0.45, 0.25), pt(-0.1, 0.25), w, c);
+            p.line(pt(0.1, 0.0), pt(0.45, 0.0), w, c);
+        }
+        Icon::Envelope => {
+            let ps = [pt(-0.75, 0.45), pt(-0.25, -0.45), pt(0.25, 0.15), pt(0.75, -0.25)];
+            p.polyline(&ps, w, c);
+            for q in ps {
+                p.circle(q, 0.13 * s, c);
+            }
+        }
+        Icon::BackToArrangement => {
+            // timeline rows on the right, an arrow coming back onto them
+            for (i, l) in [0.55, 0.35, 0.45].iter().enumerate() {
+                let y = -0.45 + i as f64 * 0.45;
+                p.line(pt(0.75 - l, y), pt(0.75, y), w, c);
+            }
+            p.polyline(&[pt(-0.15, -0.45), pt(-0.75, -0.45), pt(-0.75, 0.45), pt(0.0, 0.45)], w, c);
+            p.polyline(&[pt(-0.25, 0.2), pt(0.0, 0.45), pt(-0.25, 0.7)], w, c);
+        }
         Icon::Pulse => {
             p.polyline(
                 &[pt(-0.7, 0.0), pt(-0.35, 0.0), pt(-0.15, -0.55), pt(0.15, 0.55), pt(0.35, 0.0), pt(0.7, 0.0)],
