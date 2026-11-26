@@ -8,7 +8,9 @@
 //! `SAT_GRID_MENU=1` draws a grid view with its add-module menu open.
 //! `SAT_DOCK=<words>` sets the docked areas: `noleft`, `right` (the inspector;
 //! `macros` also opens it), `collapsed`, `max` (panel maximized), `focus`
-//! (main view zoomed), `tall` (a 480 px panel).
+//! (main view zoomed), `tall` (a 480 px panel). The panel is drawn at the
+//! height of the editor it shows (`tall` sets the piano roll's).
+//! `SAT_MENU=main|panel|left` draws that area's editor-type menu open.
 
 use sat_doc::sat_time::Ticks;
 use sat_ui::arrange::{ArrangeState, TransportView};
@@ -35,7 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         left_open: !has("noleft"),
         right_open: has("right") || view == "macros",
         panel_open: !has("collapsed"),
-        panel_h: if has("tall") { 480.0 } else { sat_ui::dock::PANEL_H },
+        roll_h: if has("tall") { 480.0 } else { sat_ui::dock::PANEL_H },
         zoom: if has("max") {
             Some(Zoom::Panel)
         } else if has("focus") {
@@ -86,6 +88,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let palette = std::env::var("SAT_PALETTE").ok().map(|query| sat_ui::palette::PaletteView { query, index: 0 });
     let (w, h) = (1440.0, 900.0);
     let levels = sat_ui::demo::levels(&demo.doc);
+    let mut dock = dock;
+    dock.panel_h = dock.target(shell::panel_kind(&demo.doc, panel, state.selected_clip));
     let frame = Frame {
         doc: &demo.doc,
         name: "untitled set",
@@ -93,6 +97,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         transport: TransportView { playhead: Ticks(6 * 3840 + 960 + 240), playing: true, recording: false },
         dock,
         macro_scroll: 0.0,
+        focus: sat_ui::area::Slot::Panel,
+        menu: match std::env::var("SAT_MENU").as_deref() {
+            Ok("main") => Some(sat_ui::area::Slot::Main),
+            Ok("panel") => Some(sat_ui::area::Slot::Panel),
+            Ok("left") => Some(sat_ui::area::Slot::Left),
+            _ => None,
+        },
         panel,
         mixer_scroll: 0.0,
         levels: &levels,

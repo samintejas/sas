@@ -168,6 +168,9 @@ pub struct SessionLayout {
 impl SessionLayout {
     /// Lays out the session view of `doc` in `r`.
     pub fn new(doc: &Document, view: &SessionView, r: Rect) -> SessionLayout {
+        let full = r;
+        // below the area header
+        let r = Rect::new(r.x0, (r.y0 + crate::area::HEADER_H).min(r.y1), r.x1, r.y1);
         let x0 = r.x0 + 8.0 + SCENE_W + GAP - view.scroll;
         let cols = doc
             .tracks_in_order()
@@ -195,7 +198,7 @@ impl SessionLayout {
             .collect();
         let sy = y0 + scenes.len() as f64 * (ROW_H + GAP);
         let stop_all = Rect::new(r.x0 + 8.0, sy, r.x0 + 8.0 + SCENE_W, sy + ROW_H);
-        let back = back_button(r);
+        let back = back_button(full);
         SessionLayout { area: r, cols, scenes, stop_row: (sy, sy + ROW_H), stop_all, back }
     }
 
@@ -267,6 +270,11 @@ pub fn draw(
     let l = SessionLayout::new(doc, view, r);
     let c = &th.c;
     p.rect(r, c.bg_base);
+    let (bar, hx) = crate::area::header(p, th, r, crate::area::EditorType::Session);
+    let playing = view.playing.len();
+    let note = format!("{} scenes · {} tracks · {playing} playing", doc.scenes.len(), l.cols.len());
+    crate::area::note(p, th, hx, bar.center().y, &note, r.x1 - 12.0 - hx);
+    let r = l.area;
     let small = TextStyle::mono(11.0, c.text_secondary);
     let label = TextStyle::mono(11.5, c.text_strong);
     // a slow blink for queued launches, from the playhead

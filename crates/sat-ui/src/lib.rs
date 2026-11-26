@@ -7,6 +7,7 @@
 
 #![warn(missing_docs)]
 
+pub mod area;
 pub mod arrange;
 pub mod arrange_edit;
 pub mod audio_edit;

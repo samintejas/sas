@@ -7,6 +7,7 @@ use sat_theme::{Rgba, Theme};
 use vello::Scene;
 use vello::kurbo::{Point, Rect};
 
+use crate::area::{EditorType, Slot};
 use crate::arrange::{self, ArrangeLayout, ArrangeState, TransportView};
 use crate::dock::{self, Dock, DockButton, GAP, GRAB, Handle, Side, Zoom};
 use crate::grid::{self, GridLayout, GridView};
@@ -119,8 +120,12 @@ pub struct Frame<'a> {
     pub transport: TransportView,
     /// Which docked areas show, and their sizes.
     pub dock: Dock,
-    /// Vertical scroll of the inspector (right sidebar).
+    /// Vertical scroll of the inspector.
     pub macro_scroll: f64,
+    /// The area with focus (where the last press was).
+    pub focus: Slot,
+    /// The area whose editor-type menu is open.
+    pub menu: Option<Slot>,
     /// What the bottom panel shows.
     pub panel: PanelView,
     /// Horizontal scroll of the mixer.
@@ -177,7 +182,9 @@ pub struct Drawn {
     pub session: Option<crate::session::SessionLayout>,
     /// The command palette, when open.
     pub palette: Option<crate::palette::PaletteLayout>,
-    /// The clip bank, when the left sidebar shows.
+    /// The editor-type menu, when open.
+    pub menu: Option<crate::area::MenuLayout>,
+    /// The clip bank, when a sidebar shows it.
     pub bank: Option<crate::bank::BankLayout>,
 }
 
@@ -232,6 +239,23 @@ impl ShellLayout {
             }
         };
         ShellLayout { topbar, arrange, panel, left, right, dock: *dock }
+    }
+
+    /// The rectangle of an area, when it shows.
+    pub fn slot_rect(&self, slot: Slot) -> Option<Rect> {
+        match slot {
+            Slot::Main => self.main_shown().then_some(self.arrange),
+            Slot::Panel => (self.panel.height() > 0.0).then_some(self.panel),
+            Slot::Left => self.left,
+            Slot::Right => self.right,
+        }
+    }
+
+    /// The area under `pt`.
+    pub fn slot_at(&self, pt: Point) -> Option<Slot> {
+        [Slot::Left, Slot::Right, Slot::Panel, Slot::Main]
+            .into_iter()
+            .find(|s| self.slot_rect(*s).is_some_and(|r| r.contains(pt)))
     }
 
     /// The bottom panel shows its editor (not collapsed or hidden).
@@ -454,7 +478,7 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
         }
     }
     if sl.main_shown() {
-        p.rrect_stroke(sl.arrange.inset(0.5), 0.0, 1.0, th.c.border_default);
+        crate::area::finish(&mut p, th, sl.arrange);
     }
     let mut ml = None;
     let mut rl = None;
@@ -467,14 +491,14 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
         MainView::Arrange | MainView::Session => None,
     };
     if sl.panel.height() > 0.0 && !sl.panel_open() {
-        // collapsed: the tab bar, to click a tab and bring it back
+        // collapsed: the header, to click and bring it back
         p.clip(sl.panel, |p| {
             let (bar, x) = crate::panel::draw_bar(p, th, sl.panel, f.panel);
             let hint = if cfg!(target_os = "macos") { "cmd j: open" } else { "ctrl j: open" };
             p.text(x, bar.center().y, hint, &TextStyle::mono(11.0, th.c.text_secondary), Align::Left);
             dock::draw_panel_buttons(p, th, sl.panel, &f.dock);
         });
-        p.rrect_stroke(sl.panel.inset(0.5), 0.0, 1.0, th.c.border_default);
+        crate::area::finish(&mut p, th, sl.panel);
     } else if sl.panel.height() > 0.0 {
         p.clip(sl.panel, |p| match f.panel {
             PanelView::Clip => {
@@ -495,16 +519,24 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
             }
         });
         p.clip(sl.panel, |p| dock::draw_panel_buttons(p, th, sl.panel, &f.dock));
-        p.rrect_stroke(sl.panel.inset(0.5), 0.0, 1.0, th.c.border_default);
+        crate::area::finish(&mut p, th, sl.panel);
     }
-    if let Some(r) = sl.left {
-        p.clip(r, |p| bk = Some(crate::bank::draw(p, th, f.doc, f.bank, r)));
-        p.rrect_stroke(r.inset(0.5), 0.0, 1.0, th.c.border_default);
+    for (side, r) in [(Side::Left, sl.left), (Side::Right, sl.right)] {
+        let Some(r) = r else { continue };
+        match f.dock.side_shows(side) {
+            EditorType::Inspector => {
+                let track = f.arrange.selected_track;
+                p.clip(r, |p| {
+                    mc = Some(crate::macros::draw(p, th, f.doc, track, on_screen, f.learn, f.macro_scroll, r))
+                });
+            }
+            _ => p.clip(r, |p| bk = Some(crate::bank::draw(p, th, f.doc, f.bank, r))),
+        }
+        crate::area::finish(&mut p, th, r);
     }
-    if let Some(r) = sl.right {
-        let track = f.arrange.selected_track;
-        p.clip(r, |p| mc = Some(crate::macros::draw(p, th, f.doc, track, on_screen, f.learn, f.macro_scroll, r)));
-        p.rrect_stroke(r.inset(0.5), 0.0, 1.0, th.c.border_default);
+    // the area with focus: where keys go
+    if let Some(r) = sl.slot_rect(f.focus).filter(|r| r.height() > 0.0) {
+        crate::area::focus(&mut p, th, r);
     }
     if let Some((clip, at, target)) = f.drag_clip {
         if let Some((r, ok)) = target {
@@ -516,6 +548,13 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
             Rect::new(at.x - 20.0, at.y - 12.0, at.x - 20.0 + crate::bank::CARD_W, at.y - 12.0 + crate::bank::CARD_H);
         crate::bank::draw_card(&mut p, th, f.doc, clip, ghost, true);
     }
+    let menu = f.menu.and_then(|slot| {
+        let r = sl.slot_rect(slot).filter(|r| r.height() > 0.0)?;
+        let ty = editor_in(f.doc, f.view, f.panel, &f.dock, slot);
+        let m = crate::area::MenuLayout::new(slot, crate::area::pill_rect(r, ty), Rect::new(0.0, 0.0, w, h));
+        crate::area::draw_menu(&mut p, th, &m, ty);
+        Some(m)
+    });
     let pl = f.palette.map(|v| crate::palette::draw(&mut p, th, f.doc, v, Rect::new(0.0, 0.0, w, h)));
     Drawn {
         shell: sl,
@@ -529,5 +568,43 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
         session: ssl,
         palette: pl,
         bank: bk,
+        menu,
+    }
+}
+
+/// What the main view shows, as an editor type.
+pub fn main_editor(doc: &Document, view: MainView) -> EditorType {
+    match view {
+        MainView::Arrange => EditorType::Arrange,
+        MainView::Session => EditorType::Session,
+        MainView::Grid(g) => doc.grids.get(&g).map_or(EditorType::SourceGrid, |g| grid::editor_type(g.kind)),
+    }
+}
+
+/// What the area `slot` shows.
+pub fn editor_in(doc: &Document, view: MainView, panel: PanelView, d: &Dock, slot: Slot) -> EditorType {
+    match slot {
+        Slot::Main => main_editor(doc, view),
+        Slot::Panel => panel.editor(),
+        Slot::Left => d.side_shows(Side::Left),
+        Slot::Right => d.side_shows(Side::Right),
+    }
+}
+
+/// Which editor the bottom panel shows, for its height.
+pub fn panel_kind(doc: &Document, panel: PanelView, clip: Option<sat_doc::ClipId>) -> dock::PanelKind {
+    use dock::PanelKind;
+    match panel {
+        PanelView::Mixer => PanelKind::Mixer,
+        PanelView::Clip => {
+            let Some(c) = clip.filter(|c| doc.clips.contains_key(c)) else { return PanelKind::Roll };
+            if doc.clips[&c].audio.is_some() {
+                PanelKind::Audio
+            } else if let Some(h) = steps::fit_height(doc, c) {
+                PanelKind::Fit(h)
+            } else {
+                PanelKind::Roll
+            }
+        }
     }
 }

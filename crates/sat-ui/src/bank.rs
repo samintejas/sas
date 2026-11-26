@@ -240,7 +240,8 @@ pub fn draw(p: &mut Painter<'_>, th: &Theme, doc: &Document, view: &BankView, r:
     let n = doc.clips.len();
     let unused = doc.clips.keys().filter(|k| uses(doc, **k).unused()).count();
     let note = if unused > 0 { format!("{n} · {unused} unused") } else { format!("{n}") };
-    crate::dock::side_header(p, th, r, None, "clip bank", &note, crate::dock::close_button(r).x0 - 6.0);
+    let end = crate::dock::close_button(r).x0 - 6.0;
+    crate::dock::side_header(p, th, r, crate::area::EditorType::Bank, None, "", &format!("{note} clips"), end);
     p.clip(l.body, |p| {
         for row in &l.rows {
             let Some(t) = doc.tracks.get(&row.track) else { continue };

@@ -17,7 +17,7 @@ pub const HEADER_W: f64 = 220.0;
 /// Height of the ruler.
 pub const RULER_H: f64 = 44.0;
 /// Height of the arrange toolbar row.
-pub const TOOLBAR_H: f64 = 36.0;
+pub const TOOLBAR_H: f64 = crate::area::HEADER_H;
 
 /// Scroll, zoom and selection of the arrange view.
 #[derive(Debug, Clone, PartialEq)]
@@ -742,20 +742,23 @@ pub fn draw(
 ) {
     let c = &th.c;
     let b = l.bounds;
-    p.rect(b, c.bg_surface);
+    crate::area::region(p, th, b);
 
-    // toolbar: snap and zoom
+    // area header: editor type, what is in the song, snap and zoom
+    let (_, hx) = crate::area::header(p, th, b, crate::area::EditorType::Arrange);
     let ty = b.y0 + TOOLBAR_H / 2.0;
-    p.hline(b.x0, b.x1, b.y0 + TOOLBAR_H - 1.0, c.border_subtle);
+    let tracks = doc.tracks.values().filter(|t| t.kind == TrackKind::Track).count();
+    let bars = doc.placements.values().map(|pl| pl.start.0 + pl.length.0).max().unwrap_or(0).max(0).div_euclid(PPQ * 4);
+    crate::area::note(p, th, hx, ty, &format!("{tracks} tracks · {bars} bars"), l.snap.x0 - 60.0 - hx);
     let mut x = b.x1 - 12.0;
     for icon in [Icon::Plus, Icon::Search] {
         let r = Rect::new(x - 26.0, ty - 13.0, x, ty + 13.0);
-        icons::draw(p, icon, r.inset(-7.0), c.text_primary);
+        crate::area::icon_button(p, th, r, icon);
         x -= 32.0;
     }
     let snap = l.snap;
-    p.rrect(snap, 5.0, c.bg_control);
-    p.rrect_stroke(snap.inset(-0.5), 5.0, 1.0, c.border_strong.alpha(0.6));
+    p.rrect(snap, 5.0, c.neutral_3);
+    p.rrect_stroke(snap.inset(-0.5), 5.0, 1.0, c.border_default);
     p.text(snap.x0 + 8.0, ty, snap_label(st.snap), &TextStyle::mono(12.0, c.text_strong), Align::Left);
     icons::draw(p, Icon::ChevronDown, Rect::new(snap.x1 - 20.0, ty - 6.0, snap.x1 - 8.0, ty + 6.0), c.text_secondary);
     p.text(snap.x0 - 10.0, ty, "snap", &TextStyle::mono(12.0, c.text_secondary), Align::Right);

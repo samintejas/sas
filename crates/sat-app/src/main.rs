@@ -55,6 +55,7 @@ use sat_doc::{
 };
 use sat_engine::{Command, EngineHandle};
 use sat_modules::{Editor, PortKind, drum};
+use sat_ui::area::{EditorType, MenuLayout, Slot};
 use sat_ui::arrange::{ArrangeLayout, ArrangeState, Hit, RowKind, TransportView, header_controls};
 use sat_ui::arrange_edit::{self, Span};
 use sat_ui::automation;
@@ -65,7 +66,7 @@ use sat_ui::grid::{self, GridHit, GridLayout, GridView};
 use sat_ui::mixer::{Knob, Levels, MixHit, MixerLayout};
 use sat_ui::paint::{Fonts, color};
 use sat_ui::palette::{self, Action, PaletteLayout, PaletteView};
-use sat_ui::panel::{self, PanelView, Tab};
+use sat_ui::panel::{self, PanelView};
 use sat_ui::piano_roll::{self, RollGeom, RollHit, RollView, Tool, clip_notes, next_snap};
 use sat_ui::roll_edit::{self, Edited};
 use sat_ui::session::{SessionHit, SessionLayout, SessionView};
@@ -382,6 +383,13 @@ struct App {
     dock_drag: Option<Handle>,
     /// Vertical scroll of the inspector.
     macro_scroll: f64,
+    /// The area with focus (where the last press was).
+    focus: Slot,
+    /// The area whose editor-type menu is open, and the menu as drawn.
+    menu: Option<Slot>,
+    menu_layout: Option<MenuLayout>,
+    /// The bottom panel is easing to a new height.
+    animating: bool,
     mixer_scroll: f64,
     levels: Levels,
     playback: Playback,
@@ -705,6 +713,9 @@ impl App {
         }
         let dt = self.last_frame.elapsed().as_secs_f32().min(0.25);
         self.playback.update_levels(self.history.doc(), &mut self.levels, dt);
+        // the bottom panel eases to the height of the editor it shows
+        let kind = shell::panel_kind(self.history.doc(), self.panel, self.arrange.selected_clip);
+        self.animating = self.dock_drag.is_none() && self.dock.ease(kind, (dt as f64).min(0.05));
         let scale = g.window.scale_factor();
         let (w, h) = (size.width as f64 / scale, size.height as f64 / scale);
         self.session.advance(self.history.doc(), self.playback.playhead());
@@ -720,6 +731,8 @@ impl App {
             },
             dock: self.dock,
             macro_scroll: self.macro_scroll,
+            focus: self.focus,
+            menu: self.menu,
             panel: self.panel,
             mixer_scroll: self.mixer_scroll,
             levels: &self.levels,
@@ -764,6 +777,7 @@ impl App {
         self.macro_layout = drawn.macros;
         self.session_layout = drawn.session;
         self.palette_layout = drawn.palette;
+        self.menu_layout = drawn.menu;
         if let Some(b) = &drawn.bank {
             self.bank.scroll = self.bank.scroll.min(b.max_scroll);
         }
@@ -1264,6 +1278,12 @@ impl App {
             return;
         }
         let Some(sl) = self.shell else { return };
+        if self.menu.take().is_some() {
+            if let Some((slot, ty)) = self.menu_layout.take().and_then(|m| m.hit(pt).map(|t| (m.slot, t))) {
+                self.show_editor(slot, ty);
+            }
+            return;
+        }
         if let Some(h) = sl.handle_at(pt) {
             if double {
                 match h {
@@ -1276,23 +1296,35 @@ impl App {
             }
             return;
         }
-        self.panel_focus = sl.panel.contains(pt);
-        self.bank_focus = sl.left.is_some_and(|r| r.contains(pt));
-        if let Some(r) = sl.left
-            && r.contains(pt)
-        {
-            if sat_ui::dock::close_button(r).contains(pt) {
-                return self.dock.set_side(Side::Left, false);
-            }
-            return self.press_bank(pt, double);
+        let slot = sl.slot_at(pt);
+        if let Some(s) = slot {
+            self.focus = s;
         }
-        if let Some(r) = sl.right
-            && r.contains(pt)
+        self.panel_focus = slot == Some(Slot::Panel);
+        let side = match slot {
+            Some(Slot::Left) => Some(Side::Left),
+            Some(Slot::Right) => Some(Side::Right),
+            _ => None,
+        };
+        self.bank_focus = side.is_some_and(|s| self.dock.side_shows(s) == EditorType::Bank);
+        // every area's editor-type button opens its menu
+        if let Some(s) = slot
+            && let Some(r) = sl.slot_rect(s)
         {
-            if sat_ui::dock::close_button(r).contains(pt) {
-                return self.dock.set_side(Side::Right, false);
+            let ty = shell::editor_in(self.history.doc(), self.view, self.panel, &self.dock, s);
+            if sat_ui::area::pill_rect(r, ty).contains(pt) {
+                self.menu = Some(s);
+                return;
             }
-            return self.press_macros(pt, double);
+        }
+        if let (Some(side), Some(r)) = (side, slot.and_then(|s| sl.slot_rect(s))) {
+            if sat_ui::dock::close_button(r).contains(pt) {
+                return self.dock.set_side(side, false);
+            }
+            return match self.dock.side_shows(side) {
+                EditorType::Inspector => self.press_macros(pt, double),
+                _ => self.press_bank(pt, double),
+            };
         }
         if sl.panel.contains(pt) {
             return self.press_panel(sl, pt, double);
@@ -1769,19 +1801,8 @@ impl App {
             Some(PanelButton::Collapse) => return self.dock.toggle_panel(),
             None => {}
         }
-        let tab = panel::hit_tab(sl.panel, pt);
-        if let Some(t) = tab {
-            self.panel = match t {
-                Tab::Clip => PanelView::Clip,
-                Tab::Mixer => PanelView::Mixer,
-            };
-            if !sl.panel_open() {
-                self.dock.open_panel();
-            }
-            return;
-        }
         if pt.y < sl.panel.y0 + panel::TABS_H {
-            // double-click on the tab bar maximizes, like a title bar
+            // double-click on the header maximizes, like a title bar
             if double {
                 self.dock.toggle_zoom(Zoom::Panel);
             } else if !sl.panel_open() {
@@ -2350,6 +2371,29 @@ impl App {
         self.update_title();
     }
 
+    /// Shows `ty` in the area `slot` (from its editor-type menu).
+    fn show_editor(&mut self, slot: Slot, ty: EditorType) {
+        let track = self.arrange.selected_track;
+        match (slot, ty) {
+            (Slot::Main, EditorType::Arrange) => self.view = MainView::Arrange,
+            (Slot::Main, EditorType::Session) => self.view = MainView::Session,
+            (Slot::Main, EditorType::SourceGrid) => self.open_grid(track, GridKind::Source),
+            (Slot::Main, EditorType::InstrumentGrid) => self.open_grid(track, GridKind::Instrument),
+            (Slot::Main, EditorType::FxGrid) => self.open_grid(track, GridKind::Fx),
+            (Slot::Panel, EditorType::Mixer) => {
+                self.panel = PanelView::Mixer;
+                self.dock.open_panel();
+            }
+            (Slot::Panel, _) => {
+                self.panel = PanelView::Clip;
+                self.dock.open_panel();
+            }
+            (Slot::Left, t) => self.dock.set_side_shows(Side::Left, t),
+            (Slot::Right, t) => self.dock.set_side_shows(Side::Right, t),
+            _ => {}
+        }
+    }
+
     /// Shows or hides a docked area.
     fn toggle_dock(&mut self, b: DockButton) {
         match b {
@@ -2371,6 +2415,10 @@ impl App {
         let Some(h) = self.dock_drag else { return };
         let (w, hh) = self.window_size();
         self.dock.drag(h, self.cursor, w, hh);
+        if h == Handle::Panel {
+            // the editor shown keeps the height it was dragged to
+            self.dock.remember(shell::panel_kind(self.history.doc(), self.panel, self.arrange.selected_clip));
+        }
     }
 
     fn toggle_loop(&mut self) {
@@ -2419,8 +2467,11 @@ impl App {
             }
             _ => {}
         }
+        if self.menu.take().is_some() && matches!(key, Key::Named(NamedKey::Escape)) {
+            return;
+        }
         if self.bank_focus
-            && self.dock.side_open(Side::Left)
+            && self.dock.side_of(EditorType::Bank).is_some()
             && matches!(key, Key::Named(NamedKey::Delete | NamedKey::Backspace))
             && let Some(c) = self.bank.selected.take()
         {
@@ -2490,18 +2541,19 @@ impl App {
             self.grid.scroll = Vec2::new((self.grid.scroll.x - dx).max(0.0), (self.grid.scroll.y - dy).max(0.0));
             return;
         }
-        if let Some(sl) = self.shell
-            && sl.left.is_some_and(|r| r.contains(self.cursor))
-        {
-            let max = self.bank_layout.as_ref().map_or(0.0, |b| b.max_scroll);
-            self.bank.scroll = (self.bank.scroll - dy).clamp(0.0, max);
-            return;
-        }
-        if let Some(sl) = self.shell
-            && sl.right.is_some_and(|r| r.contains(self.cursor))
-        {
-            let max = self.macro_layout.as_ref().map_or(0.0, |m| m.max_scroll);
-            self.macro_scroll = (self.macro_scroll - dy).clamp(0.0, max);
+        let side = match self.shell.and_then(|sl| sl.slot_at(self.cursor)) {
+            Some(Slot::Left) => Some(Side::Left),
+            Some(Slot::Right) => Some(Side::Right),
+            _ => None,
+        };
+        if let Some(side) = side {
+            if self.dock.side_shows(side) == EditorType::Inspector {
+                let max = self.macro_layout.as_ref().map_or(0.0, |m| m.max_scroll);
+                self.macro_scroll = (self.macro_scroll - dy).clamp(0.0, max);
+            } else {
+                let max = self.bank_layout.as_ref().map_or(0.0, |b| b.max_scroll);
+                self.bank.scroll = (self.bank.scroll - dy).clamp(0.0, max);
+            }
             return;
         }
         if let Some(sl) = self.shell
@@ -2656,7 +2708,7 @@ impl ApplicationHandler for App {
         }
         // while playing or meters are falling, redraw at display rate; otherwise
         // sleep until input or the next autosave
-        if self.playback.playing || self.metering() {
+        if self.playback.playing || self.metering() || self.animating {
             if let Some(g) = &self.gfx {
                 g.window.request_redraw();
             }
@@ -2767,6 +2819,10 @@ fn main() {
         dock: Dock::default(),
         dock_drag: None,
         macro_scroll: 0.0,
+        focus: Slot::Main,
+        menu: None,
+        menu_layout: None,
+        animating: false,
         mixer_scroll: 0.0,
         levels: HashMap::new(),
         playback,

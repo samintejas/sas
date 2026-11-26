@@ -15,8 +15,9 @@
 use sat_theme::{Rgba, Theme};
 use vello::kurbo::{Point, Rect};
 
+use crate::area::EditorType;
 use crate::icons::{self, Icon};
-use crate::paint::{Align, Painter, TextStyle};
+use crate::paint::{Painter, TextStyle};
 use crate::panel::TABS_H;
 
 /// Gap between docked areas; the resize handles sit in it.
@@ -41,6 +42,22 @@ pub const PANEL_H: f64 = 306.0;
 pub const LEFT_W: f64 = 264.0;
 /// Default right sidebar width.
 pub const RIGHT_W: f64 = 316.0;
+/// Default height of the audio clip editor.
+pub const AUDIO_H: f64 = 250.0;
+
+/// Which editor the bottom panel shows, for its height: editors that gain
+/// from room keep a height of their own; the rest fit their content.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PanelKind {
+    /// The piano roll.
+    Roll,
+    /// A step editor, `f64` px tall when it shows everything.
+    Fit(f64),
+    /// The audio clip editor.
+    Audio,
+    /// The mixer.
+    Mixer,
+}
 
 /// A sidebar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,10 +100,20 @@ pub struct Dock {
     pub right_open: bool,
     /// Its width.
     pub right_w: f64,
-    /// The bottom panel is open; collapsed, only its tab bar shows.
+    /// The bottom panel is open; collapsed, only its header shows.
     pub panel_open: bool,
-    /// Its height when open.
+    /// Its height as drawn: eases towards the height of the editor shown.
     pub panel_h: f64,
+    /// The piano roll's own height.
+    pub roll_h: f64,
+    /// The audio clip editor's own height.
+    pub audio_h: f64,
+    /// The mixer's own height.
+    pub mixer_h: f64,
+    /// What the left sidebar shows.
+    pub left_shows: EditorType,
+    /// What the right sidebar shows.
+    pub right_shows: EditorType,
     /// An area zoomed to fill the window.
     pub zoom: Option<Zoom>,
 }
@@ -100,12 +127,77 @@ impl Default for Dock {
             right_w: RIGHT_W,
             panel_open: true,
             panel_h: PANEL_H,
+            roll_h: PANEL_H,
+            audio_h: AUDIO_H,
+            mixer_h: PANEL_H,
+            left_shows: EditorType::Bank,
+            right_shows: EditorType::Inspector,
             zoom: None,
         }
     }
 }
 
 impl Dock {
+    /// The height the bottom panel heads for with `kind` showing.
+    pub fn target(&self, kind: PanelKind) -> f64 {
+        match kind {
+            PanelKind::Roll => self.roll_h,
+            PanelKind::Fit(h) => h,
+            PanelKind::Audio => self.audio_h,
+            PanelKind::Mixer => self.mixer_h,
+        }
+    }
+
+    /// Keeps the drawn height as `kind`'s own (after a drag); a fitted
+    /// editor is never taller than its content.
+    pub fn remember(&mut self, kind: PanelKind) {
+        match kind {
+            PanelKind::Roll => self.roll_h = self.panel_h,
+            PanelKind::Fit(h) => self.panel_h = self.panel_h.min(h),
+            PanelKind::Audio => self.audio_h = self.panel_h,
+            PanelKind::Mixer => self.mixer_h = self.panel_h,
+        }
+    }
+
+    /// Eases the drawn height towards `kind`'s over `dt` seconds; true while
+    /// it is still moving.
+    pub fn ease(&mut self, kind: PanelKind, dt: f64) -> bool {
+        let t = self.target(kind);
+        let d = t - self.panel_h;
+        if d.abs() < 0.5 {
+            self.panel_h = t;
+            return false;
+        }
+        self.panel_h += d * (dt * 16.0).min(1.0);
+        true
+    }
+
+    /// What a sidebar shows.
+    pub fn side_shows(&self, s: Side) -> EditorType {
+        match s {
+            Side::Left => self.left_shows,
+            Side::Right => self.right_shows,
+        }
+    }
+
+    /// Shows `ty` in sidebar `s`; the other sidebar takes what `s` showed if
+    /// it showed `ty`, so neither shows the same editor twice.
+    pub fn set_side_shows(&mut self, s: Side, ty: EditorType) {
+        let (mine, other) = match s {
+            Side::Left => (&mut self.left_shows, &mut self.right_shows),
+            Side::Right => (&mut self.right_shows, &mut self.left_shows),
+        };
+        if *other == ty {
+            *other = *mine;
+        }
+        *mine = ty;
+    }
+
+    /// Whether the editor shows in an open sidebar, and which.
+    pub fn side_of(&self, ty: EditorType) -> Option<Side> {
+        [Side::Left, Side::Right].into_iter().find(|s| self.side_open(*s) && self.side_shows(*s) == ty)
+    }
+
     /// Shows or hides a sidebar. Leaves a zoom of the main view, so the
     /// sidebar asked for appears.
     pub fn toggle_side(&mut self, s: Side) {
@@ -302,34 +394,38 @@ pub fn draw_panel_buttons(p: &mut Painter<'_>, th: &Theme, r: Rect, dock: &Dock)
     }
 }
 
-/// Draws a sidebar's background and header (title, a dimmer note, close
-/// button); the note is clipped at `note_x1`. Returns the header bar.
+/// Draws a sidebar's background and area header: its editor-type button,
+/// an optional swatch and title, a dimmer note clipped at `note_x1`, and the
+/// close button. Returns the header bar.
+#[allow(clippy::too_many_arguments)]
 pub fn side_header(
     p: &mut Painter<'_>,
     th: &Theme,
     r: Rect,
+    ty: crate::area::EditorType,
     swatch: Option<Rgba>,
     title: &str,
     note: &str,
     note_x1: f64,
 ) -> Rect {
     let c = &th.c;
-    p.rect(r, c.bg_surface);
-    let bar = Rect::new(r.x0, r.y0, r.x1, r.y0 + TABS_H);
-    p.hline(r.x0, r.x1, bar.y1 - 1.0, c.border_subtle);
+    crate::area::region(p, th, r);
+    let (bar, mut x) = crate::area::header(p, th, r, ty);
     let cy = bar.center().y;
-    let mut x = r.x0 + 12.0;
     if let Some(col) = swatch {
         p.rrect(Rect::new(x, cy - 5.0, x + 10.0, cy + 5.0), 2.0, col);
-        x += 18.0;
+        x += 16.0;
     }
-    x += p.text(x, cy, title, &TextStyle::mono(12.0, c.text_max).medium(), Align::Left) + 10.0;
-    let close = close_button(r);
+    if !title.is_empty() && note_x1 > x {
+        let st = TextStyle::mono(12.0, c.text_strong);
+        let w = (p.fonts.measure(title, &st) as f64).min(note_x1 - x);
+        p.text_fit(x, cy, title, &st, note_x1 - x);
+        x += w + 8.0;
+    }
     if note_x1 > x {
-        p.clip(Rect::new(x, bar.y0, note_x1, bar.y1), |p| {
-            p.text(x, cy, note, &TextStyle::mono(11.0, c.text_secondary), Align::Left);
-        });
+        crate::area::note(p, th, x, cy, note, note_x1 - x);
     }
+    let close = close_button(r);
     icons::draw(p, Icon::Close, close.inset(-8.0), c.text_secondary);
     bar
 }
@@ -369,5 +465,29 @@ mod tests {
         d.toggle_panel();
         assert_eq!(d.zoom, None);
         assert!(d.panel_open);
+    }
+
+    #[test]
+    fn editors_keep_their_own_heights() {
+        let mut d = Dock { panel_h: 480.0, ..Dock::default() };
+        d.remember(PanelKind::Roll);
+        // a step editor fits its content, then the roll comes back at its height
+        while d.ease(PanelKind::Fit(250.0), 0.016) {}
+        assert_eq!(d.panel_h, 250.0);
+        while d.ease(PanelKind::Roll, 0.016) {}
+        assert_eq!(d.panel_h, 480.0);
+        // dragged taller than its content, a fitted editor stays at its content
+        d.panel_h = 600.0;
+        d.remember(PanelKind::Fit(250.0));
+        assert_eq!(d.panel_h, 250.0);
+        assert_eq!(d.roll_h, 480.0, "the roll's height is untouched");
+    }
+
+    #[test]
+    fn sidebars_swap_rather_than_show_an_editor_twice() {
+        let mut d = Dock { right_open: true, ..Dock::default() };
+        d.set_side_shows(Side::Left, EditorType::Inspector);
+        assert_eq!((d.left_shows, d.right_shows), (EditorType::Inspector, EditorType::Bank));
+        assert_eq!(d.side_of(EditorType::Bank), Some(Side::Right));
     }
 }

@@ -183,7 +183,9 @@ the app: the device's rate).
 | a mixer strip's src / ins / fx buttons, double-click a strip, a track header or a session column header | open that track's grid (double-click opens a track's instrument, a bus's fx) |
 | click a mixer strip, or a track in the list beside a grid, while a grid is shown | the grid follows to that track (its fx grid if it has none of that kind); the list's m / s buttons mute and solo |
 | Esc in a grid with nothing selected, or its back button | back to the arrangement or session it was opened from |
-| Tab, or the panel tabs | switch the bottom panel between the clip editor and the mixer (a collapsed panel opens) |
+| an area's editor-type button (left of its header) | swap what the area shows: arrange, session or a grid in the main view; clip editor or mixer in the bottom panel; clip bank or inspector in either sidebar |
+| Tab | switch the bottom panel between the clip editor and the mixer (a collapsed panel opens) |
+| the bottom panel's height | each editor keeps its own: the piano roll, audio editor and mixer remember the height you drag them to, step editors fit their content; the panel eases between them |
 | drag the bottom panel's top edge or a sidebar's inner edge | resize it; dragged far enough it collapses or closes; double-click the edge to collapse or close |
 | Ctrl+J, or the panel's chevron | collapse the bottom panel to its tab bar, or open it |
 | Ctrl+B / Ctrl+Alt+B, or the top bar's layout buttons | show or hide the clip bank (left sidebar) / the inspector with the selected track's macros (right sidebar) |

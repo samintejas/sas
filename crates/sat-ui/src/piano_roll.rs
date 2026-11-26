@@ -303,9 +303,7 @@ impl RollGeom {
 }
 
 fn button(p: &mut Painter<'_>, th: &Theme, r: Rect, label: &str) {
-    p.rrect(r, 5.0, th.c.bg_control);
-    p.rrect_stroke(r.inset(-0.5), 5.0, 1.0, th.c.border_strong.alpha(0.6));
-    p.text(r.center().x, r.center().y, label, &TextStyle::mono(12.0, th.c.text_strong), Align::Center);
+    crate::area::button(p, th, r, label, false);
 }
 
 /// Draws the clip panel's tab bar with the clip's name, track, bars and

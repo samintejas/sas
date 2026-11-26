@@ -198,7 +198,9 @@ pub fn draw(
     let l = layout(doc, track, on_screen, r, scroll);
     let tr = l.track.and_then(|t| doc.tracks.get(&t));
     let name = tr.map(|t| t.name.as_str()).unwrap_or("no track");
-    crate::dock::side_header(p, th, r, tr.map(|t| th.track(t.color.0)), name, "macros", l.learn.x0 - 6.0);
+    let swatch = tr.map(|t| th.track(t.color.0));
+    let end = l.learn.x0 - 6.0;
+    crate::dock::side_header(p, th, r, crate::area::EditorType::Inspector, swatch, name, "", end);
     // learn button
     let lb = l.learn;
     if learn {

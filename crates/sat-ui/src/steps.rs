@@ -150,6 +150,26 @@ fn cell_xs(x0: f64, x1: f64, n: usize) -> Vec<(f64, f64)> {
         .collect()
 }
 
+/// Height of a drum row when the editor fits its content.
+pub const FIT_ROW_H: f64 = 26.0;
+/// Height of a generator's card when the editor fits its content.
+pub const FIT_CARD_H: f64 = 190.0;
+
+/// How tall the step editor for `clip` is when it shows everything and no
+/// more (the bottom panel fits it), or `None` when the clip has none.
+pub fn fit_height(doc: &Document, clip: ClipId) -> Option<f64> {
+    let (m, editor) = source(doc, clip)?;
+    let body = match editor {
+        Editor::Drums => {
+            let notes = sat_modules::effective_notes(doc, m.id, clip);
+            12.0 + drum::rows(&notes).len().max(1) as f64 * FIT_ROW_H + 6.0
+        }
+        Editor::Euclid | Editor::Turing => FIT_CARD_H + 16.0,
+        Editor::PianoRoll => return None,
+    };
+    Some(TABS_H + TOOLS_H + body)
+}
+
 /// Lays out the step editor at `r` (the whole bottom panel) for `clip`.
 pub fn geometry(doc: &Document, clip: Option<ClipId>, r: Rect, view: &StepView) -> Option<StepGeom> {
     let clip = doc.clips.get(&clip?)?;
@@ -236,11 +256,7 @@ pub fn geometry(doc: &Document, clip: Option<ClipId>, r: Rect, view: &StepView) 
 }
 
 fn button(p: &mut Painter<'_>, th: &Theme, r: Rect, label: &str, on: bool) {
-    let c = &th.c;
-    p.rrect(r, 5.0, if on { c.accent_primary_subtle } else { c.bg_control });
-    p.rrect_stroke(r.inset(-0.5), 5.0, 1.0, if on { c.accent_primary.alpha(0.6) } else { c.border_strong.alpha(0.6) });
-    let col = if on { c.accent_primary } else { c.text_strong };
-    p.text(r.center().x, r.center().y, label, &TextStyle::mono(11.5, col), Align::Center);
+    crate::area::button(p, th, r, label, on);
 }
 
 fn label(p: &mut Painter<'_>, th: &Theme, x: f64, y: f64, k: &str, v: &str) -> f64 {
