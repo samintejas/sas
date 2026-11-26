@@ -386,9 +386,9 @@ pub fn layout(doc: &Document, grid: GridId, r: Rect, view: &GridView) -> Option<
     let bar = Rect::new(r.x0, r.y0, r.x1, r.y0 + BAR_H);
     let cy = bar.center().y;
     let pill = crate::area::pill_rect(r, editor_type(kind));
-    let back = Rect::new(pill.x1 + 10.0, cy - 13.0, pill.x1 + 102.0, cy + 13.0);
-    let prev = Rect::new(back.x1 + 10.0, cy - 13.0, back.x1 + 34.0, cy + 13.0);
-    let next = Rect::new(prev.x1 + 138.0, cy - 13.0, prev.x1 + 162.0, cy + 13.0);
+    let back = Rect::new(pill.x1 + 10.0, cy - 11.0, pill.x1 + 102.0, cy + 11.0);
+    let prev = Rect::new(back.x1 + 10.0, cy - 11.0, back.x1 + 34.0, cy + 11.0);
+    let next = Rect::new(prev.x1 + 138.0, cy - 11.0, prev.x1 + 162.0, cy + 11.0);
     let mut kx = next.x1 + 14.0;
     let kinds = grid_kinds(doc, track)
         .into_iter()
@@ -398,12 +398,12 @@ pub fn layout(doc: &Document, grid: GridId, r: Rect, view: &GridView) -> Option<
                 GridKind::Instrument => 100.0,
                 GridKind::Fx => 44.0,
             };
-            let r = Rect::new(kx, cy - 13.0, kx + w, cy + 13.0);
+            let r = Rect::new(kx, cy - 11.0, kx + w, cy + 11.0);
             kx += w;
             (k, r)
         })
         .collect();
-    let add_module = Rect::new(r.x1 - 96.0, cy - 13.0, r.x1 - 12.0, cy + 13.0);
+    let add_module = Rect::new(r.x1 - 96.0, cy - 11.0, r.x1 - 12.0, cy + 11.0);
     let menu = if view.menu {
         // one column, or as many as it takes to fit above the bottom edge,
         // filled top to bottom, left to right, ending under the button
@@ -1034,7 +1034,7 @@ pub fn draw(
     if let Some(clip) = selected_clip.and_then(|id| doc.clips.get(&id)).filter(|cl| cl.track == l.track && source) {
         let label = format!("clip · {}", clip.name);
         let w = p.fonts.measure(&label, &TextStyle::mono(12.0, c.text_strong)) as f64;
-        chip(p, th, Rect::new(x, cy - 13.0, x + w + 20.0, cy + 13.0), &label, None);
+        chip(p, th, Rect::new(x, cy - 11.0, x + w + 20.0, cy + 11.0), &label, None);
     }
     let mut lx = l.add_module.x0 - 16.0;
     // the cable legend, when the header has room for it

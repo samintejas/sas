@@ -19,11 +19,11 @@ use crate::piano_roll::{self, RollGeom, RollView};
 use crate::steps::{self, StepGeom, StepView};
 
 /// Height of the top bar.
-pub const TOPBAR_H: f64 = 40.0;
+pub const TOPBAR_H: f64 = 34.0;
 /// Width of the icon strips at the window's left and right edges.
-pub const STRIP_W: f64 = 36.0;
+pub const STRIP_W: f64 = 32.0;
 /// Height of the status bar along the bottom.
-pub const STATUS_H: f64 = 24.0;
+pub const STATUS_H: f64 = 22.0;
 
 /// What an icon in an edge strip opens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,8 +40,8 @@ pub enum StripTarget {
 /// bottom panel; the right strip opens editors in the right sidebar.
 pub fn strip_buttons(sl: &ShellLayout) -> Vec<(StripTarget, EditorType, Rect)> {
     let b = |r: Rect, k: f64, from_bottom: bool| {
-        let y = if from_bottom { r.y1 - 6.0 - (k + 1.0) * 34.0 } else { r.y0 + 6.0 + k * 34.0 };
-        Rect::new(r.x0 + 4.0, y, r.x1 - 4.0, y + 30.0)
+        let y = if from_bottom { r.y1 - 6.0 - (k + 1.0) * 30.0 } else { r.y0 + 6.0 + k * 30.0 };
+        Rect::new(r.x0 + 4.0, y, r.x1 - 4.0, y + 26.0)
     };
     let sides = [EditorType::Bank, EditorType::Outliner, EditorType::Inspector];
     let mut out = Vec::new();
@@ -104,7 +104,7 @@ pub fn transport_buttons(topbar: Rect) -> [(TransportButton, Rect); 4] {
     [Stop, Play, Record, Loop].map(|b| {
         let x = x0 + 33.0 * k;
         k += 1.0;
-        (b, Rect::new(x + 4.0, cy - 12.0, x + 30.0, cy + 12.0))
+        (b, Rect::new(x + 5.0, cy - 10.0, x + 29.0, cy + 10.0))
     })
 }
 
@@ -131,7 +131,7 @@ pub fn dock_buttons(topbar: Rect) -> [(DockButton, Rect); 3] {
     [DockButton::Left, DockButton::Panel, DockButton::Right].map(|b| {
         let x1 = rx - (k - 1.0) * 28.0;
         k -= 1.0;
-        (b, Rect::new(x1 - 26.0, cy - 13.0, x1, cy + 13.0))
+        (b, Rect::new(x1 - 24.0, cy - 11.0, x1, cy + 11.0))
     })
 }
 
@@ -139,7 +139,7 @@ pub fn dock_buttons(topbar: Rect) -> [(DockButton, Rect); 3] {
 pub fn search_box(topbar: Rect) -> Rect {
     let rx = dock_buttons(topbar)[0].1.x0 - 10.0;
     let cy = topbar.center().y;
-    Rect::new(rx - 72.0, cy - 13.0, rx, cy + 13.0)
+    Rect::new(rx - 72.0, cy - 11.0, rx, cy + 11.0)
 }
 
 /// Everything the shell needs to draw a frame.
@@ -362,8 +362,8 @@ pub fn format_pos(doc: &Document, t: Ticks) -> String {
 
 fn display(p: &mut Painter<'_>, th: &Theme, x: f64, cy: f64, label: &str, value: &str, w: f64) -> f64 {
     let c = &th.c;
-    p.text(x, cy - 8.0, label, &TextStyle::mono(10.5, c.text_secondary), Align::Left);
-    p.text(x, cy + 7.0, value, &TextStyle::mono(13.0, c.accent_primary).medium(), Align::Left);
+    p.text(x, cy - 6.5, label, &TextStyle::mono(9.5, c.text_secondary), Align::Left);
+    p.text(x, cy + 6.0, value, &TextStyle::mono(12.5, c.accent_primary).medium(), Align::Left);
     w
 }
 
@@ -420,7 +420,7 @@ fn topbar(p: &mut Painter<'_>, th: &Theme, f: &Frame<'_>, r: Rect) {
     // transport
     let w = r.width();
     let mut x = w / 2.0 - 260.0;
-    let group = Rect::new(x, cy - 15.0, x + 136.0, cy + 15.0);
+    let group = Rect::new(x, cy - 13.0, x + 136.0, cy + 13.0);
     p.rrect(group, 6.0, c.bg_surface);
     p.rrect_stroke(group.inset(-0.5), 6.0, 1.0, c.border_default);
     let t = &f.transport;
@@ -447,18 +447,18 @@ fn topbar(p: &mut Painter<'_>, th: &Theme, f: &Frame<'_>, r: Rect) {
     x += 14.0;
     let bpm = f.doc.tempo_map().map(|m| m.bpm_at(t.playhead)).unwrap_or(120.0);
     let sig = f.doc.meter_map().map(|m| m.sig_at(t.playhead)).unwrap_or(sat_doc::sat_time::TimeSig::FOUR_FOUR);
-    let panel = Rect::new(x, cy - 16.0, x + 344.0, cy + 16.0);
+    let panel = Rect::new(x, cy - 14.0, x + 344.0, cy + 14.0);
     p.rrect(panel, 6.0, c.bg_surface);
     p.rrect_stroke(panel.inset(-0.5), 6.0, 1.0, c.border_default);
     let mut dx = x + 10.0;
     dx += display(p, th, dx, cy, "pos", &format_pos(f.doc, t.playhead), 96.0);
-    p.vline(dx - 6.0, cy - 12.0, cy + 12.0, c.border_default);
+    p.vline(dx - 6.0, cy - 10.0, cy + 10.0, c.border_default);
     dx += display(p, th, dx, cy, "bpm", &format!("{bpm:.2}"), 90.0);
-    p.vline(dx - 6.0, cy - 12.0, cy + 12.0, c.border_default);
+    p.vline(dx - 6.0, cy - 10.0, cy + 10.0, c.border_default);
     dx += display(p, th, dx, cy, "sig", &format!("{}/{}", sig.num, sig.den), 62.0);
-    p.vline(dx - 6.0, cy - 12.0, cy + 12.0, c.border_default);
+    p.vline(dx - 6.0, cy - 10.0, cy + 10.0, c.border_default);
     display(p, th, dx, cy, "loop", if f.doc.loop_range.enabled { "on" } else { "off" }, 60.0);
-    icon_button(p, th, Rect::new(panel.x1 + 12.0, cy - 14.0, panel.x1 + 40.0, cy + 14.0), Icon::Pulse, None);
+    icon_button(p, th, Rect::new(panel.x1 + 12.0, cy - 12.0, panel.x1 + 36.0, cy + 12.0), Icon::Pulse, None);
     // right side
     let mut rx = w - 12.0;
     for ic in [Icon::Gear, Icon::Redo, Icon::Undo] {

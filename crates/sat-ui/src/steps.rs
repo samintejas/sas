@@ -188,7 +188,7 @@ pub fn geometry(doc: &Document, clip: Option<ClipId>, r: Rect, view: &StepView) 
         (0..npages)
             .map(|i| {
                 let x1 = r.x1 - 12.0 - (npages - 1 - i) as f64 * 30.0;
-                Rect::new(x1 - 28.0, ty - 12.0, x1, ty + 12.0)
+                Rect::new(x1 - 28.0, ty - 10.0, x1, ty + 10.0)
             })
             .collect()
     } else {
@@ -240,7 +240,7 @@ pub fn geometry(doc: &Document, clip: Option<ClipId>, r: Rect, view: &StepView) 
             let ey = card.y1 - 16.0;
             g.clear = Some(Rect::new(card.x1 - 104.0, ey - 11.0, card.x1 - 60.0, ey + 11.0));
             g.bake = Some(Rect::new(card.x1 - 54.0, ey - 11.0, card.x1 - 8.0, ey + 11.0));
-            g.mode = Some(Rect::new(r.x0 + 12.0, ty - 12.0, r.x0 + 180.0, ty + 12.0));
+            g.mode = Some(Rect::new(r.x0 + 12.0, ty - 10.0, r.x0 + 180.0, ty + 10.0));
             let pitches = sat_modules::gen_steps(doc, m.id, clip.id).map(|s| s.pitches).unwrap_or_default();
             let xs = cell_xs(card.x1 + 64.0, body.x1 - 16.0, PAGE);
             let y0 = body.y0 + 12.0;

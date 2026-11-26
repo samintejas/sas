@@ -14,11 +14,11 @@ use crate::icons::{self, Icon};
 use crate::paint::{Align, Painter, TextStyle};
 
 /// Height of every area's header.
-pub const HEADER_H: f64 = 36.0;
+pub const HEADER_H: f64 = 30.0;
 /// Corner radius of an area.
-pub const RADIUS: f64 = 7.0;
+pub const RADIUS: f64 = 6.0;
 /// Height of a row in the editor-type menu.
-pub const MENU_ROW: f64 = 28.0;
+pub const MENU_ROW: f64 = 24.0;
 
 /// The areas of the window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -116,13 +116,17 @@ impl EditorType {
     }
 }
 
-/// The editor-type button in the header of an area at `r`. Its width comes
-/// from the label (Geist Mono advances are 0.6 em), so hit testing needs no
-/// fonts.
+/// Corner radius of buttons.
+pub const WIDGET_R: f64 = 4.0;
+
+/// The editor-type button in the header of an area at `r`: the editor's
+/// icon in a small box with a drop arrow, then its name. Its width comes
+/// from the name (Geist advances are about 0.56 em at 12 px), so hit testing
+/// needs no fonts.
 pub fn pill_rect(r: Rect, ty: EditorType) -> Rect {
-    let w = ty.label().chars().count() as f64 * 7.2 + 50.0;
+    let w = 36.0 + 8.0 + ty.label().chars().count() as f64 * 6.9;
     let cy = r.y0 + HEADER_H / 2.0;
-    Rect::new(r.x0 + 6.0, cy - 13.0, r.x0 + 6.0 + w, cy + 13.0)
+    Rect::new(r.x0 + 5.0, cy - 10.0, r.x0 + 5.0 + w, cy + 10.0)
 }
 
 /// Draws an area's region background.
@@ -132,7 +136,36 @@ pub fn region(p: &mut Painter<'_>, th: &Theme, r: Rect) {
 
 /// The header's colour: a step above the region.
 pub fn header_color(th: &Theme) -> Rgba {
-    th.c.bg_raised
+    th.c.text_max.mix(th.c.bg_surface, 0.045)
+}
+
+/// A button's fill.
+pub fn widget_bg(th: &Theme) -> Rgba {
+    th.c.text_max.mix(th.c.bg_surface, 0.095)
+}
+
+/// A button's outline.
+pub fn widget_line(th: &Theme) -> Rgba {
+    th.c.text_max.mix(th.c.bg_surface, 0.15)
+}
+
+/// Fills and outlines a button's box, lit when on.
+pub fn widget(p: &mut Painter<'_>, th: &Theme, r: Rect, on: bool) {
+    let c = &th.c;
+    if on {
+        p.rrect(r, WIDGET_R, c.accent_primary.mix(widget_bg(th), 0.22));
+        p.rrect_stroke(r.inset(-0.5), WIDGET_R, 1.0, c.accent_primary.alpha(0.55));
+    } else {
+        p.rrect(r, WIDGET_R, widget_bg(th));
+        p.rrect_stroke(r.inset(-0.5), WIDGET_R, 1.0, widget_line(th));
+        // a faint top light, as on a raised key
+        p.hline(r.x0 + WIDGET_R, r.x1 - WIDGET_R, r.y0 + 1.0, Rgba::new(255, 255, 255, 10));
+    }
+}
+
+/// The label style of buttons and headers.
+pub fn label_style(th: &Theme, on: bool) -> TextStyle {
+    TextStyle::sans(11.5, if on { th.c.accent_primary } else { th.c.text_strong })
 }
 
 /// Draws the header of an area at `r` with its editor-type button; returns
@@ -143,21 +176,21 @@ pub fn header(p: &mut Painter<'_>, th: &Theme, r: Rect, ty: EditorType) -> (Rect
     p.rect(bar, header_color(th));
     p.hline(bar.x0, bar.x1, bar.y1 - 1.0, c.bg_base);
     let pill = pill_rect(r, ty);
-    p.rrect(pill, 5.0, c.bg_control);
-    p.rrect_stroke(pill.inset(-0.5), 5.0, 1.0, c.border_default);
+    let boxed = Rect::new(pill.x0, pill.y0, pill.x0 + 36.0, pill.y1);
+    widget(p, th, boxed, false);
     let cy = pill.center().y;
-    icons::draw(p, ty.icon(), Rect::new(pill.x0 + 8.0, cy - 6.0, pill.x0 + 20.0, cy + 6.0), c.accent_primary);
-    p.text(pill.x0 + 26.0, cy, ty.label(), &TextStyle::mono(12.0, c.text_max).medium(), Align::Left);
-    icons::draw(p, Icon::ChevronDown, Rect::new(pill.x1 - 17.0, cy - 5.0, pill.x1 - 7.0, cy + 5.0), c.text_secondary);
-    (bar, pill.x1 + 12.0)
+    icons::draw(p, ty.icon(), Rect::new(boxed.x0 + 6.0, cy - 6.0, boxed.x0 + 18.0, cy + 6.0), c.accent_primary);
+    icons::draw(p, Icon::ChevronDown, Rect::new(boxed.x1 - 13.0, cy - 4.0, boxed.x1 - 5.0, cy + 4.0), c.text_secondary);
+    p.text(boxed.x1 + 8.0, cy, ty.label(), &TextStyle::sans(12.0, c.text_max).medium(), Align::Left);
+    (bar, pill.x1 + 14.0)
 }
 
 /// Lightens the header of the area with focus (where the last press was),
 /// so it is clear where keys go.
 pub fn focus(p: &mut Painter<'_>, th: &Theme, r: Rect) {
     let bar = Rect::new(r.x0, r.y0, r.x1, r.y0 + HEADER_H - 1.0);
-    p.rect(bar, Rgba::new(255, 255, 255, 7));
-    p.rect(Rect::new(r.x0 + RADIUS, r.y0, r.x1 - RADIUS, r.y0 + 1.0), th.c.accent_primary.alpha(0.55));
+    p.rect(bar, Rgba::new(255, 255, 255, 6));
+    p.rect(Rect::new(r.x0 + RADIUS, r.y0, r.x1 - RADIUS, r.y0 + 1.0), th.c.accent_primary.alpha(0.5));
 }
 
 /// Rounds an area's corners onto the gutter and outlines it. Drawn after the
@@ -188,37 +221,31 @@ pub fn finish(p: &mut Painter<'_>, th: &Theme, r: Rect) {
 
 /// A text button, lit when on.
 pub fn button(p: &mut Painter<'_>, th: &Theme, r: Rect, label: &str, on: bool) {
-    let c = &th.c;
-    p.rrect(r, 5.0, if on { c.accent_primary_subtle } else { c.bg_control });
-    p.rrect_stroke(r.inset(-0.5), 5.0, 1.0, if on { c.accent_primary.alpha(0.6) } else { c.border_default });
-    let col = if on { c.accent_primary } else { c.text_strong };
-    p.text(r.center().x, r.center().y, label, &TextStyle::mono(12.0, col), Align::Center);
+    widget(p, th, r, on);
+    p.text(r.center().x, r.center().y, label, &label_style(th, on), Align::Center);
 }
 
 /// A button with an optional icon before its label.
 pub fn chip(p: &mut Painter<'_>, th: &Theme, r: Rect, label: &str, icon: Option<Icon>) {
     let c = &th.c;
-    p.rrect(r, 5.0, c.bg_control);
-    p.rrect_stroke(r.inset(-0.5), 5.0, 1.0, c.border_default);
-    let mut x = r.x0 + 10.0;
+    widget(p, th, r, false);
+    let mut x = r.x0 + 9.0;
     if let Some(ic) = icon {
-        icons::draw(p, ic, Rect::new(x, r.center().y - 6.0, x + 12.0, r.center().y + 6.0), c.text_primary);
-        x += 18.0;
+        icons::draw(p, ic, Rect::new(x, r.center().y - 5.5, x + 11.0, r.center().y + 5.5), c.text_primary);
+        x += 17.0;
     }
-    p.text(x, r.center().y, label, &TextStyle::mono(12.0, c.text_strong), Align::Left);
+    p.text(x, r.center().y, label, &label_style(th, false), Align::Left);
 }
 
 /// An icon button.
 pub fn icon_button(p: &mut Painter<'_>, th: &Theme, r: Rect, icon: Icon) {
-    let c = &th.c;
-    p.rrect(r, 5.0, c.bg_control);
-    p.rrect_stroke(r.inset(-0.5), 5.0, 1.0, c.border_default);
-    icons::draw(p, icon, Rect::from_center_size(r.center(), (12.0, 12.0)), c.text_strong);
+    widget(p, th, r, false);
+    icons::draw(p, icon, Rect::from_center_size(r.center(), (11.0, 11.0)), th.c.text_strong);
 }
 
 /// A dimmer note in a header.
 pub fn note(p: &mut Painter<'_>, th: &Theme, x: f64, cy: f64, text: &str, max_w: f64) {
-    p.text_fit(x, cy, text, &TextStyle::mono(11.0, th.c.text_secondary), max_w);
+    p.text_fit(x, cy, text, &TextStyle::sans(11.5, th.c.text_secondary), max_w);
 }
 
 /// The editor-type menu, open under an area's button.
@@ -267,13 +294,13 @@ pub fn draw_menu(p: &mut Painter<'_>, th: &Theme, m: &MenuLayout, current: Edito
     for (t, r) in &m.items {
         let on = *t == current;
         if on {
-            p.rrect(*r, 5.0, c.accent_primary_subtle);
+            p.rrect(*r, WIDGET_R, c.accent_primary_subtle);
         }
         let cy = r.center().y;
         let col = if on { c.accent_primary } else { c.text_strong };
         icons::draw(p, t.icon(), Rect::new(r.x0 + 8.0, cy - 6.0, r.x0 + 20.0, cy + 6.0), col);
-        p.text(r.x0 + 28.0, cy, t.label(), &TextStyle::mono(12.0, col), Align::Left);
-        p.text(r.x1 - 8.0, cy, t.hint(), &TextStyle::mono(10.5, c.text_secondary), Align::Right);
+        p.text(r.x0 + 28.0, cy, t.label(), &TextStyle::sans(12.0, col), Align::Left);
+        p.text(r.x1 - 8.0, cy, t.hint(), &TextStyle::sans(10.5, c.text_secondary), Align::Right);
     }
 }
 

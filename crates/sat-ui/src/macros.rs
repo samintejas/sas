@@ -171,7 +171,7 @@ pub fn layout(
 ) -> MacroLayout {
     let close = crate::dock::close_button(r);
     let cy = r.y0 + TABS_H / 2.0;
-    let learn = Rect::new(close.x0 - 70.0, cy - 12.0, close.x0 - 6.0, cy + 12.0);
+    let learn = Rect::new(close.x0 - 70.0, cy - 10.0, close.x0 - 6.0, cy + 10.0);
     let body = Rect::new(r.x0, r.y0 + TABS_H, r.x1, r.y1.max(r.y0 + TABS_H));
     let grids = grids_for(doc, track, on_screen);
     let gap = 10.0;

@@ -314,7 +314,7 @@ pub const EDGE_GRAB: f64 = 6.0;
 pub fn snap_button(bounds: Rect) -> Rect {
     let ty = bounds.y0 + TOOLBAR_H / 2.0;
     let x = bounds.x1 - 12.0 - 64.0;
-    Rect::new(x - 74.0, ty - 12.0, x - 8.0, ty + 12.0)
+    Rect::new(x - 74.0, ty - 10.0, x - 8.0, ty + 10.0)
 }
 
 /// Height of the clip part of a track row.
@@ -752,7 +752,7 @@ pub fn draw(
     crate::area::note(p, th, hx, ty, &format!("{tracks} tracks · {bars} bars"), l.snap.x0 - 60.0 - hx);
     let mut x = b.x1 - 12.0;
     for icon in [Icon::Plus, Icon::Search] {
-        let r = Rect::new(x - 26.0, ty - 13.0, x, ty + 13.0);
+        let r = Rect::new(x - 26.0, ty - 11.0, x, ty + 11.0);
         crate::area::icon_button(p, th, r, icon);
         x -= 32.0;
     }

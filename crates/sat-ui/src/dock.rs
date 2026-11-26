@@ -303,14 +303,14 @@ pub enum PanelButton {
 /// Where the bottom panel's buttons are, for a panel at `r`.
 pub fn panel_buttons(r: Rect) -> [(PanelButton, Rect); 2] {
     let cy = r.y0 + TABS_H / 2.0;
-    let b = |x1: f64| Rect::new(x1 - 26.0, cy - 13.0, x1, cy + 13.0);
+    let b = |x1: f64| Rect::new(x1 - 26.0, cy - 11.0, x1, cy + 11.0);
     [(PanelButton::Maximize, b(r.x1 - 38.0)), (PanelButton::Collapse, b(r.x1 - 8.0))]
 }
 
 /// A sidebar's close button, for a sidebar at `r`.
 pub fn close_button(r: Rect) -> Rect {
     let cy = r.y0 + TABS_H / 2.0;
-    Rect::new(r.x1 - 34.0, cy - 13.0, r.x1 - 8.0, cy + 13.0)
+    Rect::new(r.x1 - 34.0, cy - 11.0, r.x1 - 8.0, cy + 11.0)
 }
 
 /// The layout toggles in the top bar, left of the search box.
