@@ -455,6 +455,17 @@ pub fn demo() -> Demo {
     b.ops.push(op);
     let bass_c = vec![n(0, 2, 45, 0.8), n(2, 2, 52, 0.6), n(6, 2, 48, 0.7), n(10, 4, 43, 0.8)];
     let b_c = b.clip(bass, bseq, "bass c", 1, 1, bass_c, 12, 4);
+    // launched, bass c sweeps across the stereo field
+    let pt = |tick: i64, value: f32| Breakpoint { tick: Ticks(tick), value, curve: Curve::Linear };
+    b.ops.push(Op::SetClipEnvelope {
+        clip: b_c,
+        target: ParamTarget::Pan(bass),
+        points: Vector::from(vec![
+            pt(0, -0.6),
+            pt(sat_doc::sat_time::PPQ * 2, 0.6),
+            pt(sat_doc::sat_time::PPQ * 4, -0.6),
+        ]),
+    });
 
     let (perc, eseq) = b.track_with("perc", 2, Some(rhythm), Ins::Patch(BLIP), sat_modules::EUCLID, "euclid 1");
     for (k, v) in [("hits", 7.0), ("rot", 2.0), ("acc", 2.0), ("note", 72.0), ("gate", 0.3), ("vel", 0.55)] {
@@ -478,6 +489,12 @@ pub fn demo() -> Demo {
     };
     let k_a = b.clip(keys, kseq, "pads", 6, 4, pads(57), 0, 8);
     let k_b = b.clip(keys, kseq, "pads 2", 6, 4, pads(60), 8, 8);
+    // launched, pads 2 swells in over its first two bars
+    b.ops.push(Op::SetClipEnvelope {
+        clip: k_b,
+        target: ParamTarget::Gain(keys),
+        points: Vector::from(vec![pt(0, -24.0), pt(sat_doc::sat_time::PPQ * 8, 0.0)]),
+    });
 
     // a seeded turing phrase over the second half, new each time round
     let (arp, tseq) = b.track_with("turing", 5, Some(tops), Ins::Patch(PLUCK), sat_modules::TURING, "turing 1");

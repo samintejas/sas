@@ -212,13 +212,19 @@ pub fn draw_slot(
             };
             icons::draw(p, Icon::Play, tri, tcol);
             let ink = if playing { Rgba::hex(0x0b0b0b) } else { c.text_strong };
+            // a clip carrying automation shows a small envelope at its right
+            let env_w = if clip.envelopes.is_empty() { 0.0 } else { 16.0 };
             p.text_fit(
                 cell.x0 + play_w + 6.0,
                 cell.center().y,
                 &clip.name,
                 &TextStyle::mono(11.0, ink),
-                cell.width() - play_w - 10.0,
+                cell.width() - play_w - 10.0 - env_w,
             );
+            if env_w > 0.0 {
+                let r = Rect::new(cell.x1 - 17.0, cell.center().y - 6.0, cell.x1 - 5.0, cell.center().y + 6.0);
+                icons::draw(p, Icon::Envelope, r, ink.alpha(0.8));
+            }
             if playing && let Some(start) = view.started.get(&track) {
                 // how far through its loop the clip is
                 let len = clip.length.0.max(1) as f64;

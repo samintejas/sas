@@ -248,6 +248,8 @@ enum RollDrag {
     Velocity { notes: Vec<Note>, sel: Vec<usize> },
     /// Box-select from a point; `keep` is the selection to add to.
     Box { from: Point, keep: Vec<usize> },
+    /// Move point `index` of the clip's envelope for `target`.
+    Envelope { target: ParamTarget, index: usize, points: Vec<Breakpoint> },
 }
 
 /// The spec of a module parameter.
@@ -1112,6 +1114,18 @@ impl App {
             if let Some(cmd) = self.playback.compiled.launch(t, clip, sample) {
                 self.playback.send(cmd);
                 self.session.queued.insert(t, (clip, at));
+                // a clip carrying envelopes takes over the track's automation
+                // when it lands; one without hands it back to the arrangement
+                let takeover =
+                    clip.is_some_and(|c| self.history.doc().clips.get(&c).is_some_and(|c| !c.envelopes.is_empty()));
+                if let Some(cmd) = self.playback.compiled.launch_envelopes(t, clip, sample, takeover) {
+                    self.playback.send(cmd);
+                }
+                if takeover {
+                    self.session.auto.insert(t);
+                } else {
+                    self.session.auto.remove(&t);
+                }
                 // the track's arrangement audio goes quiet when the launch lands
                 for cmd in self.playback.compiled.source(t, SourcePart::Clips, true, sample) {
                     if !matches!(cmd, Command::Source { node, .. } if Some(node) == self.playback.compiled.player(t)) {
@@ -1140,12 +1154,17 @@ impl App {
         } else {
             set.remove(&t);
         }
+        let at = self.playback.compiled.sample(self.playback.playhead());
         if part == Part::Clips && !launcher {
             self.session.playing.remove(&t);
             self.session.queued.remove(&t);
             self.session.started.remove(&t);
+            // the launched clip's envelopes stop with it
+            self.session.auto.remove(&t);
+            if let Some(cmd) = self.playback.compiled.launch_envelopes(t, None, at, false) {
+                self.playback.send(cmd);
+            }
         }
-        let at = self.playback.compiled.sample(self.playback.playhead());
         for cmd in self.playback.compiled.source(t, sp, launcher, at) {
             self.playback.send(cmd);
         }
@@ -1218,6 +1237,43 @@ impl App {
                 self.roll.x0 = Ticks::ZERO;
             }
             RollHit::Tool(t) => self.roll.tool = t,
+            RollHit::Lane(k) => self.roll.lane = k,
+            RollHit::Envelope { index, tick, pos } => {
+                let Some((target, _)) = g.envelope.clone() else { return };
+                let doc = self.history.doc();
+                let points: Vec<Breakpoint> =
+                    doc.clips[&g.clip].envelopes.get(&target).map_or_else(Vec::new, |p| p.iter().copied().collect());
+                match index {
+                    // double-click a point to delete it
+                    Some(i) if double => {
+                        let after = automation::remove(&points, i);
+                        self.edit(
+                            "delete point",
+                            vec![Op::SetClipEnvelope { clip: g.clip, target, points: after.into() }],
+                        );
+                    }
+                    Some(index) => {
+                        self.history.begin_gesture("move point");
+                        self.roll_drag = Some(RollDrag::Envelope { target, index, points });
+                    }
+                    None => {
+                        let snap = if self.mods.alt_key() { None } else { self.roll.snap };
+                        let tick = roll_edit::snap_round(tick, snap).clamp(Ticks::ZERO, len);
+                        let value = automation::value_at(doc, &target, pos);
+                        let (after, index) = automation::insert(&points, tick, value);
+                        self.history.begin_gesture("add point");
+                        self.edit(
+                            "add point",
+                            vec![Op::SetClipEnvelope {
+                                clip: g.clip,
+                                target: target.clone(),
+                                points: after.clone().into(),
+                            }],
+                        );
+                        self.roll_drag = Some(RollDrag::Envelope { target, index, points: after });
+                    }
+                }
+            }
             RollHit::Snap => self.roll.snap = next_snap(self.roll.snap),
             RollHit::Quantise => {
                 let snap = self.roll.snap.unwrap_or(Ticks::sixteenths(1));
@@ -1339,6 +1395,16 @@ impl App {
                 }
                 self.roll.rubber = Some(b);
                 self.roll.selected = sel;
+            }
+            RollDrag::Envelope { target, index, points } => {
+                let doc = self.history.doc();
+                let tick = roll_edit::snap_round(l.tick_at(pt.x), snap).clamp(Ticks::ZERO, len);
+                let value = automation::value_at(doc, &target, piano_roll::env_pos(l, pt.y));
+                let after = automation::move_point(&points, index, tick, value);
+                let now = doc.clips.get(&g.clip).and_then(|c| c.envelopes.get(&target));
+                if now.is_none_or(|p| p.iter().ne(after.iter())) {
+                    self.edit("move point", vec![Op::SetClipEnvelope { clip: g.clip, target, points: after.into() }]);
+                }
             }
         }
     }

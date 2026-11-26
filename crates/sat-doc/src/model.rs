@@ -390,6 +390,11 @@ pub struct Clip {
     /// Recorded or imported audio: an audio clip plays this instead of notes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio: Option<AudioClip>,
+    /// Automation the clip carries for its track's gain and pan, at
+    /// clip-relative ticks. Launched, it loops with the clip and takes over
+    /// the track's automation from the arrangement's lanes.
+    #[serde(default, with = "entries", skip_serializing_if = "OrdMap::is_empty")]
+    pub envelopes: OrdMap<ParamTarget, Vector<Breakpoint>>,
 }
 
 /// The audio of a clip: takes of the same passage, and a comp that picks

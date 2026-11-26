@@ -238,7 +238,7 @@ mod mixer {
 mod roll {
     use sat_doc::sat_time::Ticks;
     use sat_ui::demo::demo;
-    use sat_ui::piano_roll::{RollHit, RollView, SNAPS, Tool, clip_notes, geometry, next_snap, snap_label};
+    use sat_ui::piano_roll::{RollHit, RollLane, RollView, SNAPS, Tool, clip_notes, geometry, next_snap, snap_label};
     use vello::kurbo::{Point, Rect};
 
     fn panel() -> Rect {
@@ -334,6 +334,28 @@ mod roll {
         assert_eq!(g.hit(&notes, g.in_key.center()), RollHit::InKey);
         assert_eq!(g.hit(&notes, g.zoom[1].center()), RollHit::Zoom(true));
         assert_eq!(g.hit(&notes, g.zoom[2].center()), RollHit::ZoomFit);
+    }
+
+    #[test]
+    fn the_lane_under_the_notes_edits_velocity_or_a_clip_envelope() {
+        let d = demo();
+        let c = d.doc.clips.values().find(|c| c.name == "bass c").unwrap();
+        let (_, notes) = clip_notes(&d.doc, c.id);
+        let g = geometry(&d.doc, Some(c.id), panel(), &RollView::default()).unwrap();
+        assert!(g.envelope.is_none(), "velocity by default");
+        for (k, r) in g.lanes {
+            assert_eq!(g.hit(&notes, r.center()), RollHit::Lane(k));
+        }
+        // the pan lane shows the clip's envelope: points hit, empty space adds
+        let v = RollView { lane: RollLane::Pan, ..Default::default() };
+        let g = geometry(&d.doc, Some(c.id), panel(), &v).unwrap();
+        let (_, pts) = g.envelope.clone().unwrap();
+        assert_eq!(pts.len(), 3);
+        assert!(matches!(g.hit(&notes, pts[1]), RollHit::Envelope { index: Some(1), .. }));
+        let l = &g.layout;
+        let empty = Point::new(l.x_of(Ticks(240)), l.vel.y0 + 8.0);
+        let RollHit::Envelope { index: None, tick, pos } = g.hit(&notes, empty) else { panic!() };
+        assert!((tick.0 - 240).abs() <= 1 && pos > 0.8, "{tick:?} {pos}");
     }
 
     #[test]

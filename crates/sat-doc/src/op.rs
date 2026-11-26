@@ -152,6 +152,9 @@ pub enum Op {
     DuplicateClip { src: ClipId, id: ClipId, cable: Option<CableId> },
     /// Makes a clip an audio clip (takes and comp), or a notes clip with `None`.
     SetClipAudio { clip: ClipId, audio: Option<AudioClip> },
+    /// Replaces a clip's envelope for its track's gain or pan (sorted by the
+    /// reducer); no points removes it.
+    SetClipEnvelope { clip: ClipId, target: ParamTarget, points: Vector<Breakpoint> },
     /// Sets (or clears, with `None`) a clip's snapshot value for a target.
     SetSnapshot { clip: ClipId, target: ParamTarget, value: Option<f32> },
     /// Replaces the notes a source module plays for a clip.
@@ -709,7 +712,18 @@ pub fn apply(d: &mut Document, op: Op) -> Result<Change, OpError> {
             }
             d.clips.insert(
                 id,
-                Clip { id, track: t, name, color, length, looped, snapshot: OrdMap::new(), seed, audio: None },
+                Clip {
+                    id,
+                    track: t,
+                    name,
+                    color,
+                    length,
+                    looped,
+                    snapshot: OrdMap::new(),
+                    seed,
+                    audio: None,
+                    envelopes: OrdMap::new(),
+                },
             );
             Structure
         }
@@ -789,6 +803,32 @@ pub fn apply(d: &mut Document, op: Op) -> Result<Change, OpError> {
                 }
             }
             d.clips.get_mut(&clip).ok_or_else(|| nf("clip", clip))?.audio = audio;
+            Structure
+        }
+        Op::SetClipEnvelope { clip, target, mut points } => {
+            let c = d.clips.get(&clip).ok_or_else(|| nf("clip", clip))?;
+            if target != ParamTarget::Gain(c.track) && target != ParamTarget::Pan(c.track) {
+                return Err(OpError::NotAllowed("a clip carries envelopes for its own track's gain and pan"));
+            }
+            for p in points.iter() {
+                finite(p.value, "breakpoint value")?;
+                validate_value(&target, p.value)?;
+                if p.tick.0 < 0 || p.tick > c.length {
+                    return Err(OpError::BadValue("envelope points lie within the clip"));
+                }
+                if let Curve::Bend(b) = p.curve
+                    && !(-1.0..=1.0).contains(&b)
+                {
+                    return Err(OpError::BadValue("bend is -1–1"));
+                }
+            }
+            points.sort_by(|a, b| a.tick.cmp(&b.tick));
+            let c = d.clips.get_mut(&clip).unwrap();
+            if points.is_empty() {
+                c.envelopes.remove(&target);
+            } else {
+                c.envelopes.insert(target, points);
+            }
             Structure
         }
         Op::SetSnapshot { clip, target, value } => {

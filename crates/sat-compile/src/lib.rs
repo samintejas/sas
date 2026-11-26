@@ -26,10 +26,10 @@ use std::sync::Arc;
 use sat_doc::sat_time::{TempoMap, Ticks};
 use sat_doc::*;
 use sat_engine::{
-    AudioPlayer, AudioSeg, AutoCurve, AutoPoint, Automation, Command, FX_PARAMS, Fx, FxKind, FxModule, InputChannel,
-    Instrument, MAX_FX, MAX_FX_REGS, MAX_MODS, MAX_PARAMS, MAX_REGS, Meter, Monitor, MonitorMode, NONE, NodeId,
-    NodeKind, NoteEvent, Param, Patch, Sample, Schedule, ScheduleBuilder, SessionClip, Strip, Synth, SynthParam, VKind,
-    VModule, Wave, db_to_gain,
+    AudioPlayer, AudioSeg, AutoCurve, AutoPoint, Automation, ClipEnvelope, Command, FX_PARAMS, Fx, FxKind, FxModule,
+    InputChannel, Instrument, MAX_FX, MAX_FX_REGS, MAX_MODS, MAX_PARAMS, MAX_REGS, Meter, Monitor, MonitorMode, NONE,
+    NodeId, NodeKind, NoteEvent, Param, Patch, Sample, Schedule, ScheduleBuilder, SessionClip, Strip, Synth,
+    SynthParam, VKind, VModule, Wave, db_to_gain,
 };
 use sat_modules::instrument as ins;
 
@@ -111,6 +111,14 @@ impl Compiled {
     pub fn launch(&self, track: TrackId, clip: Option<ClipId>, at: i64) -> Option<Command> {
         let node = *self.players.get(&track)?;
         Some(Command::Launch { node, clip: clip.map(clip_key), at })
+    }
+
+    /// The command that launches `clip`'s envelopes (or stops them, with
+    /// `None`) on `track`'s strip at timeline sample `at`; with `takeover`
+    /// the track's automation then comes from the launcher.
+    pub fn launch_envelopes(&self, track: TrackId, clip: Option<ClipId>, at: i64, takeover: bool) -> Option<Command> {
+        let node = *self.strips.get(&track)?;
+        Some(Command::LaunchEnvelopes { node, clip: clip.map(clip_key), at, takeover })
     }
 
     /// The instrument node of `track`, if it plays notes.
@@ -262,11 +270,34 @@ pub fn placement_notes(doc: &Document, p: &Placement) -> Vec<TimelineNote> {
 
 fn lane_automation(doc: &Document, target: &ParamTarget, tempo: &TempoMap, sr: f64) -> Option<Automation> {
     let lane = doc.lanes.values().find(|l| &l.target == target)?;
-    if lane.points.is_empty() {
+    points_automation(&lane.points, tempo, sr)
+}
+
+/// A track's clip envelopes, for its strip to play when a clip launches:
+/// like session clips, one cycle from the clip's start.
+fn clip_envelopes(doc: &Document, track: TrackId, tempo: &TempoMap, sr: f64) -> Vec<ClipEnvelope> {
+    let at = |t: Ticks| tempo.tick_to_sample(t, sr).round() as i64;
+    doc.clips_on(track)
+        .filter(|c| !c.envelopes.is_empty())
+        .map(|c| {
+            let env = |t: ParamTarget| c.envelopes.get(&t).and_then(|p| points_automation(p, tempo, sr));
+            ClipEnvelope {
+                key: clip_key(c.id),
+                gain: env(ParamTarget::Gain(track)),
+                pan: env(ParamTarget::Pan(track)),
+                len: at(c.length).max(1),
+                looped: c.looped,
+            }
+        })
+        .collect()
+}
+
+fn points_automation(points: &im::Vector<Breakpoint>, tempo: &TempoMap, sr: f64) -> Option<Automation> {
+    if points.is_empty() {
         return None;
     }
     Some(Automation::new(
-        lane.points
+        points
             .iter()
             .map(|p| AutoPoint {
                 at: tempo.tick_to_sample(p.tick, sr).round() as i64,
@@ -927,6 +958,7 @@ fn compile_inner(
             lane_automation(doc, &ParamTarget::Gain(t), &tempo, sample_rate),
         )
         .with_pan_lane(lane_automation(doc, &ParamTarget::Pan(t), &tempo, sample_rate))
+        .with_envelopes(clip_envelopes(doc, t, &tempo, sample_rate))
         .with_meter(meter);
         strips.insert(t, strip_id);
         b.node(strip_id, NodeKind::Strip(Box::new(strip)), pre.map(|p| vec![(p, 1.0)]).unwrap_or_default());

@@ -135,9 +135,33 @@ pub struct Strip {
     /// Post-fader peak meter, if anyone is watching.
     pub meter: Option<Arc<Meter>>,
     /// The track's automation comes from the launcher: the arrangement's
-    /// lanes are ignored and the base values play.
+    /// lanes are ignored and the launched clip's envelopes play (or, with
+    /// none, the base values).
     pub launcher: bool,
+    /// The envelopes of the track's clips, for when they are launched.
+    pub envelopes: Vec<ClipEnvelope>,
+    /// The launched clip whose envelopes play, and the sample it started at.
+    playing: Option<(u64, i64)>,
+    /// A launch waiting for its sample: the clip (or a stop) and whether
+    /// the automation then comes from the launcher.
+    pending: Option<(Option<u64>, i64, bool)>,
     gains: (Smooth, Smooth),
+}
+
+/// A clip's envelopes as a strip plays them once launched: points in
+/// samples from the clip's start.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClipEnvelope {
+    /// The clip's key.
+    pub key: u64,
+    /// Gain in dB.
+    pub gain: Option<Automation>,
+    /// Pan, -1 to 1.
+    pub pan: Option<Automation>,
+    /// The clip's length in samples (at least 1).
+    pub len: i64,
+    /// Loops with the clip; otherwise plays once.
+    pub looped: bool,
 }
 
 impl Strip {
@@ -151,6 +175,9 @@ impl Strip {
             pan_lane: None,
             meter: None,
             launcher: false,
+            envelopes: Vec::new(),
+            playing: None,
+            pending: None,
             gains: (Smooth::new(0.0), Smooth::new(0.0)),
         };
         let (l, r) = s.target_gains(None);
@@ -166,6 +193,44 @@ impl Strip {
         self
     }
 
+    /// Adds the envelopes of the track's clips.
+    pub fn with_envelopes(mut self, envelopes: Vec<ClipEnvelope>) -> Strip {
+        self.envelopes = envelopes;
+        self
+    }
+
+    /// Queues the envelopes of launched clip `clip` (or a stop, with
+    /// `None`) for timeline sample `at`; from then the automation comes
+    /// from the launcher if `takeover`, else from the arrangement.
+    pub fn launch(&mut self, clip: Option<u64>, at: i64, takeover: bool) {
+        self.pending = Some((clip, at, takeover));
+    }
+
+    /// Plays the arrangement's automation again, dropping any launch.
+    pub fn back_to_arrangement(&mut self) {
+        self.launcher = false;
+        self.playing = None;
+        self.pending = None;
+    }
+
+    /// The launched clip's envelopes and the position inside the clip at
+    /// timeline sample `pos`, while one plays.
+    fn launched(&self, pos: i64) -> Option<(&ClipEnvelope, i64)> {
+        let (key, start) = self.playing?;
+        let env = self.envelopes.iter().find(|e| e.key == key)?;
+        let rel = pos - start;
+        if rel < 0 || (!env.looped && rel >= env.len) {
+            return None;
+        }
+        Some((env, rel.rem_euclid(env.len)))
+    }
+
+    /// Gain automation is read this block: the arrangement's lane, or the
+    /// launched clip's gain envelope.
+    fn gain_automated(&self, pos: i64) -> bool {
+        if self.launcher { self.launched(pos).is_some_and(|(e, _)| e.gain.is_some()) } else { self.gain_lane.is_some() }
+    }
+
     /// Attaches a post-fader meter.
     pub fn with_meter(mut self, meter: Arc<Meter>) -> Strip {
         self.meter = Some(meter);
@@ -176,13 +241,19 @@ impl Strip {
         if self.mute {
             return (0.0, 0.0);
         }
-        let pos = pos.filter(|_| !self.launcher);
-        let db = match (pos, &self.gain_lane) {
+        let (gain_lane, pan_lane, pos) = match pos {
+            Some(p) if self.launcher => match self.launched(p) {
+                Some((e, rel)) => (e.gain.as_ref(), e.pan.as_ref(), Some(rel)),
+                None => (None, None, None),
+            },
+            p => (self.gain_lane.as_ref(), self.pan_lane.as_ref(), p),
+        };
+        let db = match (pos, gain_lane) {
             (Some(p), Some(lane)) => lane.value_at(p).unwrap_or(self.gain_db),
             _ => self.gain_db,
         };
         let g = db_to_gain(db);
-        let pan = match (pos, &self.pan_lane) {
+        let pan = match (pos, pan_lane) {
             (Some(p), Some(lane)) => lane.value_at(p).unwrap_or(self.pan),
             _ => self.pan,
         };
@@ -195,7 +266,17 @@ impl Strip {
         // automated gain is read every sample and followed by a per-sample
         // glide (so jumps, at a hold point or a lane's ends, do not click),
         // which makes a render come out the same whatever the block sizes
-        if let (Some(p), true, false) = (pos, self.gain_lane.is_some() && !self.launcher, self.mute) {
+        if let (Some(p), Some((clip, at, takeover))) = (pos, self.pending)
+            && p + len as i64 > at
+        {
+            // a launch lands this block
+            self.pending = None;
+            self.launcher = takeover;
+            self.playing = clip.filter(|k| self.envelopes.iter().any(|e| e.key == *k)).map(|k| (k, at));
+        }
+        if let (Some(p), false) = (pos, self.mute)
+            && self.gain_automated(p)
+        {
             let (mut pl, mut pr) = (0f32, 0f32);
             let (mut gl, mut gr) = (self.gains.0.cur, self.gains.1.cur);
             for (k, i) in (off..off + len).enumerate() {
@@ -467,6 +548,8 @@ impl Schedule {
                         (NodeKind::Strip(n), NodeKind::Strip(o)) => {
                             n.gains = o.gains;
                             n.launcher = o.launcher;
+                            n.playing = o.playing;
+                            n.pending = o.pending;
                         }
                         (NodeKind::Audio(n), NodeKind::Audio(o)) => n.adopt(o),
                         _ => {}
@@ -488,6 +571,18 @@ impl Schedule {
             NodeKind::Instrument(s) => s.seq_mut().launch(clip, at),
             _ => false,
         }
+    }
+
+    /// Queues a launched clip's envelopes (or a stop) on strip node `id`
+    /// for timeline sample `at`; see [`Strip::launch`]. Returns false if the
+    /// node is not a strip.
+    pub fn launch_envelopes(&mut self, id: NodeId, clip: Option<u64>, at: i64, takeover: bool) -> bool {
+        let Some(i) = self.index_of(id) else { return false };
+        match &mut self.nodes[i].kind {
+            NodeKind::Strip(s) => s.launch(clip, at, takeover),
+            _ => return false,
+        }
+        true
     }
 
     /// Hands one of a track's nodes to the launcher (`launcher`) from
@@ -545,7 +640,7 @@ impl Schedule {
         for n in &mut self.nodes {
             match &mut n.kind {
                 NodeKind::Audio(a) => a.back_to_arrangement(),
-                NodeKind::Strip(s) => s.launcher = false,
+                NodeKind::Strip(s) => s.back_to_arrangement(),
                 _ => {}
             }
             let cut = match &mut n.kind {
@@ -652,5 +747,49 @@ mod tests {
         s.launcher = true;
         let (l, r) = s.target_gains(Some(500));
         assert!((l - r).abs() < 1e-6, "{l} {r}");
+    }
+
+    #[test]
+    fn a_launched_clips_envelopes_take_over_and_loop() {
+        use crate::automation::{AutoCurve, AutoPoint};
+        let pt = |at, value| AutoPoint { at, value, curve: AutoCurve::Hold };
+        // the arrangement pans hard right; the clip pans hard left for its
+        // first half, then centre
+        let right = Automation::new(vec![pt(0, 1.0), pt(100_000, 1.0)]);
+        let env = ClipEnvelope {
+            key: 7,
+            gain: None,
+            pan: Some(Automation::new(vec![pt(0, -1.0), pt(500, 0.0), pt(999, 0.0)])),
+            len: 1000,
+            looped: true,
+        };
+        let mut s = Strip::new(0.0, 0.0, false, None).with_pan_lane(Some(right)).with_envelopes(vec![env]);
+        let mut b = Buf { l: vec![1.0; 64], r: vec![1.0; 64] };
+        let side = |s: &Strip, pos| {
+            let (l, r) = s.target_gains(Some(pos));
+            if l < 1e-6 {
+                1
+            } else if r < 1e-6 {
+                -1
+            } else {
+                0
+            }
+        };
+        s.launch(Some(7), 2000, true);
+        s.process(&mut b, 0, 64, Some(1000));
+        assert_eq!(side(&s, 1000), 1, "before the launch lands, the arrangement plays");
+        s.process(&mut b, 0, 64, Some(1990));
+        assert_eq!(side(&s, 2100), -1, "the clip's envelope plays from its start");
+        assert_eq!(side(&s, 2600), 0);
+        assert_eq!(side(&s, 3100), -1, "and loops with the clip");
+        // a launch without takeover hands the automation back
+        s.launch(None, 4000, false);
+        s.process(&mut b, 0, 64, Some(3990));
+        assert_eq!(side(&s, 4100), 1);
+        // and back to the arrangement drops everything
+        s.launch(Some(7), 5000, true);
+        s.back_to_arrangement();
+        s.process(&mut b, 0, 64, Some(4990));
+        assert_eq!(side(&s, 5100), 1);
     }
 }

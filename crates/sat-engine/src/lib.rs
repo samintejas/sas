@@ -33,6 +33,7 @@ pub use instrument::{Instrument, MAX_MODS, MAX_PARAMS, MAX_REGS, MAX_VOICES, NON
 pub use monitor::{InputChannel, Monitor, MonitorMode};
 pub use player::{AudioPlayer, AudioSeg};
 pub use sampler::{PlayMode, Sample};
+pub use schedule::ClipEnvelope;
 pub use schedule::{Buf, Meter, NodeId, NodeKind, Param, Schedule, ScheduleBuilder, ScheduleError, Strip, db_to_gain};
 pub use sequencer::SessionClip;
 pub use synth::{NoteEvent, Synth, SynthParam, Wave};
@@ -72,6 +73,20 @@ pub enum Command {
     },
     /// Every track plays the arrangement again.
     BackToArrangement,
+    /// Launch a clip's envelopes (by key) on a track's strip at a timeline
+    /// sample, or stop them there with `None`; from then the track's
+    /// automation comes from the launcher if `takeover`, else from the
+    /// arrangement.
+    LaunchEnvelopes {
+        /// The strip node.
+        node: NodeId,
+        /// The clip's key, or `None` to stop.
+        clip: Option<u64>,
+        /// When, in timeline samples.
+        at: i64,
+        /// The clip's envelopes take over the track's automation.
+        takeover: bool,
+    },
     /// Hands one of a track's nodes (instrument, audio player or strip) to
     /// the launcher from timeline sample `at`, or back to the arrangement.
     Source {
@@ -242,6 +257,9 @@ impl Engine {
                     self.sched.launch(node, clip, at);
                 }
                 Command::BackToArrangement => self.sched.back_to_arrangement(),
+                Command::LaunchEnvelopes { node, clip, at, takeover } => {
+                    self.sched.launch_envelopes(node, clip, at, takeover);
+                }
                 Command::Source { node, launcher, at } => {
                     self.sched.source(node, launcher, at);
                 }

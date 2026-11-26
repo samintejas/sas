@@ -406,6 +406,47 @@ fn session_clips_launch_over_the_arrangement() {
 }
 
 #[test]
+fn a_launched_clips_envelope_takes_over_the_tracks_automation() {
+    let mut s = song();
+    s.h.apply("solo", [Op::SetTrackFlag { id: s.lead, flag: TrackFlag::Solo, on: true }]).unwrap();
+    let clip = s.h.doc().clips_on(s.lead).next().unwrap().id;
+    let len = s.h.doc().clips[&clip].length;
+    let left = |tick| Breakpoint { tick, value: -1.0, curve: Curve::Linear };
+    s.h.apply(
+        "env",
+        [Op::SetClipEnvelope {
+            clip,
+            target: ParamTarget::Pan(s.lead),
+            points: im::Vector::from(vec![left(Ticks::ZERO), left(len)]),
+        }],
+    )
+    .unwrap();
+    let d = s.h.doc();
+    let c = compile(d, SR, BLOCK).unwrap();
+    let play = |cmds: Vec<Command>| {
+        let c = compile(d, SR, BLOCK).unwrap();
+        let (mut e, mut h) = engine(c.schedule, 16);
+        for cmd in cmds {
+            h.send(cmd).unwrap();
+        }
+        h.send(Command::Play).unwrap();
+        let (mut l, mut r) = (vec![0.0f32; 48_000], vec![0.0f32; 48_000]);
+        for (l, r) in l.chunks_mut(BLOCK).zip(r.chunks_mut(BLOCK)) {
+            e.process(l, r);
+        }
+        (rms(&l), rms(&r))
+    };
+    let launch = || c.launch(s.lead, Some(clip), 0).unwrap();
+    // launched with takeover, the clip's envelope pans the track hard left
+    let (l, r) = play(vec![launch(), c.launch_envelopes(s.lead, Some(clip), 0, true).unwrap()]);
+    // (a little right leaks in while the gains glide from centre)
+    assert!(l > 0.001 && r < l * 0.02, "{l} {r}");
+    // without takeover the track's own (centre) pan plays
+    let (l, r) = play(vec![launch(), c.launch_envelopes(s.lead, Some(clip), 0, false).unwrap()]);
+    assert!(l > 0.001 && (l - r).abs() < l * 0.05, "{l} {r}");
+}
+
+#[test]
 fn audio_clips_play_their_comp_with_fades_and_crossfades() {
     use std::sync::Arc;
     let mut h = History::new(Document::new(1), 10);
