@@ -20,7 +20,7 @@ pub const INSPECTOR_W: f64 = 296.0;
 /// Height of the beat ruler.
 pub const BEATS_H: f64 = 20.0;
 /// Height of the velocity lane.
-pub const VEL_H: f64 = 44.0;
+pub const VEL_H: f64 = 60.0;
 
 fn is_black(p: u8) -> bool {
     matches!(p % 12, 1 | 3 | 6 | 8 | 10)
@@ -305,6 +305,44 @@ pub struct RollView {
     pub in_key: bool,
     /// The key chooser is open.
     pub key_menu: bool,
+    /// What the lane under the notes edits.
+    pub lane: RollLane,
+}
+
+/// What the lane under the piano roll's notes edits: note velocities, or
+/// one of the clip's envelopes (which play when the clip is launched).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RollLane {
+    /// Note velocities.
+    #[default]
+    Velocity,
+    /// The clip's gain envelope.
+    Gain,
+    /// The clip's pan envelope.
+    Pan,
+}
+
+impl RollLane {
+    /// Every lane, in chooser order.
+    pub const ALL: [RollLane; 3] = [RollLane::Velocity, RollLane::Gain, RollLane::Pan];
+
+    /// Its label in the chooser.
+    pub fn label(self) -> &'static str {
+        match self {
+            RollLane::Velocity => "vel",
+            RollLane::Gain => "gain",
+            RollLane::Pan => "pan",
+        }
+    }
+
+    /// The envelope target on `track`, for an envelope lane.
+    pub fn target(self, track: TrackId) -> Option<ParamTarget> {
+        match self {
+            RollLane::Velocity => None,
+            RollLane::Gain => Some(ParamTarget::Gain(track)),
+            RollLane::Pan => Some(ParamTarget::Pan(track)),
+        }
+    }
 }
 
 impl Default for RollView {
@@ -321,6 +359,7 @@ impl Default for RollView {
             fold: false,
             in_key: false,
             key_menu: false,
+            lane: RollLane::Velocity,
         }
     }
 }
@@ -357,6 +396,18 @@ pub enum RollHit {
     Snap,
     /// The quantise button.
     Quantise,
+    /// A lane in the chooser left of the lane under the notes.
+    Lane(RollLane),
+    /// The envelope lane: the point under the pointer (if any is close),
+    /// the clip-relative tick and the height (0–1) at the point.
+    Envelope {
+        /// The point under the pointer.
+        index: Option<usize>,
+        /// Clip-relative tick.
+        tick: Ticks,
+        /// Height in the lane, 0 (bottom) to 1 (top).
+        pos: f64,
+    },
     /// The key button: open or close the key chooser.
     KeyButton,
     /// A root in the key chooser (0–11).
@@ -402,6 +453,10 @@ pub struct RollGeom {
     pub zoom: [Rect; 3],
     /// The key chooser, when open: its panel, its roots and its scales.
     pub key_menu: Option<KeyMenu>,
+    /// The lane chooser, left of the lane under the notes.
+    pub lanes: [(RollLane, Rect); 3],
+    /// The envelope the lane edits, with its points on screen.
+    pub envelope: Option<(ParamTarget, Vec<Point>)>,
 }
 
 /// The key chooser under the key button.
@@ -470,6 +525,15 @@ pub fn geometry(doc: &Document, clip: Option<ClipId>, r: Rect, view: &RollView) 
         Rect::new(zx - 78.0, ty - 11.0, zx - 54.0, ty + 11.0),
         Rect::new(zx - 52.0, ty - 11.0, zx, ty + 11.0),
     ];
+    let lanes = lane_chooser(&layout, area);
+    let envelope = view.lane.target(clip.track).map(|t| {
+        let pts = clip.envelopes.get(&t).map_or_else(Vec::new, |ps| {
+            ps.iter()
+                .map(|b| Point::new(layout.x_of(b.tick), env_y(&layout, crate::automation::pos_of(doc, &t, b.value))))
+                .collect()
+        });
+        (t, pts)
+    });
     Some(RollGeom {
         clip: clip.id,
         module,
@@ -483,7 +547,30 @@ pub fn geometry(doc: &Document, clip: Option<ClipId>, r: Rect, view: &RollView) 
         in_key,
         zoom,
         key_menu: view.key_menu.then(|| KeyMenu::new(key)),
+        lanes,
+        envelope,
     })
+}
+
+/// The lane chooser's buttons, stacked in the keyboard column beside the
+/// lane under the notes.
+fn lane_chooser(l: &RollLayout, area: Rect) -> [(RollLane, Rect); 3] {
+    let h = (l.vel.height() - 6.0) / 3.0;
+    RollLane::ALL.map(|k| {
+        let i = RollLane::ALL.iter().position(|x| *x == k).unwrap() as f64;
+        let y = l.vel.y0 + 3.0 + i * h;
+        (k, Rect::new(area.x0 + 6.0, y + 1.0, l.vel.x0 - 6.0, y + h - 1.0))
+    })
+}
+
+/// Screen y of height `pos` (0–1) in the envelope lane.
+pub fn env_y(l: &RollLayout, pos: f64) -> f64 {
+    crate::automation::y_of(l.vel, pos)
+}
+
+/// Height (0–1) at screen y in the envelope lane.
+pub fn env_pos(l: &RollLayout, y: f64) -> f64 {
+    crate::automation::pos_at(l.vel, y)
 }
 
 impl RollGeom {
@@ -508,6 +595,9 @@ impl RollGeom {
         }
         if self.in_key.contains(pt) {
             return RollHit::InKey;
+        }
+        if let Some((k, _)) = self.lanes.iter().find(|(_, r)| r.contains(pt)) {
+            return RollHit::Lane(*k);
         }
         if let Some(i) = self.zoom.iter().position(|r| r.contains(pt)) {
             return match i {
@@ -535,6 +625,16 @@ impl RollGeom {
             }
             return RollHit::Grid { tick: l.tick_at(pt.x), pitch: l.pitch_at(pt.y) };
         }
+        if let (true, Some((_, pts))) = (l.vel.contains(pt), &self.envelope) {
+            let index = pts
+                .iter()
+                .enumerate()
+                .map(|(i, q)| (i, q.distance(pt)))
+                .filter(|(_, d)| *d <= 6.0)
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(i, _)| i);
+            return RollHit::Envelope { index, tick: l.tick_at(pt.x), pos: env_pos(l, pt.y) };
+        }
         if l.vel.contains(pt) {
             let near = notes
                 .iter()
@@ -550,6 +650,44 @@ impl RollGeom {
         }
         RollHit::Nothing
     }
+}
+
+/// Draws a clip envelope in the lane under the notes: the track's own
+/// value as a dim line, then the curve through the points (held flat
+/// before the first and after the last).
+fn draw_envelope(
+    p: &mut Painter<'_>,
+    th: &Theme,
+    doc: &Document,
+    rl: &RollLayout,
+    target: &ParamTarget,
+    pts: &[Point],
+    col: Rgba,
+) {
+    let c = &th.c;
+    let r = rl.vel;
+    if let Some(base) = doc.base_value(target) {
+        let y = env_y(rl, crate::automation::pos_of(doc, target, base));
+        p.hline(r.x0, r.x1, y, c.text_secondary.alpha(0.35));
+    }
+    if pts.is_empty() {
+        let hint = match target {
+            ParamTarget::Pan(_) => "click to add pan points that play when the clip is launched",
+            _ => "click to add gain points that play when the clip is launched",
+        };
+        p.text(r.x0 + 10.0, r.center().y, hint, &TextStyle::mono(10.0, c.text_secondary), Align::Left);
+        return;
+    }
+    p.clip(r, |p| {
+        let mut line = vec![Point::new(r.x0, pts[0].y)];
+        line.extend_from_slice(pts);
+        line.push(Point::new(r.x1, pts[pts.len() - 1].y));
+        p.polyline(&line, 1.5, col);
+        for q in pts {
+            p.circle(*q, 3.0, col);
+            p.circle(*q, 1.5, Rgba::hex(0x0e0e0e));
+        }
+    });
 }
 
 fn button(p: &mut Painter<'_>, th: &Theme, r: Rect, label: &str) {
@@ -777,11 +915,29 @@ pub fn draw(
             p.rect(b, c.accent_primary.alpha(0.12));
             p.rrect_stroke(b, 0.0, 1.0, c.accent_primary.alpha(0.7));
         }
-        // velocity lane
+        // the lane under the notes: velocity, or one of the clip's envelopes
         p.rect(rl.vel, Rgba::hex(0x0e0e0e));
         p.hline(rl.vel.x0, rl.vel.x1, rl.vel.y0, c.border_default);
-        p.text(area.x0 + 10.0, rl.vel.center().y, "vel", &TextStyle::mono(11.0, c.text_secondary), Align::Left);
+        for (k, r) in &geom.lanes {
+            let on = *k == view.lane;
+            let has = k.target(clip.track).is_some_and(|t| clip.envelopes.contains_key(&t));
+            if on {
+                p.rrect(*r, 3.0, c.accent_primary_subtle);
+            }
+            let col = if on { c.accent_primary } else { c.text_secondary };
+            p.text(r.x0 + 6.0, r.center().y, k.label(), &TextStyle::mono(10.0, col), Align::Left);
+            if has {
+                // a dot marks an envelope the clip carries
+                p.circle(Point::new(r.x1 - 6.0, r.center().y), 2.0, c.accent_primary);
+            }
+        }
+        if let Some((t, pts)) = &geom.envelope {
+            draw_envelope(p, th, doc, rl, t, pts, nc);
+        }
         p.clip(rl.vel, |p| {
+            if geom.envelope.is_some() {
+                return;
+            }
             for (i, n) in notes.iter().enumerate() {
                 let x = rl.x_of(n.start) + 1.0;
                 let top = rl.vel_y(n.velocity);

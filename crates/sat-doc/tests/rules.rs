@@ -206,6 +206,39 @@ fn snapshot_lives_in_the_clip() {
 }
 
 #[test]
+fn clips_carry_envelopes_for_their_own_tracks_gain_and_pan() {
+    let mut f = fixture();
+    let pt = |tick: i64, value: f32| Breakpoint { tick: Ticks(tick), value, curve: Curve::Linear };
+    let pan = ParamTarget::Pan(f.track);
+    // points come back sorted
+    f.h.apply(
+        "env",
+        [Op::SetClipEnvelope {
+            clip: f.clip,
+            target: pan.clone(),
+            points: Vector::from(vec![pt(480, 0.5), pt(0, -0.5)]),
+        }],
+    )
+    .unwrap();
+    let got: Vec<i64> = f.h.doc().clips[&f.clip].envelopes[&pan].iter().map(|p| p.tick.0).collect();
+    assert_eq!(got, vec![0, 480]);
+    // out of range, past the clip, or another track's target: refused
+    let len = f.h.doc().clips[&f.clip].length.0;
+    for (target, points) in [
+        (pan.clone(), vec![pt(0, 2.0)]),
+        (pan.clone(), vec![pt(len + 1, 0.0)]),
+        (ParamTarget::Gain(TrackId::new()), vec![pt(0, 0.0)]),
+    ] {
+        assert!(
+            f.h.apply("bad", [Op::SetClipEnvelope { clip: f.clip, target, points: Vector::from(points) }]).is_err()
+        );
+    }
+    // no points removes it
+    f.h.apply("clear", [Op::SetClipEnvelope { clip: f.clip, target: pan, points: Vector::new() }]).unwrap();
+    assert!(f.h.doc().clips[&f.clip].envelopes.is_empty());
+}
+
+#[test]
 fn tempo_lives_on_master() {
     let mut h = History::new(Document::new(0), 10);
     let lane = h.doc().tempo_lane;

@@ -17,7 +17,7 @@
 //! `SAT_TRACK_H` and `SAT_PX_PER_BAR` set the arrange zoom.
 //! `SAT_KEY=<root>,<scale>` sets the project key (indexes into the scale
 //! lists); `SAT_ROLL=<words>` sets the piano roll: `fold`, `inkey`, `menu`
-//! (key chooser open), `zoom=<px per beat>`, `x0=<ticks>`, `row=<px>`.
+//! (key chooser open), `zoom=<px per beat>`, `x0=<ticks>`, `row=<px>`, `gain` or `pan` (the lane under the notes shows that clip envelope).
 
 use sat_doc::sat_time::Ticks;
 use sat_ui::arrange::{ArrangeState, TransportView};
@@ -91,6 +91,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fold: roll_has("fold"),
         in_key: roll_has("inkey"),
         key_menu: roll_has("menu"),
+        lane: if roll_has("gain") {
+            sat_ui::piano_roll::RollLane::Gain
+        } else if roll_has("pan") {
+            sat_ui::piano_roll::RollLane::Pan
+        } else {
+            sat_ui::piano_roll::RollLane::Velocity
+        },
         zoom: roll_val("zoom").and_then(|v| v.parse().ok()),
         x0: Ticks(roll_val("x0").and_then(|v| v.parse().ok()).unwrap_or(0)),
         row_h: roll_val("row").and_then(|v| v.parse().ok()).unwrap_or(sat_ui::piano_roll::ROW_H),
