@@ -13,6 +13,11 @@
 //! `SAT_MENU=main|panel|left` draws that area's editor-type menu open.
 //! `SAT_DOCK=outliner` puts the outliner in the left sidebar; `SAT_FOLDS=<mask>`
 //! folds inspector sections; `SAT_UI_SCALE` sets the interface scale (0.9).
+//! `SAT_LAUNCHER=1` shows the clip launcher beside the arrangement;
+//! `SAT_TRACK_H` and `SAT_PX_PER_BAR` set the arrange zoom.
+//! `SAT_KEY=<root>,<scale>` sets the project key (indexes into the scale
+//! lists); `SAT_ROLL=<words>` sets the piano roll: `fold`, `inkey`, `menu`
+//! (key chooser open), `zoom=<px per beat>`, `x0=<ticks>`, `row=<px>`.
 
 use sat_doc::sat_time::Ticks;
 use sat_ui::arrange::{ArrangeState, TransportView};
@@ -70,13 +75,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(c) = demo.doc.clips.values().find(|c| c.name == view) {
         demo.selected = c.id;
     }
+    if let Ok(k) = std::env::var("SAT_KEY") {
+        let mut it = k.split(',').filter_map(|v| v.trim().parse::<u8>().ok());
+        demo.doc.key = sat_doc::Key { root: it.next().unwrap_or(0), scale: it.next().unwrap_or(1) };
+    }
+    let roll_words = std::env::var("SAT_ROLL").unwrap_or_default();
+    let roll_val = |k: &str| {
+        roll_words
+            .split(',')
+            .find_map(|w| w.trim().strip_prefix(k).and_then(|v| v.strip_prefix('=')).map(str::to_owned))
+    };
+    let roll_has = |w: &str| roll_words.split(',').any(|x| x.trim() == w);
+    let roll = RollView {
+        fold: roll_has("fold"),
+        in_key: roll_has("inkey"),
+        key_menu: roll_has("menu"),
+        zoom: roll_val("zoom").and_then(|v| v.parse().ok()),
+        x0: Ticks(roll_val("x0").and_then(|v| v.parse().ok()).unwrap_or(0)),
+        row_h: roll_val("row").and_then(|v| v.parse().ok()).unwrap_or(sat_ui::piano_roll::ROW_H),
+        ..Default::default()
+    };
     let theme =
         if std::env::var_os("SAT_LIGHT").is_some() { sat_theme::Theme::light() } else { sat_theme::Theme::dark() };
     let mut fonts = Fonts::new();
     let mut scene = vello::Scene::new();
+    // SAT_LAUNCHER=1 shows the clip launcher beside the arrangement (with
+    // the verse playing); SAT_TRACK_H sets the track height
+    let launcher = std::env::var_os("SAT_LAUNCHER").is_some();
     let state = ArrangeState {
         selected_clip: Some(demo.selected),
         selected_track: Some(demo.doc.clips[&demo.selected].track),
+        launcher,
+        track_h: std::env::var("SAT_TRACK_H").ok().and_then(|v| v.parse().ok()).unwrap_or(sat_ui::arrange::TRACK_H),
+        px_per_bar: std::env::var("SAT_PX_PER_BAR").ok().and_then(|v| v.parse().ok()).unwrap_or(76.0),
         ..Default::default()
     };
     let view = match args.next().as_deref() {
@@ -90,7 +121,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     // in the session view, the verse playing and the break queued on the drums
     let mut session = sat_ui::session::SessionView::default();
-    if view == MainView::Session {
+    if view == MainView::Session || launcher {
         let verse = demo.doc.scenes[1].id;
         for ((scene, track), clip) in demo.doc.slots.iter() {
             if *scene == verse {
@@ -136,7 +167,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         mixer_scroll: 0.0,
         levels: &levels,
         edited: false,
-        roll: &RollView::default(),
+        roll: &roll,
         steps: &StepView::default(),
         view,
         grid: &sat_ui::grid::GridView { menu: std::env::var_os("SAT_GRID_MENU").is_some(), ..Default::default() },

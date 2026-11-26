@@ -2652,6 +2652,7 @@ dependencies = [
  "sat-compile",
  "sat-disk",
  "sat-doc",
+ "sat-dsp",
  "sat-engine",
  "sat-modules",
  "sat-theme",

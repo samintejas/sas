@@ -22,6 +22,8 @@ pub enum Action {
     Session,
     /// Show the arrangement.
     Arrange,
+    /// Show or hide the clip launcher beside the arrangement.
+    Launcher,
     /// Show one of a track's grids.
     Grid(TrackId, GridKind),
     /// Select a track.
@@ -81,6 +83,7 @@ pub fn entries(doc: &Document) -> Vec<Entry> {
     let mut out = vec![
         Entry { label: "session".into(), hint: "ctrl 1", action: Action::Session },
         Entry { label: "arrange".into(), hint: "ctrl 2", action: Action::Arrange },
+        Entry { label: "clip launcher beside arrangement".into(), hint: "ctrl u", action: Action::Launcher },
     ];
     for t in doc.tracks_in_order() {
         let tr = &doc.tracks[&t];

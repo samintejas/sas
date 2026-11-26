@@ -365,73 +365,9 @@ pub fn draw(
                     );
                     continue;
                 }
-                match doc.slots.get(&(*scene, col.track)).and_then(|id| doc.clips.get(id)) {
-                    Some(clip) => {
-                        let ccol = th.track(clip.color.0);
-                        let playing = view.playing.get(&col.track) == Some(&clip.id);
-                        let queued = view.queued.get(&col.track).is_some_and(|(q, _)| *q == Some(clip.id));
-                        let sel = selected_clip == Some(clip.id);
-                        p.rrect(cell, 1.0, if playing { ccol.alpha(0.85) } else { ccol.alpha(0.28) });
-                        let play_r = Rect::new(cell.x0, cell.y0, cell.x0 + PLAY_W, cell.y1);
-                        p.rrect(play_r, 1.0, Rgba::new(0, 0, 0, if playing { 60 } else { 40 }));
-                        let tri = Rect::new(
-                            play_r.center().x - 5.0,
-                            cell.center().y - 5.0,
-                            play_r.center().x + 5.0,
-                            cell.center().y + 5.0,
-                        );
-                        let tcol = if playing {
-                            c.text_max
-                        } else if queued && blink {
-                            c.accent_primary
-                        } else {
-                            c.text_secondary
-                        };
-                        icons::draw(p, Icon::Play, tri, tcol);
-                        let ink = if playing { Rgba::hex(0x0b0b0b) } else { c.text_strong };
-                        p.text_fit(
-                            cell.x0 + PLAY_W + 6.0,
-                            cell.center().y,
-                            &clip.name,
-                            &TextStyle::mono(11.0, ink),
-                            COL_W - PLAY_W - 10.0,
-                        );
-                        if playing && let Some(start) = view.started.get(&col.track) {
-                            // how far through its loop the clip is
-                            let len = clip.length.0.max(1) as f64;
-                            let f = ((transport.playhead.0 - start.0).max(0) as f64 % len) / len;
-                            let bar = Rect::new(
-                                cell.x0 + PLAY_W,
-                                cell.y1 - 3.0,
-                                cell.x0 + PLAY_W + (cell.width() - PLAY_W) * f,
-                                cell.y1 - 1.0,
-                            );
-                            p.rect(bar, Rgba::hex(0x0b0b0b).alpha(0.6));
-                        }
-                        if queued {
-                            p.rrect_stroke(
-                                cell.inset(-0.5),
-                                3.0,
-                                1.0,
-                                if blink { c.accent_primary } else { c.border_default },
-                            );
-                        }
-                        if sel {
-                            p.rrect_stroke(cell.inset(-0.5), 1.0, 1.5, c.text_max);
-                        }
-                    }
-                    None => {
-                        p.rrect(cell, 1.0, c.bg_surface.alpha(0.45));
-                        // empty slots stop the track
-                        let sq = Rect::new(
-                            cell.center().x - 3.5,
-                            cell.center().y - 3.5,
-                            cell.center().x + 3.5,
-                            cell.center().y + 3.5,
-                        );
-                        p.rect(sq, if follows { c.text_secondary.alpha(0.7) } else { c.border_default });
-                    }
-                }
+                let clip = doc.slots.get(&(*scene, col.track)).and_then(|id| doc.clips.get(id));
+                let slot = Slot { track: col.track, clip, follows, blink };
+                draw_slot(p, th, view, selected_clip, transport, &slot, cell);
             }
             // empty rows under the scenes
             for row in &l.ghost_rows {
@@ -488,6 +424,95 @@ pub fn draw(
         crate::area::button(p, th, l.back, "back to arrangement", true);
     }
     l
+}
+
+/// One session slot to draw: its track, the clip in it, whether the track
+/// follows the session and the queued-launch blink phase.
+#[derive(Debug, Clone, Copy)]
+pub struct Slot<'d> {
+    /// The track.
+    pub track: TrackId,
+    /// The clip in the slot.
+    pub clip: Option<&'d Clip>,
+    /// The track follows the session.
+    pub follows: bool,
+    /// Blink phase for queued launches.
+    pub blink: bool,
+}
+
+/// Draws a session slot in `cell`: a clip with its launch triangle, play
+/// progress and queued/selected outlines, or an empty slot's stop square.
+/// The session view and the launcher beside the arrangement both use it.
+pub fn draw_slot(
+    p: &mut Painter<'_>,
+    th: &Theme,
+    view: &SessionView,
+    selected_clip: Option<ClipId>,
+    transport: &TransportView,
+    slot: &Slot<'_>,
+    cell: Rect,
+) {
+    let c = &th.c;
+    let (track, blink, follows) = (slot.track, slot.blink, slot.follows);
+    match slot.clip {
+        Some(clip) => {
+            let ccol = th.track(clip.color.0);
+            let playing = view.playing.get(&track) == Some(&clip.id);
+            let queued = view.queued.get(&track).is_some_and(|(q, _)| *q == Some(clip.id));
+            let sel = selected_clip == Some(clip.id);
+            p.rrect(cell, 1.0, if playing { ccol.alpha(0.85) } else { ccol.alpha(0.28) });
+            let play_w = PLAY_W.min(cell.height().max(16.0));
+            let play_r = Rect::new(cell.x0, cell.y0, cell.x0 + play_w, cell.y1);
+            p.rrect(play_r, 1.0, Rgba::new(0, 0, 0, if playing { 60 } else { 40 }));
+            let tri = Rect::new(
+                play_r.center().x - 5.0,
+                cell.center().y - 5.0,
+                play_r.center().x + 5.0,
+                cell.center().y + 5.0,
+            );
+            let tcol = if playing {
+                c.text_max
+            } else if queued && blink {
+                c.accent_primary
+            } else {
+                c.text_secondary
+            };
+            icons::draw(p, Icon::Play, tri, tcol);
+            let ink = if playing { Rgba::hex(0x0b0b0b) } else { c.text_strong };
+            p.text_fit(
+                cell.x0 + play_w + 6.0,
+                cell.center().y,
+                &clip.name,
+                &TextStyle::mono(11.0, ink),
+                cell.width() - play_w - 10.0,
+            );
+            if playing && let Some(start) = view.started.get(&track) {
+                // how far through its loop the clip is
+                let len = clip.length.0.max(1) as f64;
+                let f = ((transport.playhead.0 - start.0).max(0) as f64 % len) / len;
+                let bar = Rect::new(
+                    cell.x0 + play_w,
+                    cell.y1 - 3.0,
+                    cell.x0 + play_w + (cell.width() - play_w) * f,
+                    cell.y1 - 1.0,
+                );
+                p.rect(bar, Rgba::hex(0x0b0b0b).alpha(0.6));
+            }
+            if queued {
+                p.rrect_stroke(cell.inset(-0.5), 3.0, 1.0, if blink { c.accent_primary } else { c.border_default });
+            }
+            if sel {
+                p.rrect_stroke(cell.inset(-0.5), 1.0, 1.5, c.text_max);
+            }
+        }
+        None => {
+            p.rrect(cell, 1.0, c.bg_surface.alpha(0.45));
+            // empty slots stop the track
+            let sq =
+                Rect::new(cell.center().x - 3.5, cell.center().y - 3.5, cell.center().x + 3.5, cell.center().y + 3.5);
+            p.rect(sq, if follows { c.text_secondary.alpha(0.7) } else { c.border_default });
+        }
+    }
 }
 
 #[cfg(test)]
