@@ -184,6 +184,8 @@ pub enum Op {
     SetMeter { changes: Vector<MeterChange> },
     /// Sets the loop range.
     SetLoop { range: LoopRange },
+    /// Sets the project's key (root 0–11; scale indexes the scale list).
+    SetKey { key: Key },
 }
 
 /// What an applied op changed, so the app knows how to react.
@@ -935,6 +937,14 @@ pub fn apply(d: &mut Document, op: Op) -> Result<Change, OpError> {
                 return Err(OpError::BadValue("loop end must be after start"));
             }
             d.loop_range = range;
+            Structure
+        }
+        Op::SetKey { key } => {
+            if key.root > 11 {
+                return Err(OpError::BadValue("key root must be 0-11"));
+            }
+            d.key = key;
+            // sources may follow the key, so recompile
             Structure
         }
     })
