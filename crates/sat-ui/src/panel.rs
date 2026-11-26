@@ -1,4 +1,6 @@
-//! The bottom panel's tab bar, shared by the clip editor and the mixer.
+//! The bottom panel's tab bar, shared by the clip editor and the mixer: the
+//! editors that gain from room. The clip bank and the macros live in the
+//! sidebars (see [`crate::dock`]).
 
 use sat_theme::Theme;
 use vello::kurbo::{Point, Rect};
@@ -17,10 +19,6 @@ pub enum PanelView {
     Clip,
     /// The mixer.
     Mixer,
-    /// The selected track's macros.
-    Macros,
-    /// The clip bank: every clip, to place in the arrangement or session.
-    Bank,
 }
 
 /// The tabs on the left of the bar.
@@ -28,20 +26,11 @@ pub enum PanelView {
 pub enum Tab {
     /// Clip editor.
     Clip,
-    /// Macros.
-    Macros,
     /// Mixer.
     Mixer,
-    /// Clip bank.
-    Bank,
 }
 
-const TABS: [(Tab, Icon, &str); 4] = [
-    (Tab::Clip, Icon::Panel, "clip"),
-    (Tab::Macros, Icon::Grid, "macros"),
-    (Tab::Mixer, Icon::Sliders, "mixer"),
-    (Tab::Bank, Icon::Lines, "bank"),
-];
+const TABS: [(Tab, Icon, &str); 2] = [(Tab::Clip, Icon::Panel, "clip"), (Tab::Mixer, Icon::Sliders, "mixer")];
 
 /// Width of a tab with an icon and a mono-12 label. Geist Mono advances are
 /// 0.6 em, so this needs no font access and hit testing can use it.
@@ -50,7 +39,7 @@ pub fn tab_width(label: &str, icon: bool) -> f64 {
 }
 
 /// Rectangles of the view tabs in a panel at `r`.
-pub fn tab_rects(r: Rect) -> [(Tab, Rect); 4] {
+pub fn tab_rects(r: Rect) -> [(Tab, Rect); 2] {
     let mut x = r.x0 + 4.0;
     TABS.map(|(t, _, label)| {
         let w = tab_width(label, true);
@@ -92,13 +81,7 @@ pub fn draw_bar(p: &mut Painter<'_>, th: &Theme, r: Rect, view: PanelView) -> (R
     p.hline(r.x0, r.x1, bar.y1 - 1.0, c.border_subtle);
     let mut x = r.x0 + 4.0;
     for (t, icon, label) in TABS {
-        let on = matches!(
-            (t, view),
-            (Tab::Clip, PanelView::Clip)
-                | (Tab::Mixer, PanelView::Mixer)
-                | (Tab::Macros, PanelView::Macros)
-                | (Tab::Bank, PanelView::Bank)
-        );
+        let on = matches!((t, view), (Tab::Clip, PanelView::Clip) | (Tab::Mixer, PanelView::Mixer));
         x += tab(p, th, x, bar, Some(icon), label, on);
     }
     p.vline(x + 4.0, bar.y0 + 8.0, bar.y1 - 8.0, c.border_default);

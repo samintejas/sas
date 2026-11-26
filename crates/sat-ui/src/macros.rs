@@ -1,7 +1,7 @@
-//! The bottom panel's macros page: the 16 macros of the selected track's
-//! source and instrument grids (or of the fx grid on screen, or a bus's fx
-//! grid), and the track's fader and pan. Learn mode maps the next touched
-//! parameter to a free macro.
+//! The right sidebar's inspector: the selected track's fader and pan, and
+//! the 16 macros of its source and instrument grids (or of the fx grid on
+//! screen, or a bus's fx grid), stacked to the sidebar's width. Learn mode
+//! maps the next touched parameter to a free macro.
 
 use sat_doc::*;
 use sat_theme::{Rgba, Theme};
@@ -9,12 +9,16 @@ use vello::kurbo::{Point, Rect};
 
 use crate::controls;
 use crate::paint::{Align, Painter, TextStyle};
-use crate::panel::{self, PanelView, TABS_H};
+use crate::panel::TABS_H;
 
 /// Knob diameter.
 pub const KNOB: f64 = 32.0;
-/// Width of the track section.
-pub const TRACK_W: f64 = 140.0;
+/// Height of the track card.
+pub const TRACK_H: f64 = 128.0;
+/// Height of a macro's cell: knob, name and value.
+pub const CELL_H: f64 = 78.0;
+/// Narrowest a knob cell gets in an eight-wide grid; narrower, four wide.
+pub const CELL_W8: f64 = 62.0;
 
 /// One grid's 16 macros.
 #[derive(Debug, Clone, PartialEq)]
@@ -60,7 +64,11 @@ pub struct MacroLayout {
     pub track: Option<TrackId>,
     /// The learn button.
     pub learn: Rect,
-    /// Grid sections, left to right.
+    /// The scrolling area below the header.
+    pub body: Rect,
+    /// How far it can scroll.
+    pub max_scroll: f64,
+    /// Grid sections, top to bottom.
     pub sections: Vec<Section>,
     /// The track section.
     pub track_card: Rect,
@@ -75,6 +83,9 @@ impl MacroLayout {
     pub fn hit(&self, pt: Point) -> MacroHit {
         if self.learn.contains(pt) {
             return MacroHit::Learn;
+        }
+        if !self.body.contains(pt) {
+            return MacroHit::Nothing;
         }
         for s in &self.sections {
             if s.open.contains(pt) {
@@ -112,39 +123,54 @@ pub fn grids_for(doc: &Document, track: Option<TrackId>, on_screen: Option<GridI
     if v.is_empty() { t.fx_grids.front().copied().into_iter().collect() } else { v }
 }
 
-/// Lays out the page in panel `r`.
-pub fn layout(doc: &Document, track: Option<TrackId>, on_screen: Option<GridId>, r: Rect) -> MacroLayout {
+/// Lays out the inspector in the sidebar `r`, scrolled down by `scroll`.
+pub fn layout(doc: &Document, track: Option<TrackId>, on_screen: Option<GridId>, r: Rect, scroll: f64) -> MacroLayout {
+    let close = crate::dock::close_button(r);
     let cy = r.y0 + TABS_H / 2.0;
-    let learn = Rect::new(r.x1 - 84.0, cy - 12.0, r.x1 - 12.0, cy + 12.0);
-    let body = Rect::new(r.x0 + 12.0, r.y0 + TABS_H + 10.0, r.x1 - 12.0, r.y1 - 10.0);
-    let track_card = Rect::new(body.x1 - TRACK_W, body.y0, body.x1, body.y1);
+    let learn = Rect::new(close.x0 - 70.0, cy - 12.0, close.x0 - 6.0, cy + 12.0);
+    let body = Rect::new(r.x0, r.y0 + TABS_H, r.x1, r.y1.max(r.y0 + TABS_H));
     let grids = grids_for(doc, track, on_screen);
-    let n = grids.len().max(1) as f64;
     let gap = 10.0;
-    let w = ((track_card.x0 - gap - body.x0) - gap * (n - 1.0)) / n;
+    let inner = Rect::new(body.x0 + 10.0, body.y0, body.x1 - 10.0, body.y1);
+    let cols = if (inner.width() - 20.0) / 8.0 >= CELL_W8 { 8 } else { 4 };
+    let rows = MACROS / cols;
+    let sec_h = 44.0 + rows as f64 * CELL_H + 6.0;
+    let content = 10.0 + TRACK_H + grids.len() as f64 * (gap + sec_h) + 10.0;
+    let max_scroll = (content - body.height()).max(0.0);
+    let top = body.y0 + 10.0 - scroll.clamp(0.0, max_scroll);
+    let track_card = Rect::new(inner.x0, top, inner.x1, top + TRACK_H);
     let sections = grids
         .iter()
         .enumerate()
         .map(|(k, g)| {
-            let x0 = body.x0 + k as f64 * (w + gap);
-            let rect = Rect::new(x0, body.y0, x0 + w, body.y1);
-            let open = Rect::new(rect.x1 - 78.0, rect.y0 + 10.0, rect.x1 - 12.0, rect.y0 + 34.0);
+            let y0 = track_card.y1 + gap + k as f64 * (sec_h + gap);
+            let rect = Rect::new(inner.x0, y0, inner.x1, y0 + sec_h);
+            let open = Rect::new(rect.x1 - 62.0, rect.y0 + 10.0, rect.x1 - 10.0, rect.y0 + 34.0);
             let grid_r = Rect::new(rect.x0 + 10.0, rect.y0 + 44.0, rect.x1 - 10.0, rect.y1 - 6.0);
-            let (cw, ch) = (grid_r.width() / 8.0, grid_r.height() / 2.0);
+            let cw = grid_r.width() / cols as f64;
             let knobs = (0..MACROS as u8)
                 .map(|i| {
-                    let (col, row) = ((i % 8) as f64, (i / 8) as f64);
+                    let (col, row) = ((i as usize % cols) as f64, (i as usize / cols) as f64);
                     let x = grid_r.x0 + col * cw;
-                    let y = grid_r.y0 + row * ch;
-                    (i, Rect::new(x, y, x + cw, y + ch))
+                    let y = grid_r.y0 + row * CELL_H;
+                    (i, Rect::new(x, y, x + cw, y + CELL_H))
                 })
                 .collect();
             Section { grid: *g, rect, open, knobs }
         })
         .collect();
-    let fader = Rect::new(track_card.x0 + 34.0, track_card.y0 + 46.0, track_card.x0 + 40.0, track_card.y1 - 40.0);
-    let pan = Rect::new(track_card.x1 - 64.0, track_card.y1 - 90.0, track_card.x1 - 10.0, track_card.y1 - 10.0);
-    MacroLayout { track: track.filter(|t| doc.tracks.contains_key(t)), learn, sections, track_card, fader, pan }
+    let fader = Rect::new(track_card.x0 + 28.0, track_card.y0 + 42.0, track_card.x0 + 34.0, track_card.y1 - 14.0);
+    let pan = Rect::new(track_card.x1 - 84.0, track_card.y0 + 36.0, track_card.x1 - 14.0, track_card.y1 - 6.0);
+    MacroLayout {
+        track: track.filter(|t| doc.tracks.contains_key(t)),
+        learn,
+        body,
+        max_scroll,
+        sections,
+        track_card,
+        fader,
+        pan,
+    }
 }
 
 /// The colour of a grid kind's macros.
@@ -156,7 +182,8 @@ pub fn kind_color(kind: GridKind) -> Rgba {
     }
 }
 
-/// Draws the page in panel `r` and returns its layout.
+/// Draws the inspector in the sidebar `r` and returns its layout.
+#[allow(clippy::too_many_arguments)]
 pub fn draw(
     p: &mut Painter<'_>,
     th: &Theme,
@@ -164,24 +191,14 @@ pub fn draw(
     track: Option<TrackId>,
     on_screen: Option<GridId>,
     learn: bool,
+    scroll: f64,
     r: Rect,
 ) -> MacroLayout {
     let c = &th.c;
-    let l = layout(doc, track, on_screen, r);
-    let (bar, x) = panel::draw_bar(p, th, r, PanelView::Macros);
-    let cy = bar.center().y;
-    let mut x = x;
-    if let Some(tr) = l.track.and_then(|t| doc.tracks.get(&t)) {
-        p.rrect(Rect::new(x, cy - 5.0, x + 10.0, cy + 5.0), 2.0, th.track(tr.color.0));
-        x += 18.0;
-    }
-    x += p.text(x, cy, "macros", &TextStyle::mono(12.0, c.text_max).medium(), Align::Left) + 10.0;
-    let sub = match l.track.and_then(|t| doc.tracks.get(&t)) {
-        Some(tr) if learn => format!("{} · learn: touch a parameter to map it · click a macro to clear it", tr.name),
-        Some(tr) => format!("{} · 16 per grid", tr.name),
-        None => "select a track".into(),
-    };
-    p.text(x, cy, &sub, &TextStyle::mono(11.0, if learn { c.accent_primary } else { c.text_secondary }), Align::Left);
+    let l = layout(doc, track, on_screen, r, scroll);
+    let tr = l.track.and_then(|t| doc.tracks.get(&t));
+    let name = tr.map(|t| t.name.as_str()).unwrap_or("no track");
+    crate::dock::side_header(p, th, r, tr.map(|t| th.track(t.color.0)), name, "macros", l.learn.x0 - 6.0);
     // learn button
     let lb = l.learn;
     if learn {
@@ -193,7 +210,20 @@ pub fn draw(
     }
     let lc = if learn { c.accent_primary } else { c.text_strong };
     p.text(lb.center().x, lb.center().y, "learn", &TextStyle::mono(12.0, lc), Align::Center);
+    p.clip(l.body, |p| draw_body(p, th, doc, &l, learn));
+    if l.max_scroll > 0.0 {
+        let track = Rect::new(r.x1 - 4.0, l.body.y0 + 2.0, r.x1 - 2.0, l.body.y1 - 2.0);
+        let frac = l.body.height() / (l.body.height() + l.max_scroll);
+        let at = (l.body.y0 + 10.0 - l.track_card.y0) / l.max_scroll;
+        let h = (track.height() * frac).max(24.0);
+        let y = track.y0 + (track.height() - h) * at.clamp(0.0, 1.0);
+        p.rrect(Rect::new(track.x0, y, track.x1, y + h), 1.0, c.border_strong.alpha(0.6));
+    }
+    l
+}
 
+fn draw_body(p: &mut Painter<'_>, th: &Theme, doc: &Document, l: &MacroLayout, learn: bool) {
+    let c = &th.c;
     for s in &l.sections {
         let g = &doc.grids[&s.grid];
         let col = kind_color(g.kind);
@@ -202,18 +232,19 @@ pub fn draw(
         let hy = s.rect.y0 + 22.0;
         p.circle(Point::new(s.rect.x0 + 16.0, hy), 4.0, col);
         let title = match g.kind {
-            GridKind::Source => "source grid",
-            GridKind::Instrument => "instrument grid",
-            GridKind::Fx => "fx grid",
+            GridKind::Source => "source",
+            GridKind::Instrument => "instrument",
+            GridKind::Fx => "fx",
         };
         let w = p.text(s.rect.x0 + 28.0, hy, title, &TextStyle::mono(12.0, c.text_max).medium(), Align::Left);
         let what = match g.kind {
             GridKind::Instrument => sat_modules::instrument::label(doc, s.grid).unwrap_or_else(|| "empty".into()),
             _ => doc.tracks.get(&g.track).map(|t| t.name.clone()).unwrap_or_default(),
         };
-        p.text(s.rect.x0 + 36.0 + w, hy, &what, &TextStyle::mono(11.0, c.text_secondary), Align::Left);
         let count = format!("{}/16", g.slots.len());
-        p.text(s.open.x0 - 10.0, hy, &count, &TextStyle::mono(11.0, c.text_secondary), Align::Right);
+        let cw = p.text(s.open.x0 - 10.0, hy, &count, &TextStyle::mono(11.0, c.text_secondary), Align::Right);
+        let room = s.open.x0 - 20.0 - cw - (s.rect.x0 + 36.0 + w);
+        p.text_fit(s.rect.x0 + 36.0 + w, hy, &what, &TextStyle::mono(11.0, c.text_secondary), room.max(0.0));
         p.rrect(s.open, 5.0, c.bg_control);
         p.rrect_stroke(s.open.inset(-0.5), 5.0, 1.0, c.border_strong.alpha(0.6));
         p.text(s.open.center().x, s.open.center().y, "open", &TextStyle::mono(12.0, c.text_strong), Align::Center);
@@ -249,7 +280,7 @@ pub fn draw(
         }
     }
     if l.sections.is_empty() {
-        let at = Rect::new(r.x0, bar.y1, l.track_card.x0, r.y1).center();
+        let at = Rect::new(l.body.x0, l.track_card.y1, l.body.x1, l.body.y1).center();
         p.text(at.x, at.y, "select a track to see its macros", &TextStyle::mono(12.0, c.text_secondary), Align::Center);
     }
     // track: fader and pan
@@ -259,6 +290,10 @@ pub fn draw(
     let hy = tc.y0 + 22.0;
     p.circle(Point::new(tc.x0 + 16.0, hy), 4.0, c.text_secondary);
     p.text(tc.x0 + 28.0, hy, "track", &TextStyle::mono(12.0, c.text_max).medium(), Align::Left);
+    if learn {
+        let tip = "touch a parameter to map it";
+        p.text(tc.x1 - 12.0, hy, tip, &TextStyle::mono(10.5, c.accent_primary), Align::Right);
+    }
     if let Some(tr) = l.track.and_then(|t| doc.tracks.get(&t)) {
         p.rrect(l.fader, 3.0, Rgba::hex(0x0a0a0a));
         p.rrect_stroke(l.fader.inset(-0.5), 3.0, 1.0, Rgba::hex(0x262626));
@@ -268,15 +303,15 @@ pub fn draw(
         p.rrect(fill, 2.0, Rgba::hex(0x4caf50).alpha(0.7));
         let cap = Rect::new(l.fader.center().x - 11.0, fy - 5.0, l.fader.center().x + 11.0, fy + 5.0);
         p.rrect(cap, 2.0, Rgba::hex(0xc8c8c8));
-        let fx = l.fader.center().x;
-        p.text(fx, tc.y1 - 26.0, "level", &TextStyle::mono(11.0, c.text_secondary), Align::Center);
+        let lx = l.fader.x1 + 22.0;
+        let my = l.fader.center().y;
+        p.text(lx, my - 8.0, "level", &TextStyle::mono(11.0, c.text_secondary), Align::Left);
         let db = controls::fmt_db(tr.mixer.gain_db);
-        p.text(fx, tc.y1 - 12.0, &db, &TextStyle::mono(11.0, c.text_strong), Align::Center);
+        p.text(lx, my + 8.0, &db, &TextStyle::mono(12.0, c.text_strong), Align::Left);
         let kc = Section::knob_center(l.pan);
         controls::knob(p, kc, KNOB, controls::pan_pos(tr.mixer.pan), Rgba::hex(0xd8d8d8));
         p.text(kc.x, kc.y + KNOB / 2.0 + 12.0, "pan", &TextStyle::mono(11.0, c.text_secondary), Align::Center);
         let pan = sat_modules::spec::p("pan", "pan", -1.0, 1.0, 0.0, sat_modules::Unit::Pan).show(tr.mixer.pan);
         p.text(kc.x, kc.y + KNOB / 2.0 + 27.0, &pan, &TextStyle::mono(11.0, c.text_strong), Align::Center);
     }
-    l
 }
