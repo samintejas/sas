@@ -450,7 +450,7 @@ mod macros {
         let track = d.doc.clips[&d.selected].track;
         let tr = &d.doc.tracks[&track];
         let side = Rect::new(1120.0, 44.0, 1436.0, 896.0);
-        let l = layout(&d.doc, Some(track), None, side, 0.0);
+        let l = layout(&d.doc, Some(track), None, side, 0.0, 0);
         let grids: Vec<_> = l.sections.iter().map(|s| s.grid).collect();
         assert_eq!(grids, vec![tr.source_grid.unwrap(), tr.instrument_grid.unwrap()]);
         let ins = &l.sections[1];
@@ -465,11 +465,18 @@ mod macros {
         assert!(l.sections.iter().all(|s| s.rect.x1 <= side.x1), "and fit the sidebar");
         // a short sidebar scrolls; scrolled, the knobs move up with it
         assert!(l.max_scroll > 20.0, "{}", l.max_scroll);
-        let down = layout(&d.doc, Some(track), None, side, 20.0);
+        let down = layout(&d.doc, Some(track), None, side, 20.0, 0);
         assert_eq!(down.sections[1].knobs[2].1.y0, ins.knobs[2].1.y0 - 20.0);
         // a wide one lays the macros out eight to a row
-        let wide = layout(&d.doc, Some(track), None, Rect::new(0.0, 44.0, 640.0, 896.0), 0.0);
+        let wide = layout(&d.doc, Some(track), None, Rect::new(0.0, 44.0, 640.0, 896.0), 0.0, 0);
         assert_eq!(wide.sections[0].knobs[7].1.y0, wide.sections[0].knobs[0].1.y0);
+        // a folded section keeps only its heading, which unfolds it
+        let src = sat_ui::macros::Fold::grid(sat_doc::GridKind::Source);
+        let folded = layout(&d.doc, Some(track), None, side, 0.0, src);
+        assert!(folded.sections[0].knobs.is_empty());
+        assert_eq!(folded.sections[0].rect.height(), sat_ui::macros::FOLDED_H);
+        assert_eq!(folded.hit(folded.sections[0].rect.center()), MacroHit::Fold(src));
+        assert!(folded.sections[1].rect.y0 < l.sections[1].rect.y0, "the next section moves up");
         // with an fx grid on screen, the page shows that grid; a bus shows its fx grid
         let fx = tr.fx_grids[0];
         assert_eq!(grids_for(&d.doc, Some(track), Some(fx)), vec![fx]);

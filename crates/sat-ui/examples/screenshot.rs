@@ -11,6 +11,8 @@
 //! (main view zoomed), `tall` (a 480 px panel). The panel is drawn at the
 //! height of the editor it shows (`tall` sets the piano roll's).
 //! `SAT_MENU=main|panel|left` draws that area's editor-type menu open.
+//! `SAT_DOCK=outliner` puts the outliner in the left sidebar; `SAT_FOLDS=<mask>`
+//! folds inspector sections; `SAT_UI_SCALE` sets the interface scale (0.9).
 
 use sat_doc::sat_time::Ticks;
 use sat_ui::arrange::{ArrangeState, TransportView};
@@ -35,6 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let has = |w: &str| words.split(',').any(|x| x.trim() == w);
     let dock = Dock {
         left_open: !has("noleft"),
+        left_shows: if has("outliner") { sat_ui::area::EditorType::Outliner } else { sat_ui::area::EditorType::Bank },
         right_open: has("right") || view == "macros",
         panel_open: !has("collapsed"),
         roll_h: if has("tall") { 480.0 } else { sat_ui::dock::PANEL_H },
@@ -86,7 +89,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     // SAT_PALETTE=<query> draws the command palette open with that query
     let palette = std::env::var("SAT_PALETTE").ok().map(|query| sat_ui::palette::PaletteView { query, index: 0 });
-    let (w, h) = (1440.0, 900.0);
+    // SAT_UI_SCALE: the app's interface scale (0.9 by default), so a
+    // screenshot shows as much as the window does
+    let scale_ui: f64 = std::env::var("SAT_UI_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.9);
+    let (w, h) = (1440.0 / scale_ui, 900.0 / scale_ui);
     let levels = sat_ui::demo::levels(&demo.doc);
     let mut dock = dock;
     dock.panel_h = dock.target(shell::panel_kind(&demo.doc, panel, state.selected_clip));
@@ -104,6 +110,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok("left") => Some(sat_ui::area::Slot::Left),
             _ => None,
         },
+        outline_scroll: 0.0,
+        macro_folds: std::env::var("SAT_FOLDS").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
+        pointer: vello::kurbo::Point::new(700.0, 300.0),
+        status: "built-in output @ 48000 Hz",
+        ui_scale: scale_ui,
         panel,
         mixer_scroll: 0.0,
         levels: &levels,
@@ -125,8 +136,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let build = t.elapsed();
     let mut gpu = Gpu::headless()?;
     let t = std::time::Instant::now();
+    let px = scale * scale_ui;
     let img =
-        gpu.render_rgba(&scaled(&scene, scale), (w * scale) as u32, (h * scale) as u32, color(theme.c.bg_base))?;
+        gpu.render_rgba(&scaled(&scene, px), (w * px).round() as u32, (h * px).round() as u32, color(theme.c.bg_base))?;
     println!(
         "{}: scene {:.1} ms, render {:.1} ms",
         gpu.adapter_name,

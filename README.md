@@ -184,6 +184,10 @@ the app: the device's rate).
 | click a mixer strip, or a track in the list beside a grid, while a grid is shown | the grid follows to that track (its fx grid if it has none of that kind); the list's m / s buttons mute and solo |
 | Esc in a grid with nothing selected, or its back button | back to the arrangement or session it was opened from |
 | an area's editor-type button (left of its header) | swap what the area shows: arrange, session or a grid in the main view; clip editor or mixer in the bottom panel; clip bank or inspector in either sidebar |
+| the icon strips at the window's left and right edges | open the clip bank, outliner or inspector in that side's sidebar (click again to close); the icons at the foot of the left strip open the mixer or clip editor in the bottom panel |
+| outliner: chevron, m / s, click, double-click | fold a group (the arrangement folds with it), mute / solo, select, open the track |
+| a section heading in the inspector or a track heading in the clip bank | fold it away or back |
+| Ctrl+= / Ctrl+- / Ctrl+0 | interface scale up / down / back to 90% (a window opens a little under the display's scale so more fits) |
 | Tab | switch the bottom panel between the clip editor and the mixer (a collapsed panel opens) |
 | the bottom panel's height | each editor keeps its own: the piano roll, audio editor and mixer remember the height you drag them to, step editors fit their content; the panel eases between them |
 | drag the bottom panel's top edge or a sidebar's inner edge | resize it; dragged far enough it collapses or closes; double-click the edge to collapse or close |

@@ -91,6 +91,9 @@ const METER_FALL_DB: f32 = 24.0;
 /// Pixels of knob travel for its full range.
 const KNOB_TRAVEL: f64 = 160.0;
 const DOUBLE_CLICK: Duration = Duration::from_millis(350);
+/// The interface scale a window opens at: a little under the display's,
+/// so more fits in one window.
+const UI_SCALE: f64 = 0.9;
 
 /// Audio and transport, tied to one compiled schedule.
 struct Playback {
@@ -390,6 +393,13 @@ struct App {
     menu_layout: Option<MenuLayout>,
     /// The bottom panel is easing to a new height.
     animating: bool,
+    /// The interface scale on top of the display's (ctrl = / ctrl - / ctrl 0).
+    ui_scale: f64,
+    /// The outliner's scroll and layout.
+    outline_scroll: f64,
+    outline_layout: Option<sat_ui::outliner::OutlineLayout>,
+    /// The inspector's folded sections.
+    macro_folds: u8,
     mixer_scroll: f64,
     levels: Levels,
     playback: Playback,
@@ -716,7 +726,7 @@ impl App {
         // the bottom panel eases to the height of the editor it shows
         let kind = shell::panel_kind(self.history.doc(), self.panel, self.arrange.selected_clip);
         self.animating = self.dock_drag.is_none() && self.dock.ease(kind, (dt as f64).min(0.05));
-        let scale = g.window.scale_factor();
+        let scale = g.window.scale_factor() * self.ui_scale;
         let (w, h) = (size.width as f64 / scale, size.height as f64 / scale);
         self.session.advance(self.history.doc(), self.playback.playhead());
         let plugin_views = self.playback.hosts.views();
@@ -733,6 +743,11 @@ impl App {
             macro_scroll: self.macro_scroll,
             focus: self.focus,
             menu: self.menu,
+            outline_scroll: self.outline_scroll,
+            macro_folds: self.macro_folds,
+            pointer: self.cursor,
+            status: &self.playback.status,
+            ui_scale: self.ui_scale,
             panel: self.panel,
             mixer_scroll: self.mixer_scroll,
             levels: &self.levels,
@@ -778,6 +793,10 @@ impl App {
         self.session_layout = drawn.session;
         self.palette_layout = drawn.palette;
         self.menu_layout = drawn.menu;
+        if let Some(o) = &drawn.outline {
+            self.outline_scroll = self.outline_scroll.min(o.max_scroll);
+        }
+        self.outline_layout = drawn.outline;
         if let Some(b) = &drawn.bank {
             self.bank.scroll = self.bank.scroll.min(b.max_scroll);
         }
@@ -1296,6 +1315,9 @@ impl App {
             }
             return;
         }
+        if let Some((target, ty, _)) = shell::strip_buttons(&sl).into_iter().find(|(_, _, r)| r.contains(pt)) {
+            return self.press_strip(sl, target, ty);
+        }
         let slot = sl.slot_at(pt);
         if let Some(s) = slot {
             self.focus = s;
@@ -1323,6 +1345,7 @@ impl App {
             }
             return match self.dock.side_shows(side) {
                 EditorType::Inspector => self.press_macros(pt, double),
+                EditorType::Outliner => self.press_outline(pt, double),
                 _ => self.press_bank(pt, double),
             };
         }
@@ -1654,6 +1677,11 @@ impl App {
                     self.bank.selected = Some(id);
                 }
             }
+            BankHit::Fold(t) => {
+                if !self.bank.folded.remove(&t) {
+                    self.bank.folded.insert(t);
+                }
+            }
             BankHit::Nothing => self.bank.selected = None,
         }
     }
@@ -1880,6 +1908,7 @@ impl App {
                 self.begin_drag(ParamTarget::Gain(t), Axis::Vertical { travel: l.fader.height() }, double)
             }
             MacroHit::Pan(t) => self.begin_drag(ParamTarget::Pan(t), Axis::Vertical { travel: KNOB_TRAVEL }, double),
+            MacroHit::Fold(bit) => self.macro_folds ^= bit,
             MacroHit::Nothing => {}
         }
     }
@@ -2371,6 +2400,49 @@ impl App {
         self.update_title();
     }
 
+    /// An icon in an edge strip: opens its editor in its space, or closes
+    /// the space when that editor already shows there.
+    fn press_strip(&mut self, sl: ShellLayout, target: shell::StripTarget, ty: EditorType) {
+        match target {
+            shell::StripTarget::Side(side) => {
+                if self.dock.side_open(side) && self.dock.side_shows(side) == ty {
+                    self.dock.set_side(side, false);
+                } else {
+                    self.dock.set_side_shows(side, ty);
+                    if self.dock.zoom == Some(Zoom::Main) {
+                        self.dock.zoom = None;
+                    }
+                    self.dock.set_side(side, true);
+                }
+            }
+            shell::StripTarget::Panel => {
+                if sl.panel_open() && self.panel.editor() == ty {
+                    self.dock.toggle_panel();
+                } else {
+                    self.show_editor(Slot::Panel, ty);
+                }
+            }
+        }
+    }
+
+    /// A press in the outliner.
+    fn press_outline(&mut self, pt: Point, double: bool) {
+        use sat_ui::outliner::OutlineHit;
+        let Some(l) = self.outline_layout.clone() else { return };
+        match l.hit(pt) {
+            OutlineHit::Row(t) if double => self.open_track(t),
+            OutlineHit::Row(t) => self.select_track(t),
+            OutlineHit::Fold(t) => {
+                if !self.arrange.collapsed.remove(&t) {
+                    self.arrange.collapsed.insert(t);
+                }
+            }
+            OutlineHit::Mute(t) => self.toggle_flag(t, TrackFlag::Mute),
+            OutlineHit::Solo(t) => self.toggle_flag(t, TrackFlag::Solo),
+            OutlineHit::Nothing => {}
+        }
+    }
+
     /// Shows `ty` in the area `slot` (from its editor-type menu).
     fn show_editor(&mut self, slot: Slot, ty: EditorType) {
         let track = self.arrange.selected_track;
@@ -2407,7 +2479,7 @@ impl App {
     fn window_size(&self) -> (f64, f64) {
         let Some(g) = &self.gfx else { return (1440.0, 900.0) };
         let s = g.window.inner_size();
-        let k = g.window.scale_factor();
+        let k = g.window.scale_factor() * self.ui_scale;
         (s.width as f64 / k, s.height as f64 / k)
     }
 
@@ -2460,6 +2532,15 @@ impl App {
                 return self.dock.toggle_side(side);
             }
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("j") => return self.dock.toggle_panel(),
+            // interface scale, like a browser's zoom
+            Key::Character(c) if ctrl && matches!(c.as_str(), "=" | "+" | "-" | "0") => {
+                self.ui_scale = match c.as_str() {
+                    "0" => UI_SCALE,
+                    "-" => (self.ui_scale - 0.05).max(0.7),
+                    _ => (self.ui_scale + 0.05).min(1.4),
+                };
+                return;
+            }
             Key::Named(NamedKey::Space) if ctrl => {
                 // maximize the area under the pointer; again restores
                 let over_panel = self.shell.is_some_and(|sl| sl.panel.contains(self.cursor));
@@ -2550,6 +2631,9 @@ impl App {
             if self.dock.side_shows(side) == EditorType::Inspector {
                 let max = self.macro_layout.as_ref().map_or(0.0, |m| m.max_scroll);
                 self.macro_scroll = (self.macro_scroll - dy).clamp(0.0, max);
+            } else if self.dock.side_shows(side) == EditorType::Outliner {
+                let max = self.outline_layout.as_ref().map_or(0.0, |o| o.max_scroll);
+                self.outline_scroll = (self.outline_scroll - dy).clamp(0.0, max);
             } else {
                 let max = self.bank_layout.as_ref().map_or(0.0, |b| b.max_scroll);
                 self.bank.scroll = (self.bank.scroll - dy).clamp(0.0, max);
@@ -2641,7 +2725,7 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(_) => {}
             WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
             WindowEvent::CursorMoved { position, .. } => {
-                let scale = self.gfx.as_ref().map(|g| g.window.scale_factor()).unwrap_or(1.0);
+                let scale = self.gfx.as_ref().map(|g| g.window.scale_factor()).unwrap_or(1.0) * self.ui_scale;
                 self.cursor = Point::new(position.x / scale, position.y / scale);
                 dirty = self.drag.is_some()
                     || self.roll_drag.is_some()
@@ -2823,6 +2907,10 @@ fn main() {
         menu: None,
         menu_layout: None,
         animating: false,
+        ui_scale: UI_SCALE,
+        outline_scroll: 0.0,
+        outline_layout: None,
+        macro_folds: 0,
         mixer_scroll: 0.0,
         levels: HashMap::new(),
         playback,

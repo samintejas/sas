@@ -20,6 +20,40 @@ use crate::steps::{self, StepGeom, StepView};
 
 /// Height of the top bar.
 pub const TOPBAR_H: f64 = 40.0;
+/// Width of the icon strips at the window's left and right edges.
+pub const STRIP_W: f64 = 36.0;
+/// Height of the status bar along the bottom.
+pub const STATUS_H: f64 = 24.0;
+
+/// What an icon in an edge strip opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StripTarget {
+    /// A sidebar.
+    Side(Side),
+    /// The bottom panel.
+    Panel,
+}
+
+/// The icons in the edge strips: each opens an editor in its space (or
+/// closes it when it is already open there), like Blender's editor tabs.
+/// The left strip opens editors in the left sidebar and, at its foot, the
+/// bottom panel; the right strip opens editors in the right sidebar.
+pub fn strip_buttons(sl: &ShellLayout) -> Vec<(StripTarget, EditorType, Rect)> {
+    let b = |r: Rect, k: f64, from_bottom: bool| {
+        let y = if from_bottom { r.y1 - 6.0 - (k + 1.0) * 34.0 } else { r.y0 + 6.0 + k * 34.0 };
+        Rect::new(r.x0 + 4.0, y, r.x1 - 4.0, y + 30.0)
+    };
+    let sides = [EditorType::Bank, EditorType::Outliner, EditorType::Inspector];
+    let mut out = Vec::new();
+    for (k, ty) in sides.iter().enumerate() {
+        out.push((StripTarget::Side(Side::Left), *ty, b(sl.strip_left, k as f64, false)));
+        out.push((StripTarget::Side(Side::Right), *ty, b(sl.strip_right, k as f64, false)));
+    }
+    for (k, ty) in [EditorType::Mixer, EditorType::Clip].iter().enumerate() {
+        out.push((StripTarget::Panel, *ty, b(sl.strip_left, k as f64, true)));
+    }
+    out
+}
 
 /// What the main area shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -126,6 +160,16 @@ pub struct Frame<'a> {
     pub focus: Slot,
     /// The area whose editor-type menu is open.
     pub menu: Option<Slot>,
+    /// Vertical scroll of the outliner.
+    pub outline_scroll: f64,
+    /// The inspector's folded sections (see [`crate::macros::Fold`]).
+    pub macro_folds: u8,
+    /// The pointer, for the status bar's hints.
+    pub pointer: Point,
+    /// The audio device, for the status bar.
+    pub status: &'a str,
+    /// The interface scale, for the status bar.
+    pub ui_scale: f64,
     /// What the bottom panel shows.
     pub panel: PanelView,
     /// Horizontal scroll of the mixer.
@@ -184,6 +228,8 @@ pub struct Drawn {
     pub palette: Option<crate::palette::PaletteLayout>,
     /// The editor-type menu, when open.
     pub menu: Option<crate::area::MenuLayout>,
+    /// The outliner, when a sidebar shows it.
+    pub outline: Option<crate::outliner::OutlineLayout>,
     /// The clip bank, when a sidebar shows it.
     pub bank: Option<crate::bank::BankLayout>,
 }
@@ -203,6 +249,12 @@ pub struct ShellLayout {
     pub left: Option<Rect>,
     /// Right sidebar (inspector), when it shows.
     pub right: Option<Rect>,
+    /// The icon strip at the left edge.
+    pub strip_left: Rect,
+    /// The icon strip at the right edge.
+    pub strip_right: Rect,
+    /// The status bar along the bottom.
+    pub status: Rect,
     /// The dock the layout was made from.
     pub dock: Dock,
 }
@@ -211,9 +263,13 @@ impl ShellLayout {
     /// Splits a window of `w`×`h` by `dock`.
     pub fn new(w: f64, h: f64, dock: &Dock) -> ShellLayout {
         let topbar = Rect::new(0.0, 0.0, w, TOPBAR_H);
-        let (y0, y1) = (TOPBAR_H + GAP, h - GAP);
+        let status = Rect::new(0.0, h - STATUS_H, w, h);
+        let strip_left = Rect::new(0.0, TOPBAR_H, STRIP_W, status.y0);
+        let strip_right = Rect::new(w - STRIP_W, TOPBAR_H, w, status.y0);
+        let (y0, y1) = (TOPBAR_H + GAP, status.y0 - GAP);
+        let (x0, x1) = (strip_left.x1, strip_right.x0);
         // the main view keeps some width when both sidebars are wide
-        let room = (w - 2.0 * GAP - 360.0).max(0.0);
+        let room = (x1 - x0 - 2.0 * GAP - 360.0).max(0.0);
         let mut lw = if dock.side_open(Side::Left) { dock.left_w } else { 0.0 };
         let mut rw = if dock.side_open(Side::Right) { dock.right_w } else { 0.0 };
         if lw + rw > room && lw + rw > 0.0 {
@@ -221,16 +277,16 @@ impl ShellLayout {
             lw *= k;
             rw *= k;
         }
-        let left = (lw > 0.0).then(|| Rect::new(GAP, y0, GAP + lw, y1));
-        let right = (rw > 0.0).then(|| Rect::new(w - GAP - rw, y0, w - GAP, y1));
-        let cx0 = left.map_or(GAP, |r| r.x1 + GAP);
-        let cx1 = right.map_or(w - GAP, |r| r.x0 - GAP);
+        let left = (lw > 0.0).then(|| Rect::new(x0, y0, x0 + lw, y1));
+        let right = (rw > 0.0).then(|| Rect::new(x1 - rw, y0, x1, y1));
+        let cx0 = left.map_or(x0, |r| r.x1 + GAP);
+        let cx1 = right.map_or(x1, |r| r.x0 - GAP);
         let (arrange, panel) = match dock.zoom {
             Some(Zoom::Main) => (Rect::new(cx0, y0, cx1, y1), Rect::new(cx0, y1, cx1, y1)),
             Some(Zoom::Panel) => (Rect::new(cx0, y0, cx1, y0), Rect::new(cx0, y0, cx1, y1)),
             None => {
                 let ph = if dock.panel_open {
-                    dock.panel_h.min(h - TOPBAR_H - dock::MAIN_MIN).max(crate::panel::TABS_H)
+                    dock.panel_h.min(y1 - y0 - dock::MAIN_MIN).max(crate::panel::TABS_H)
                 } else {
                     crate::panel::TABS_H
                 };
@@ -238,7 +294,7 @@ impl ShellLayout {
                 (Rect::new(cx0, y0, cx1, panel.y0 - GAP), panel)
             }
         };
-        ShellLayout { topbar, arrange, panel, left, right, dock: *dock }
+        ShellLayout { topbar, arrange, panel, left, right, strip_left, strip_right, status, dock: *dock }
     }
 
     /// The rectangle of an area, when it shows.
@@ -486,6 +542,7 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
     let mut sg = None;
     let mut mc = None;
     let mut bk = None;
+    let mut ol = None;
     let on_screen = match f.view {
         MainView::Grid(g) => Some(g),
         MainView::Arrange | MainView::Session => None,
@@ -526,14 +583,21 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
         match f.dock.side_shows(side) {
             EditorType::Inspector => {
                 let track = f.arrange.selected_track;
+                let (scroll, folds) = (f.macro_scroll, f.macro_folds);
                 p.clip(r, |p| {
-                    mc = Some(crate::macros::draw(p, th, f.doc, track, on_screen, f.learn, f.macro_scroll, r))
+                    mc = Some(crate::macros::draw(p, th, f.doc, track, on_screen, f.learn, scroll, folds, r))
                 });
+            }
+            EditorType::Outliner => {
+                let (folded, sel, scroll) = (&f.arrange.collapsed, f.arrange.selected_track, f.outline_scroll);
+                p.clip(r, |p| ol = Some(crate::outliner::draw(p, th, f.doc, folded, sel, scroll, r)));
             }
             _ => p.clip(r, |p| bk = Some(crate::bank::draw(p, th, f.doc, f.bank, r))),
         }
         crate::area::finish(&mut p, th, r);
     }
+    strips(&mut p, th, f, &sl);
+    status_bar(&mut p, th, f, &sl);
     // the area with focus: where keys go
     if let Some(r) = sl.slot_rect(f.focus).filter(|r| r.height() > 0.0) {
         crate::area::focus(&mut p, th, r);
@@ -568,8 +632,83 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
         session: ssl,
         palette: pl,
         bank: bk,
+        outline: ol,
         menu,
     }
+}
+
+/// Draws the edge strips' icons, the open ones lit.
+fn strips(p: &mut Painter<'_>, th: &Theme, f: &Frame<'_>, sl: &ShellLayout) {
+    let c = &th.c;
+    for r in [sl.strip_left, sl.strip_right] {
+        p.rect(r, c.bg_base);
+    }
+    let d = &f.dock;
+    for (target, ty, r) in strip_buttons(sl) {
+        let on = match target {
+            StripTarget::Side(s) => d.side_open(s) && d.side_shows(s) == ty,
+            StripTarget::Panel => sl.panel_open() && f.panel.editor() == ty,
+        };
+        if on {
+            p.rrect(r, 6.0, c.bg_raised);
+            let bar = match target {
+                StripTarget::Side(Side::Right) => Rect::new(r.x1 + 2.0, r.y0 + 6.0, r.x1 + 4.0, r.y1 - 6.0),
+                _ => Rect::new(r.x0 - 4.0, r.y0 + 6.0, r.x0 - 2.0, r.y1 - 6.0),
+            };
+            p.rect(bar, c.accent_primary);
+        }
+        let col = if on { c.text_max } else { c.text_secondary };
+        icons::draw(p, ty.icon(), Rect::from_center_size(r.center(), (15.0, 15.0)), col);
+    }
+    // a rule between the sidebar editors and the bottom panel's
+    let y = strip_buttons(sl)
+        .iter()
+        .filter(|(t, _, _)| *t == StripTarget::Panel)
+        .map(|(_, _, r)| r.y0)
+        .fold(f64::MAX, f64::min);
+    p.hline(sl.strip_left.x0 + 9.0, sl.strip_left.x1 - 9.0, y - 6.0, c.border_default);
+}
+
+/// What the status bar says about the area under the pointer.
+fn hint(ty: EditorType) -> &'static str {
+    match ty {
+        EditorType::Arrange => {
+            "click a clip to edit it · drag to move, edges to trim · alt drag copies · double-click a lane draws"
+        }
+        EditorType::Session => "click a slot to launch it · a scene launches its row · drag clips in from the bank",
+        EditorType::SourceGrid | EditorType::InstrumentGrid | EditorType::FxGrid => {
+            "drag from an out port to an in port of the same colour · drag a wire off to unplug · delete removes a module"
+        }
+        EditorType::Clip => {
+            "click to draw · drag notes to move, edges to resize · shift arrows: octave · double-click deletes"
+        }
+        EditorType::Mixer => "drag faders and knobs · shift: fine · double-click resets · src / ins / fx open grids",
+        EditorType::Bank => "drag a clip onto its lane or a slot · double-click places it at the playhead · + new clip",
+        EditorType::Inspector => "drag a macro · learn maps the next touched parameter · click a heading to fold it",
+        EditorType::Outliner => "click selects · double-click opens the track · chevrons fold groups · m / s",
+    }
+}
+
+/// Draws the status bar: hints for the area under the pointer, then the
+/// project and the audio device.
+fn status_bar(p: &mut Painter<'_>, th: &Theme, f: &Frame<'_>, sl: &ShellLayout) {
+    let c = &th.c;
+    let r = sl.status;
+    p.rect(r, c.bg_base);
+    p.hline(r.x0, r.x1, r.y0, c.border_subtle);
+    let cy = r.center().y;
+    let st = TextStyle::mono(10.5, c.text_secondary);
+    let keys = "ctrl space maximize · ctrl j panel · ctrl k commands";
+    let tracks = f.doc.tracks.values().filter(|t| t.kind == sat_doc::TrackKind::Track).count();
+    let right = format!("{tracks} tracks · {} clips · {} · {:.0}%", f.doc.clips.len(), f.status, f.ui_scale * 100.0);
+    let rw = p.text(r.x1 - 12.0, cy, &right, &st, Align::Right);
+    let slot = sl.slot_at(f.pointer).unwrap_or(f.focus);
+    let ty = editor_in(f.doc, f.view, f.panel, &f.dock, slot);
+    let x = r.x0 + 12.0;
+    let lw = p.text(x, cy, ty.label(), &TextStyle::mono(10.5, c.accent_primary), Align::Left);
+    let room = r.x1 - 24.0 - rw - (x + lw + 10.0);
+    let text = format!("{} · {keys}", hint(ty));
+    p.text_fit(x + lw + 10.0, cy, &text, &st, room);
 }
 
 /// What the main view shows, as an editor type.

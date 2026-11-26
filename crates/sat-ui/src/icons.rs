@@ -50,6 +50,16 @@ pub enum Icon {
     Pulse,
     /// Power switch (bypass).
     Power,
+    /// A tree of rows (outliner).
+    Tree,
+    /// Cards (clip bank).
+    Cards,
+    /// A knob (inspector).
+    Knob,
+    /// Piano keys (clip editor).
+    Keys,
+    /// Up chevron.
+    ChevronUp,
 }
 
 /// Draws `icon` centred in `r`.
@@ -167,6 +177,36 @@ pub fn draw(p: &mut Painter<'_>, icon: Icon, r: Rect, c: Rgba) {
             p.polyline(&pts, w, c);
             p.line(pt(0.0, -0.7), pt(0.0, -0.1), w, c);
         }
+        Icon::Tree => {
+            for (i, x) in [-0.6, -0.25, -0.25, -0.6].iter().enumerate() {
+                let y = -0.55 + i as f64 * 0.37;
+                p.circle(pt(*x, y), 0.09 * s, c);
+                p.line(pt(x + 0.2, y), pt(0.65, y), w, c);
+            }
+            p.line(pt(-0.6, -0.45), pt(-0.6, 0.0), 1.0, c);
+            p.line(pt(-0.6, -0.18), pt(-0.35, -0.18), 1.0, c);
+        }
+        Icon::Cards => {
+            for (x, y) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+                let q = Rect::from_center_size(pt(x * 0.36, y * 0.33), (0.6 * s, 0.5 * s));
+                p.rrect_stroke(q, 1.5, 1.0, c);
+                p.rect(Rect::new(q.x0, q.y0, q.x1, q.y0 + 0.16 * s), c);
+            }
+        }
+        Icon::Knob => {
+            p.circle_stroke(r.center(), 0.55 * s, w, c);
+            p.line(r.center(), pt(-0.32, -0.32), 1.6, c);
+        }
+        Icon::Keys => {
+            p.rrect_stroke(Rect::new(cx - 0.7 * s, cy - 0.6 * s, cx + 0.7 * s, cy + 0.6 * s), 1.5, 1.0, c);
+            for x in [-0.23, 0.23] {
+                p.vline(cx + x * s, cy - 0.6 * s, cy + 0.6 * s, c);
+            }
+            for x in [-0.23, 0.23] {
+                p.rect(Rect::new(cx + (x - 0.1) * s, cy - 0.6 * s, cx + (x + 0.1) * s, cy + 0.05 * s), c);
+            }
+        }
+        Icon::ChevronUp => p.polyline(&[pt(-0.4, 0.2), pt(0.0, -0.2), pt(0.4, 0.2)], w, c),
         Icon::Pulse => {
             p.polyline(
                 &[pt(-0.7, 0.0), pt(-0.35, 0.0), pt(-0.15, -0.55), pt(0.15, 0.55), pt(0.35, 0.0), pt(0.7, 0.0)],

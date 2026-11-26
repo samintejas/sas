@@ -29,11 +29,20 @@ pub struct Section {
     pub rect: Rect,
     /// The "open" button (shows the grid).
     pub open: Rect,
-    /// Each macro's knob cell, by index.
+    /// Each macro's knob cell, by index (none while folded).
     pub knobs: Vec<(u8, Rect)>,
+    /// Its [`Fold`] bit.
+    pub fold: u8,
+    /// Folded to its heading.
+    pub folded: bool,
 }
 
 impl Section {
+    /// A section's heading row, which folds it.
+    pub fn heading(rect: Rect) -> Rect {
+        Rect::new(rect.x0, rect.y0, rect.x1, rect.y0 + FOLDED_H)
+    }
+
     /// The knob's centre in a cell.
     pub fn knob_center(cell: Rect) -> Point {
         Point::new(cell.center().x, cell.y0 + 6.0 + KNOB / 2.0)
@@ -53,9 +62,30 @@ pub enum MacroHit {
     Fader(TrackId),
     /// The track's pan knob.
     Pan(TrackId),
+    /// A section's heading: fold or unfold it (a [`Fold`] bit).
+    Fold(u8),
     /// Nothing.
     Nothing,
 }
+
+/// The inspector's sections that fold, as bits of a mask.
+pub struct Fold;
+
+impl Fold {
+    /// The track card.
+    pub const TRACK: u8 = 1;
+    /// A grid kind's section.
+    pub fn grid(kind: GridKind) -> u8 {
+        match kind {
+            GridKind::Source => 2,
+            GridKind::Instrument => 4,
+            GridKind::Fx => 8,
+        }
+    }
+}
+
+/// Height of a folded section: just its heading.
+pub const FOLDED_H: f64 = 44.0;
 
 /// The macros page's geometry.
 #[derive(Debug, Clone, PartialEq)]
@@ -91,11 +121,17 @@ impl MacroLayout {
             if s.open.contains(pt) {
                 return MacroHit::Open(s.grid);
             }
+            if Section::heading(s.rect).contains(pt) {
+                return MacroHit::Fold(s.fold);
+            }
             if let Some((i, _)) = s.knobs.iter().find(|(_, r)| r.contains(pt)) {
                 return MacroHit::Knob(s.grid, *i);
             }
         }
-        if let Some(t) = self.track {
+        if Section::heading(self.track_card).contains(pt) {
+            return MacroHit::Fold(Fold::TRACK);
+        }
+        if let Some(t) = self.track.filter(|_| self.fader.width() > 0.0) {
             if self.fader.inset(8.0).contains(pt) {
                 return MacroHit::Fader(t);
             }
@@ -124,7 +160,15 @@ pub fn grids_for(doc: &Document, track: Option<TrackId>, on_screen: Option<GridI
 }
 
 /// Lays out the inspector in the sidebar `r`, scrolled down by `scroll`.
-pub fn layout(doc: &Document, track: Option<TrackId>, on_screen: Option<GridId>, r: Rect, scroll: f64) -> MacroLayout {
+/// Sections whose bit is set in `folds` show only their heading.
+pub fn layout(
+    doc: &Document,
+    track: Option<TrackId>,
+    on_screen: Option<GridId>,
+    r: Rect,
+    scroll: f64,
+    folds: u8,
+) -> MacroLayout {
     let close = crate::dock::close_button(r);
     let cy = r.y0 + TABS_H / 2.0;
     let learn = Rect::new(close.x0 - 70.0, cy - 12.0, close.x0 - 6.0, cy + 12.0);
@@ -134,17 +178,22 @@ pub fn layout(doc: &Document, track: Option<TrackId>, on_screen: Option<GridId>,
     let inner = Rect::new(body.x0 + 10.0, body.y0, body.x1 - 10.0, body.y1);
     let cols = if (inner.width() - 20.0) / 8.0 >= CELL_W8 { 8 } else { 4 };
     let rows = MACROS / cols;
-    let sec_h = 44.0 + rows as f64 * CELL_H + 6.0;
-    let content = 10.0 + TRACK_H + grids.len() as f64 * (gap + sec_h) + 10.0;
+    let full_h = 44.0 + rows as f64 * CELL_H + 6.0;
+    let fold_of = |g: &GridId| doc.grids.get(g).map_or(0, |g| Fold::grid(g.kind));
+    let sec_h = |g: &GridId| if folds & fold_of(g) != 0 { FOLDED_H } else { full_h };
+    let track_h = if folds & Fold::TRACK != 0 { FOLDED_H } else { TRACK_H };
+    let content = 10.0 + track_h + grids.iter().map(|g| gap + sec_h(g)).sum::<f64>() + 10.0;
     let max_scroll = (content - body.height()).max(0.0);
     let top = body.y0 + 10.0 - scroll.clamp(0.0, max_scroll);
-    let track_card = Rect::new(inner.x0, top, inner.x1, top + TRACK_H);
+    let track_card = Rect::new(inner.x0, top, inner.x1, top + track_h);
+    let mut y = track_card.y1 + gap;
     let sections = grids
         .iter()
-        .enumerate()
-        .map(|(k, g)| {
-            let y0 = track_card.y1 + gap + k as f64 * (sec_h + gap);
-            let rect = Rect::new(inner.x0, y0, inner.x1, y0 + sec_h);
+        .map(|g| {
+            let y0 = y;
+            let folded = folds & fold_of(g) != 0;
+            y += sec_h(g) + gap;
+            let rect = Rect::new(inner.x0, y0, inner.x1, y0 + sec_h(g));
             let open = Rect::new(rect.x1 - 62.0, rect.y0 + 10.0, rect.x1 - 10.0, rect.y0 + 34.0);
             let grid_r = Rect::new(rect.x0 + 10.0, rect.y0 + 44.0, rect.x1 - 10.0, rect.y1 - 6.0);
             let cw = grid_r.width() / cols as f64;
@@ -155,12 +204,19 @@ pub fn layout(doc: &Document, track: Option<TrackId>, on_screen: Option<GridId>,
                     let y = grid_r.y0 + row * CELL_H;
                     (i, Rect::new(x, y, x + cw, y + CELL_H))
                 })
+                .filter(|_| !folded)
                 .collect();
-            Section { grid: *g, rect, open, knobs }
+            Section { grid: *g, rect, open, knobs, fold: fold_of(g), folded }
         })
         .collect();
-    let fader = Rect::new(track_card.x0 + 28.0, track_card.y0 + 42.0, track_card.x0 + 34.0, track_card.y1 - 14.0);
-    let pan = Rect::new(track_card.x1 - 84.0, track_card.y0 + 36.0, track_card.x1 - 14.0, track_card.y1 - 6.0);
+    let (fader, pan) = if folds & Fold::TRACK != 0 {
+        (Rect::ZERO, Rect::ZERO)
+    } else {
+        (
+            Rect::new(track_card.x0 + 28.0, track_card.y0 + 42.0, track_card.x0 + 34.0, track_card.y1 - 14.0),
+            Rect::new(track_card.x1 - 84.0, track_card.y0 + 36.0, track_card.x1 - 14.0, track_card.y1 - 6.0),
+        )
+    };
     MacroLayout {
         track: track.filter(|t| doc.tracks.contains_key(t)),
         learn,
@@ -192,10 +248,11 @@ pub fn draw(
     on_screen: Option<GridId>,
     learn: bool,
     scroll: f64,
+    folds: u8,
     r: Rect,
 ) -> MacroLayout {
     let c = &th.c;
-    let l = layout(doc, track, on_screen, r, scroll);
+    let l = layout(doc, track, on_screen, r, scroll, folds);
     let tr = l.track.and_then(|t| doc.tracks.get(&t));
     let name = tr.map(|t| t.name.as_str()).unwrap_or("no track");
     let swatch = tr.map(|t| th.track(t.color.0));
@@ -224,6 +281,22 @@ pub fn draw(
     l
 }
 
+/// A section heading's fold marker: a filled triangle, down when open.
+fn disclosure(p: &mut Painter<'_>, at: Point, folded: bool, col: Rgba) {
+    let mut b = vello::kurbo::BezPath::new();
+    if folded {
+        b.move_to(Point::new(at.x - 2.5, at.y - 4.5));
+        b.line_to(Point::new(at.x + 3.5, at.y));
+        b.line_to(Point::new(at.x - 2.5, at.y + 4.5));
+    } else {
+        b.move_to(Point::new(at.x - 4.5, at.y - 2.5));
+        b.line_to(Point::new(at.x + 4.5, at.y - 2.5));
+        b.line_to(Point::new(at.x, at.y + 3.5));
+    }
+    b.close_path();
+    p.path(&b, col);
+}
+
 fn draw_body(p: &mut Painter<'_>, th: &Theme, doc: &Document, l: &MacroLayout, learn: bool) {
     let c = &th.c;
     for s in &l.sections {
@@ -232,7 +305,7 @@ fn draw_body(p: &mut Painter<'_>, th: &Theme, doc: &Document, l: &MacroLayout, l
         p.rrect(s.rect, 6.0, c.bg_base);
         p.rrect_stroke(s.rect.inset(-0.5), 6.0, 1.0, c.border_default);
         let hy = s.rect.y0 + 22.0;
-        p.circle(Point::new(s.rect.x0 + 16.0, hy), 4.0, col);
+        disclosure(p, Point::new(s.rect.x0 + 16.0, hy), s.folded, col);
         let title = match g.kind {
             GridKind::Source => "source",
             GridKind::Instrument => "instrument",
@@ -250,6 +323,9 @@ fn draw_body(p: &mut Painter<'_>, th: &Theme, doc: &Document, l: &MacroLayout, l
         p.rrect(s.open, 5.0, c.bg_control);
         p.rrect_stroke(s.open.inset(-0.5), 5.0, 1.0, c.border_strong.alpha(0.6));
         p.text(s.open.center().x, s.open.center().y, "open", &TextStyle::mono(12.0, c.text_strong), Align::Center);
+        if s.folded {
+            continue;
+        }
         for (i, cell) in &s.knobs {
             let kc = Section::knob_center(*cell);
             let ly = kc.y + KNOB / 2.0 + 12.0;
@@ -290,13 +366,14 @@ fn draw_body(p: &mut Painter<'_>, th: &Theme, doc: &Document, l: &MacroLayout, l
     p.rrect(tc, 6.0, c.bg_base);
     p.rrect_stroke(tc.inset(-0.5), 6.0, 1.0, c.border_default);
     let hy = tc.y0 + 22.0;
-    p.circle(Point::new(tc.x0 + 16.0, hy), 4.0, c.text_secondary);
+    let track_folded = l.fader.width() == 0.0;
+    disclosure(p, Point::new(tc.x0 + 16.0, hy), track_folded, c.text_secondary);
     p.text(tc.x0 + 28.0, hy, "track", &TextStyle::mono(12.0, c.text_max).medium(), Align::Left);
     if learn {
         let tip = "touch a parameter to map it";
         p.text(tc.x1 - 12.0, hy, tip, &TextStyle::mono(10.5, c.accent_primary), Align::Right);
     }
-    if let Some(tr) = l.track.and_then(|t| doc.tracks.get(&t)) {
+    if let Some(tr) = l.track.and_then(|t| doc.tracks.get(&t)).filter(|_| !track_folded) {
         p.rrect(l.fader, 3.0, Rgba::hex(0x0a0a0a));
         p.rrect_stroke(l.fader.inset(-0.5), 3.0, 1.0, Rgba::hex(0x262626));
         let pos = controls::fader_pos(tr.mixer.gain_db);

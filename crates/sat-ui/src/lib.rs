@@ -21,6 +21,7 @@ pub mod grid;
 pub mod icons;
 pub mod macros;
 pub mod mixer;
+pub mod outliner;
 pub mod paint;
 pub mod palette;
 pub mod panel;

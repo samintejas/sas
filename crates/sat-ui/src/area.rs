@@ -55,6 +55,8 @@ pub enum EditorType {
     Bank,
     /// The selected track's macros, fader and pan.
     Inspector,
+    /// The track tree.
+    Outliner,
 }
 
 impl EditorType {
@@ -70,6 +72,7 @@ impl EditorType {
             EditorType::Mixer => "mixer",
             EditorType::Bank => "clip bank",
             EditorType::Inspector => "inspector",
+            EditorType::Outliner => "outliner",
         }
     }
 
@@ -81,10 +84,11 @@ impl EditorType {
             EditorType::SourceGrid => Icon::Panel,
             EditorType::InstrumentGrid => Icon::Gear,
             EditorType::FxGrid => Icon::Sliders,
-            EditorType::Clip => Icon::Pencil,
+            EditorType::Clip => Icon::Keys,
             EditorType::Mixer => Icon::Sliders,
-            EditorType::Bank => Icon::Grid,
-            EditorType::Inspector => Icon::Pulse,
+            EditorType::Bank => Icon::Cards,
+            EditorType::Inspector => Icon::Knob,
+            EditorType::Outliner => Icon::Tree,
         }
     }
 
@@ -97,7 +101,7 @@ impl EditorType {
             EditorType::InstrumentGrid => "ctrl 4",
             EditorType::FxGrid => "ctrl 5",
             EditorType::Clip | EditorType::Mixer => "tab",
-            EditorType::Bank | EditorType::Inspector => "",
+            EditorType::Bank | EditorType::Inspector | EditorType::Outliner => "",
         }
     }
 
@@ -107,7 +111,7 @@ impl EditorType {
         match slot {
             Slot::Main => &[Arrange, Session, SourceGrid, InstrumentGrid, FxGrid],
             Slot::Panel => &[Clip, Mixer],
-            Slot::Left | Slot::Right => &[Bank, Inspector],
+            Slot::Left | Slot::Right => &[Bank, Outliner, Inspector],
         }
     }
 }
