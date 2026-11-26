@@ -720,7 +720,7 @@ fn strips(p: &mut Painter<'_>, th: &Theme, f: &Frame<'_>, sl: &ShellLayout) {
 fn hint(ty: EditorType) -> &'static str {
     match ty {
         EditorType::Arrange => {
-            "click a clip to edit it · drag to move, edges to trim · alt drag copies · ctrl wheel: zoom · alt wheel: track height · ctrl 1: launcher"
+            "click a clip to edit it · drag to move, edges to trim · alt drag copies · ctrl wheel: zoom · alt wheel: track height"
         }
         EditorType::SourceGrid | EditorType::InstrumentGrid | EditorType::FxGrid => {
             "drag from an out port to an in port of the same colour · drag a wire off to unplug · delete removes a module"

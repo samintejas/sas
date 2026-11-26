@@ -13,7 +13,7 @@ use vello::kurbo::Rect;
 
 use crate::arrange::TransportView;
 use crate::icons::{self, Icon};
-use crate::paint::{Align, Painter, TextStyle};
+use crate::paint::{Painter, TextStyle};
 
 /// Width of a cell's launch triangle area.
 pub const PLAY_W: f64 = 22.0;
@@ -97,11 +97,11 @@ pub fn launch_tick(doc: &Document, playhead: Ticks, playing: bool) -> Ticks {
 }
 
 /// Where "back to arrangement" sits in the arrange toolbar of the main
-/// area `r`, left of the launcher button (shown while any track takes its
+/// area `r`, left of the snap control (shown while any track takes its
 /// clips or automation from the launcher): the global switch back.
 pub fn back_button(r: Rect) -> Rect {
-    let lb = crate::arrange::launcher_button(r);
-    Rect::new(lb.x0 - 8.0 - 150.0, lb.y0, lb.x0 - 8.0, lb.y1)
+    let s = crate::arrange::snap_button(r);
+    Rect::new(s.x0 - 52.0 - s.height() * 1.4, s.y0, s.x0 - 52.0, s.y1)
 }
 
 /// Draws "back to arrangement" in the main area `r`.
@@ -111,7 +111,7 @@ pub fn draw_back(p: &mut Painter<'_>, th: &Theme, r: Rect) {
     p.rrect(b, 4.0, c.bg_base);
     p.rrect(b, 4.0, c.accent_primary.alpha(0.18));
     p.rrect_stroke(b.inset(-0.5), 4.0, 1.0, c.accent_primary);
-    p.text(b.center().x, b.center().y, "back to arrangement", &TextStyle::mono(11.0, c.accent_primary), Align::Center);
+    crate::icons::draw(p, crate::icons::Icon::BackToArrangement, b.inset(-4.0), c.accent_primary);
 }
 
 /// What a track takes from the launcher or the arrangement.

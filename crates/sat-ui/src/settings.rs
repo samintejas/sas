@@ -218,7 +218,7 @@ pub const KEYS: [(&str, &str); 22] = [
     ("r", "record"),
     ("l", "loop on / off"),
     ("ctrl k", "command palette"),
-    ("ctrl 1 … 5", "session, arrange, grids"),
+    ("ctrl 1 … 5", "arrange, grids"),
     ("[  ]", "previous / next track"),
     ("tab", "clip editor / mixer"),
     ("ctrl j", "show / hide the panel"),

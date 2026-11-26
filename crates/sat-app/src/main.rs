@@ -1538,7 +1538,6 @@ impl App {
         }
         let Some(layout) = &self.layout else { return };
         match layout.hit_with(Some(self.history.doc()), pt) {
-            Hit::Launcher => self.arrange.launcher = !self.arrange.launcher,
             Hit::Session(h) => self.session_hit(h),
             Hit::Clip { placement, clip } => {
                 self.select_clip(clip);
@@ -2695,10 +2694,6 @@ impl App {
             Action::Focus => self.dock.toggle_zoom(Zoom::Main),
             Action::PlayStop => self.playback.toggle(),
             Action::Loop => self.toggle_loop(),
-            Action::Launcher => {
-                self.arrange.launcher = !self.arrange.launcher;
-                self.view = MainView::Arrange;
-            }
             Action::Undo | Action::Redo => self.undo(a == Action::Redo),
             Action::Save => self.save(false),
             Action::Freeze(t) => self.toggle_freeze(t),
@@ -3071,12 +3066,7 @@ impl App {
                 self.dock.open_panel();
             }
             Key::Character(c) if ctrl && matches!(c.as_str(), "1" | "2" | "3" | "4" | "5") => match c.as_str() {
-                "1" => {
-                    // the clip launcher beside the arrangement
-                    self.arrange.launcher = !self.arrange.launcher || self.view != MainView::Arrange;
-                    self.view = MainView::Arrange;
-                }
-                "2" => self.view = MainView::Arrange,
+                "1" | "2" => self.view = MainView::Arrange,
                 "3" => self.open_grid(self.arrange.selected_track, GridKind::Source),
                 "4" => self.open_grid(self.arrange.selected_track, GridKind::Instrument),
                 _ => self.open_grid(self.arrange.selected_track, GridKind::Fx),

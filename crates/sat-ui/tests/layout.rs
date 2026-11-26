@@ -131,7 +131,6 @@ fn the_launcher_sits_between_headers_and_timeline_and_hits_slots() {
     assert_eq!(lr.x0, l.headers.x1);
     assert_eq!(l.timeline.x0, lr.x1, "the timeline starts after the launcher");
     assert_eq!(l.scene_heads.len(), d.doc.scenes.len());
-    assert_eq!(l.hit_with(Some(&d.doc), l.launcher_button.center()), Hit::Launcher);
     let (s1, head) = l.scene_heads[0];
     assert_eq!(l.hit_with(Some(&d.doc), head.center()), Hit::Session(SessionHit::Scene(s1)));
     let drums = d.doc.tracks.values().find(|t| t.name == "drums").unwrap().id;

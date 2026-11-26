@@ -269,8 +269,6 @@ pub enum Hit {
     Lane(TrackId, Ticks),
     /// The ruler, at a tick.
     Ruler(Ticks),
-    /// The toolbar's launcher button: show or hide the clip launcher.
-    Launcher,
     /// A slot or scene in the clip launcher beside the timeline.
     Session(SessionHit),
     /// Nothing.
@@ -299,8 +297,6 @@ pub struct ArrangeLayout {
     pub snap: Rect,
     /// Visible automation lanes.
     pub autos: Vec<AutoBox>,
-    /// The toolbar's launcher button.
-    pub launcher_button: Rect,
     /// The clip launcher beside the timeline, when shown (below the ruler).
     pub launcher: Option<Rect>,
     /// The launcher's scene heads, in the ruler band.
@@ -343,12 +339,6 @@ pub fn snap_button(bounds: Rect) -> Rect {
 
 /// Width of a scene column in the launcher beside the timeline.
 pub const SLOT_W: f64 = 92.0;
-
-/// Where the toolbar's launcher button is in an arrange tile at `bounds`.
-pub fn launcher_button(bounds: Rect) -> Rect {
-    let s = snap_button(bounds);
-    Rect::new(s.x0 - 52.0 - 84.0, s.y0, s.x0 - 52.0, s.y1)
-}
 
 /// Default height of the clip part of a track row.
 pub const TRACK_H: f64 = 52.0;
@@ -460,7 +450,6 @@ impl ArrangeLayout {
             takes: Vec::new(),
             snap: snap_button(bounds),
             autos: Vec::new(),
-            launcher_button: launcher_button(bounds),
             launcher,
             add_scene: launcher.map(|_| {
                 let x = hx + 4.0 + doc.scenes.len() as f64 * SLOT_W;
@@ -579,9 +568,6 @@ impl ArrangeLayout {
 
     /// What is under `pt`; with `doc`, the launcher's slots resolve to their clips.
     pub fn hit_with(&self, doc: Option<&Document>, pt: Point) -> Hit {
-        if self.launcher_button.contains(pt) {
-            return Hit::Launcher;
-        }
         if let Some((s, _)) = self.scene_heads.iter().find(|(_, r)| r.contains(pt)) {
             return Hit::Session(SessionHit::Scene(*s));
         }
@@ -708,11 +694,13 @@ pub fn header_controls(row: &Row, headers: Rect) -> HeaderControls {
         }
         RowKind::Track => {
             let cy = if row.compact() { y0 + row.clip_h / 2.0 } else { y0 + 17.0 };
-            let part = |x: f64| Some(Rect::new(x, cy - 8.0, x + 30.0, cy + 8.0));
+            // the source switch is a pair of icons; the lanes button lines
+            // up with a group's
+            let icon = |x: f64| Some(Rect::new(x, cy - 9.0, x + 20.0, cy + 9.0));
             HeaderControls {
-                auto: Some(Rect::new(x1 - 96.0, cy - 8.0, x1 - 78.0, cy + 8.0)),
-                clips_src: part(x1 - 72.0),
-                auto_src: part(x1 - 41.0),
+                auto: icon(x1 - 30.0),
+                clips_src: icon(x1 - 78.0),
+                auto_src: icon(x1 - 57.0),
                 ..Default::default()
             }
         }
@@ -775,9 +763,8 @@ pub fn draw(
     let ty = b.y0 + TOOLBAR_H / 2.0;
     let tracks = doc.tracks.values().filter(|t| t.kind == TrackKind::Track).count();
     let bars = doc.placements.values().map(|pl| pl.start.0 + pl.length.0).max().unwrap_or(0).max(0).div_euclid(PPQ * 4);
-    let note_end = if session.any_launcher() { crate::session::back_button(b).x0 } else { l.launcher_button.x0 };
+    let note_end = if session.any_launcher() { crate::session::back_button(b).x0 } else { snap_button(b).x0 - 52.0 };
     crate::area::note(p, th, hx, ty, &format!("{tracks} tracks · {bars} bars"), note_end - 12.0 - hx);
-    crate::area::button(p, th, l.launcher_button, "launcher", st.launcher);
     let mut x = b.x1 - 12.0;
     for icon in [Icon::Plus, Icon::Search] {
         let r = Rect::new(x - 26.0, ty - 11.0, x, ty + 11.0);
@@ -1164,19 +1151,19 @@ fn draw_launcher(
 /// the arrangement.
 fn draw_source_switch(p: &mut Painter<'_>, th: &Theme, hc: &HeaderControls, session: &SessionView, t: TrackId) {
     let c = &th.c;
-    for (r, label, on) in
-        [(hc.clips_src, "clip", session.following.contains(&t)), (hc.auto_src, "auto", session.auto.contains(&t))]
+    let (Some(a), Some(b)) = (hc.clips_src, hc.auto_src) else { return };
+    // one pill holding both halves; a half lit in the accent plays from the launcher
+    let pill = a.union(b);
+    p.rrect(pill, 4.0, c.bg_control);
+    p.rrect_stroke(pill.inset(-0.5), 4.0, 1.0, c.border_default);
+    for (r, icon, on) in
+        [(a, Icon::Clip, session.following.contains(&t)), (b, Icon::Envelope, session.auto.contains(&t))]
     {
-        let Some(r) = r else { continue };
         if on {
-            p.rrect(r, 3.0, c.accent_primary.alpha(0.18));
-            p.rrect_stroke(r.inset(-0.5), 3.0, 1.0, c.accent_primary.alpha(0.7));
-        } else {
-            p.rrect(r, 3.0, c.bg_control);
-            p.rrect_stroke(r.inset(-0.5), 3.0, 1.0, c.border_default);
+            p.rrect(r, 4.0, c.accent_primary.alpha(0.2));
+            p.rrect_stroke(r.inset(-0.5), 4.0, 1.0, c.accent_primary.alpha(0.8));
         }
-        let col = if on { c.accent_primary } else { c.text_secondary };
-        p.text(r.center().x, r.center().y, label, &TextStyle::mono(10.0, col), Align::Center);
+        icons::draw(p, icon, r.inset(-4.0), if on { c.accent_primary } else { c.text_secondary });
     }
 }
 
