@@ -529,7 +529,6 @@ fn armed_tracks_show_a_monitor_switch() {
 }
 
 mod chords {
-    use sat_doc::*;
     use sat_modules::chords::Step;
     use sat_ui::chords::{ChordHit, ChordView, fit_height, geometry};
     use sat_ui::demo::demo;
