@@ -500,6 +500,24 @@ pub struct Lane {
     pub points: Vector<Breakpoint>,
 }
 
+/// The project's key: a root pitch class and a scale, indexing
+/// `sat_dsp::scale::ROOTS` and `sat_dsp::scale::NAMES`. The piano roll
+/// highlights and snaps to it; sources can follow it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Key {
+    /// Root pitch class, 0 (c) to 11 (b).
+    pub root: u8,
+    /// Scale index (0 chromatic, 1 major, 2 minor, ...).
+    pub scale: u8,
+}
+
+impl Default for Key {
+    /// C major.
+    fn default() -> Self {
+        Key { root: 0, scale: 1 }
+    }
+}
+
 /// Loop and punch state saved with the project.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct LoopRange {
