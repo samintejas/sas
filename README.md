@@ -16,6 +16,9 @@ project file end to end. Phase 3 (source grid) is done: notes are edited
 in the piano roll, the drum sequencer or the euclid generator (with hand edits
 over it) and heard while the set plays, and each track's source grid shows its
 modules and the clip dock, where cables decide which module feeds each clip.
+Note processors (transpose, scale, chord, arp, chance, velocity, merge) chain
+between a source and its clip: the clip plays the chain's output while its
+editor edits the notes at the head of the chain.
 Phase 4 (instrument + fx grids) is done: each track's instrument grid is a
 patchable voice (note in, vco, noise, mixer, filter, adsr, vca, lfo, voice out,
 ring mod, wavefolder, and control utilities: cv mix, attenuverter, quantizer,
@@ -23,8 +26,9 @@ sample and hold, slew, random, comparator, logic, clock divider)
 that every voice runs, a drum synth that plays drums by pitch, or a sampler
 that plays a WAV repitched from its root note (gate, one shot or loop, with a
 start point, a crossfaded loop point and an envelope); every
-track's fx grid (eq, comp with side chain, drive, filter, delay, reverb,
-limiter, split and mix) runs between its sound and its strip, buses and the
+track's fx grid (eq, comp with side chain, gate with key input, drive,
+crush, filter, chorus, flanger, phaser, tremolo/auto-pan, ring mod, delay,
+reverb, utility, limiter, split and mix) runs between its sound and its strip, buses and the
 master included. Every grid has 16 macros: each drives one or more of its
 grid's parameters over a range, and the bottom panel's macros page shows the
 selected track's macros with its fader and pan. Knobs, macros and bypass

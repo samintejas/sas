@@ -28,6 +28,22 @@ pub const DRIVE: &str = "drive";
 pub const LIMITER: &str = "limiter";
 /// Stereo filter.
 pub const FX_FILTER: &str = "fx_filter";
+/// Chorus.
+pub const CHORUS: &str = "chorus";
+/// Flanger.
+pub const FLANGER: &str = "flanger";
+/// Phaser.
+pub const PHASER: &str = "phaser";
+/// Tremolo and auto-pan.
+pub const TREMOLO: &str = "tremolo";
+/// Bit crusher.
+pub const CRUSH: &str = "crush";
+/// Noise gate with a side-chain input.
+pub const GATE: &str = "gate";
+/// Gain, pan, width and polarity.
+pub const UTILITY: &str = "utility";
+/// Ring modulator with a carrier input.
+pub const RING_MOD: &str = "ring_mod";
 /// One input to two outputs.
 pub const SPLIT: &str = "split";
 /// Two inputs to one output.
@@ -43,14 +59,22 @@ pub const BYPASS: &str = "bypass";
 pub const BYPASS_INDEX: u8 = 7;
 
 /// Fx modules that can be added: kind and label.
-pub const MODULES: [(&str, &str); 12] = [
+pub const MODULES: [(&str, &str); 20] = [
     (FX_IN, "in"),
     (EQ, "eq"),
     (COMP, "comp"),
+    (GATE, "gate"),
     (DRIVE, "drive"),
+    (CRUSH, "crush"),
     (FX_FILTER, "filter"),
+    (CHORUS, "chorus"),
+    (FLANGER, "flanger"),
+    (PHASER, "phaser"),
+    (TREMOLO, "tremolo"),
+    (RING_MOD, "ring mod"),
     (DELAY, "delay"),
     (REVERB, "reverb"),
+    (UTILITY, "utility"),
     (LIMITER, "limiter"),
     (SPLIT, "split"),
     (MERGE, "mix"),
@@ -72,13 +96,16 @@ pub fn ports(kind: &str) -> &'static [PortSpec] {
     const OUT_PORTS: [PortSpec; 1] = [input("in")];
     const THROUGH: [PortSpec; 2] = [input("in"), output("out")];
     const COMP_PORTS: [PortSpec; 3] = [input("in"), input("side"), output("out")];
+    const RING_PORTS: [PortSpec; 3] = [input("in"), input("carrier"), output("out")];
     const SPLIT_PORTS: [PortSpec; 3] = [input("in"), output("a"), output("b")];
     const MERGE_PORTS: [PortSpec; 3] = [input("1"), input("2"), output("out")];
     match kind {
         FX_IN => &IN_PORTS,
         FX_OUT => &OUT_PORTS,
-        EQ | DELAY | REVERB | DRIVE | LIMITER | FX_FILTER | PLUGIN => &THROUGH,
-        COMP => &COMP_PORTS,
+        EQ | DELAY | REVERB | DRIVE | LIMITER | FX_FILTER | CHORUS | FLANGER | PHASER | TREMOLO | CRUSH | UTILITY
+        | PLUGIN => &THROUGH,
+        COMP | GATE => &COMP_PORTS,
+        RING_MOD => &RING_PORTS,
         SPLIT => &SPLIT_PORTS,
         MERGE => &MERGE_PORTS,
         _ => &[],
@@ -130,6 +157,54 @@ pub fn params(kind: &str) -> &'static [ParamSpec] {
         p("cutoff", "cutoff", 20.0, 20_000.0, 8000.0, Unit::Hz),
         p("res", "res", 0.0, 1.0, 0.1, Unit::Percent),
     ];
+    const CHORUS_P: [ParamSpec; 5] = [
+        p("rate", "rate", 0.05, 5.0, 0.8, Unit::Hz),
+        p("depth", "depth", 0.0, 1.0, 0.5, Unit::Percent),
+        p("delay", "delay", 0.002, 0.04, 0.012, Unit::Seconds),
+        p("spread", "spread", 0.0, 1.0, 1.0, Unit::Percent),
+        p("mix", "mix", 0.0, 1.0, 0.5, Unit::Percent),
+    ];
+    const FLANGER_P: [ParamSpec; 5] = [
+        p("rate", "rate", 0.05, 5.0, 0.25, Unit::Hz),
+        p("depth", "depth", 0.0, 1.0, 0.7, Unit::Percent),
+        p("delay", "delay", 0.0005, 0.01, 0.002, Unit::Seconds),
+        p("feedback", "feedback", -0.95, 0.95, 0.6, Unit::Bipolar),
+        p("mix", "mix", 0.0, 1.0, 0.5, Unit::Percent),
+    ];
+    const PHASER_P: [ParamSpec; 6] = [
+        p("rate", "rate", 0.05, 5.0, 0.4, Unit::Hz),
+        p("depth", "depth", 0.0, 1.0, 0.8, Unit::Percent),
+        p("freq", "freq", 100.0, 4000.0, 800.0, Unit::Hz),
+        p("feedback", "feedback", 0.0, 0.95, 0.5, Unit::Percent),
+        p("stages", "stages", 2.0, 12.0, 6.0, Unit::Int),
+        p("mix", "mix", 0.0, 1.0, 1.0, Unit::Percent),
+    ];
+    const TREMOLO_P: [ParamSpec; 4] = [
+        p("rate", "rate", 0.1, 20.0, 4.0, Unit::Hz),
+        p("depth", "depth", 0.0, 1.0, 0.5, Unit::Percent),
+        p("wave", "wave", 0.0, 2.0, 0.0, Unit::Choice(&["sine", "tri", "square"])),
+        p("stereo", "pan", 0.0, 1.0, 0.0, Unit::Percent),
+    ];
+    const CRUSH_P: [ParamSpec; 3] = [
+        p("bits", "bits", 1.0, 16.0, 8.0, Unit::Int),
+        p("rate", "rate", 200.0, 48_000.0, 12_000.0, Unit::Hz),
+        p("mix", "mix", 0.0, 1.0, 1.0, Unit::Percent),
+    ];
+    const GATE_P: [ParamSpec; 5] = [
+        p("thresh", "thresh", -80.0, 0.0, -40.0, Unit::Db),
+        p("attack", "attack", 0.0001, 0.05, 0.001, Unit::Seconds),
+        p("hold", "hold", 0.001, 0.5, 0.02, Unit::Seconds),
+        p("release", "release", 0.005, 2.0, 0.1, Unit::Seconds),
+        p("range", "range", -80.0, 0.0, -80.0, Unit::Db),
+    ];
+    const UTILITY_P: [ParamSpec; 4] = [
+        p("gain", "gain", -60.0, 24.0, 0.0, Unit::Db),
+        p("pan", "pan", -1.0, 1.0, 0.0, Unit::Pan),
+        p("width", "width", 0.0, 2.0, 1.0, Unit::Percent),
+        p("invert", "invert", 0.0, 3.0, 0.0, Unit::Choice(&["off", "left", "right", "both"])),
+    ];
+    const RING_P: [ParamSpec; 2] =
+        [p("freq", "freq", 1.0, 5000.0, 200.0, Unit::Hz), p("mix", "mix", 0.0, 1.0, 0.5, Unit::Percent)];
     const SPLIT_P: [ParamSpec; 1] = [p("balance", "a · b", 0.0, 1.0, 0.5, Unit::Percent)];
     const MERGE_P: [ParamSpec; 2] = [p("g1", "1", -60.0, 6.0, 0.0, Unit::Db), p("g2", "2", -60.0, 6.0, 0.0, Unit::Db)];
     const PLUGIN_P: [ParamSpec; 7] = [
@@ -153,6 +228,14 @@ pub fn params(kind: &str) -> &'static [ParamSpec] {
         FX_FILTER => &FILTER_P,
         SPLIT => &SPLIT_P,
         MERGE => &MERGE_P,
+        CHORUS => &CHORUS_P,
+        FLANGER => &FLANGER_P,
+        PHASER => &PHASER_P,
+        TREMOLO => &TREMOLO_P,
+        CRUSH => &CRUSH_P,
+        GATE => &GATE_P,
+        UTILITY => &UTILITY_P,
+        RING_MOD => &RING_P,
         PLUGIN => &PLUGIN_P,
         _ => &[],
     }

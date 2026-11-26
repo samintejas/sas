@@ -229,9 +229,10 @@ pub struct RollGeom {
     pub quantise: Rect,
 }
 
-/// The notes the clip panel edits for `clip`.
+/// The notes the clip panel edits for `clip`: the pattern of the module that
+/// feeds it, or of the head of the note-processor chain that does.
 pub fn clip_notes(doc: &Document, clip: ClipId) -> (Option<ModuleId>, Vec<Note>) {
-    let module = doc.inlet_cable(clip).map(|k| k.from.module);
+    let module = sat_modules::editing_source(doc, clip);
     let notes =
         module.and_then(|m| doc.pattern(m, clip)).map(|pt| pt.notes.iter().copied().collect()).unwrap_or_default();
     (module, notes)
@@ -339,7 +340,7 @@ pub fn clip_bar<'d>(
         None => track.name.clone(),
     };
     x += p.text(x, cy, &info, &TextStyle::mono(12.0, c.text_secondary), Align::Left) + 24.0;
-    let feed = doc.inlet_cable(clip.id).and_then(|k| doc.modules.get(&k.from.module));
+    let feed = sat_modules::editing_source(doc, clip.id).and_then(|m| doc.modules.get(&m));
     if let Some(m) = feed {
         x += tab(p, th, x, tabs, Some(Icon::Pencil), &m.name, true);
     }

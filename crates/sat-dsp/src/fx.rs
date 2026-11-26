@@ -410,6 +410,281 @@ impl Filter {
     }
 }
 
+/// Most delay (s) a modulated delay line holds.
+const MOD_MAX_SECS: f32 = 0.06;
+
+/// Two delay lines read at a moving tap: the core of chorus and flanger.
+#[derive(Debug, Clone)]
+struct ModLines {
+    buf: [Vec<f32>; 2],
+    pos: usize,
+    phase: f32,
+    fb: [f32; 2],
+}
+
+impl ModLines {
+    fn new(sr: f32) -> ModLines {
+        let n = (MOD_MAX_SECS * sr) as usize + 4;
+        ModLines { buf: [vec![0.0; n], vec![0.0; n]], pos: 0, phase: 0.0, fb: [0.0; 2] }
+    }
+
+    /// Delay swings `center ± swing` seconds at `rate` Hz, the right side
+    /// `spread` of a quarter cycle behind; `fb` of the tap is fed back.
+    #[allow(clippy::too_many_arguments)]
+    fn process(
+        &mut self,
+        l: &mut [f32],
+        r: &mut [f32],
+        center: f32,
+        swing: f32,
+        rate: f32,
+        spread: f32,
+        fb: f32,
+        mix: f32,
+        sr: f32,
+    ) {
+        let n = self.buf[0].len();
+        let (fb, mix) = (fb.clamp(-0.95, 0.95), mix.clamp(0.0, 1.0));
+        let lo = 2.0;
+        let hi = (n - 3) as f32;
+        for i in 0..l.len() {
+            self.phase = (self.phase + rate.max(0.0) / sr).fract();
+            for (ch, x) in [&mut l[i], &mut r[i]].into_iter().enumerate() {
+                let ph = self.phase + if ch == 1 { 0.25 * spread.clamp(0.0, 1.0) } else { 0.0 };
+                let d = ((center + swing * (2.0 * PI * ph).sin()) * sr).clamp(lo, hi);
+                let k = d.floor() as usize;
+                let frac = d - k as f32;
+                let b = &self.buf[ch];
+                let a = b[(self.pos + n - k) % n];
+                let c = b[(self.pos + n - k - 1) % n];
+                let wet = a + (c - a) * frac;
+                self.fb[ch] = flush(wet);
+                self.buf[ch][self.pos] = flush(*x + self.fb[ch] * fb);
+                *x = *x * (1.0 - mix) + wet * mix;
+            }
+            self.pos = (self.pos + 1) % n;
+        }
+    }
+}
+
+/// A stereo chorus. Params: rate (Hz), depth, delay (s), spread, mix.
+#[derive(Debug, Clone)]
+pub struct Chorus(ModLines);
+
+impl Chorus {
+    /// A chorus for sample rate `sr`.
+    pub fn new(sr: f32) -> Chorus {
+        Chorus(ModLines::new(sr))
+    }
+
+    /// Processes a block.
+    pub fn process(&mut self, l: &mut [f32], r: &mut [f32], p: &[f32], sr: f32) {
+        let center = p[2].clamp(0.002, 0.04);
+        let swing = p[1].clamp(0.0, 1.0) * center.min(0.008) * 0.9;
+        self.0.process(l, r, center, swing, p[0], p[3], 0.0, p[4], sr);
+    }
+}
+
+/// A stereo flanger. Params: rate (Hz), depth, delay (s), feedback, mix.
+#[derive(Debug, Clone)]
+pub struct Flanger(ModLines);
+
+impl Flanger {
+    /// A flanger for sample rate `sr`.
+    pub fn new(sr: f32) -> Flanger {
+        Flanger(ModLines::new(sr))
+    }
+
+    /// Processes a block.
+    pub fn process(&mut self, l: &mut [f32], r: &mut [f32], p: &[f32], sr: f32) {
+        let center = p[2].clamp(0.0005, 0.01);
+        let swing = p[1].clamp(0.0, 1.0) * center * 0.95;
+        self.0.process(l, r, center, swing, p[0], 0.5, p[3], p[4], sr);
+    }
+}
+
+/// Most all-pass stages in the phaser.
+const PHASER_STAGES: usize = 12;
+
+/// A stereo phaser: a chain of swept first-order all-passes. Params: rate
+/// (Hz), depth, freq (Hz, centre of the sweep), feedback, stages, mix.
+#[derive(Debug, Clone, Default)]
+pub struct Phaser {
+    z: [[f32; PHASER_STAGES]; 2],
+    fb: [f32; 2],
+    phase: f32,
+}
+
+impl Phaser {
+    /// Processes a block.
+    pub fn process(&mut self, l: &mut [f32], r: &mut [f32], p: &[f32], sr: f32) {
+        let (rate, depth, freq, fb) = (p[0].max(0.0), p[1].clamp(0.0, 1.0), p[2], p[3].clamp(0.0, 0.95));
+        let stages = (p[4].round() as usize).clamp(1, PHASER_STAGES);
+        let mix = p[5].clamp(0.0, 1.0);
+        for i in 0..l.len() {
+            self.phase = (self.phase + rate / sr).fract();
+            for (ch, x) in [&mut l[i], &mut r[i]].into_iter().enumerate() {
+                let ph = self.phase + if ch == 1 { 0.25 } else { 0.0 };
+                // sweep three octaves around the centre at full depth
+                let hz = (freq * 2f32.powf(depth * 1.5 * (2.0 * PI * ph).sin())).clamp(20.0, sr * 0.45);
+                let t = (PI * hz / sr).tan();
+                let a = (t - 1.0) / (t + 1.0);
+                let mut y = *x + self.fb[ch] * fb;
+                for z in self.z[ch].iter_mut().take(stages) {
+                    let out = a * y + *z;
+                    *z = flush(y - a * out);
+                    y = out;
+                }
+                self.fb[ch] = flush(y);
+                *x = *x * (1.0 - mix * 0.5) + y * mix * 0.5;
+            }
+        }
+    }
+}
+
+/// Tremolo and auto-pan. Params: rate (Hz), depth, wave (sine, tri,
+/// square), stereo (0 tremolo – 1 auto-pan).
+#[derive(Debug, Clone, Default)]
+pub struct Tremolo {
+    phase: f32,
+}
+
+impl Tremolo {
+    fn wave(ph: f32, wave: f32) -> f32 {
+        let s = (2.0 * PI * ph).sin();
+        match wave.round() as i32 {
+            1 => 1.0 - 4.0 * (ph.fract() - 0.5).abs(),
+            2 => (s * 6.0).tanh(),
+            _ => s,
+        }
+    }
+
+    /// Processes a block.
+    pub fn process(&mut self, l: &mut [f32], r: &mut [f32], p: &[f32], sr: f32) {
+        let (rate, depth, stereo) = (p[0].max(0.0), p[1].clamp(0.0, 1.0), p[3].clamp(0.0, 1.0));
+        for i in 0..l.len() {
+            self.phase = (self.phase + rate / sr).fract();
+            let gl = 1.0 - depth * 0.5 * (1.0 - Tremolo::wave(self.phase, p[2]));
+            let gr = 1.0 - depth * 0.5 * (1.0 - Tremolo::wave(self.phase + 0.5 * stereo, p[2]));
+            l[i] *= gl;
+            r[i] *= gr;
+        }
+    }
+}
+
+/// A bit crusher: fewer bits and a lower sample rate. Params: bits, rate
+/// (Hz), mix.
+#[derive(Debug, Clone, Default)]
+pub struct Crush {
+    held: [f32; 2],
+    acc: f32,
+}
+
+impl Crush {
+    /// Processes a block.
+    pub fn process(&mut self, l: &mut [f32], r: &mut [f32], p: &[f32], sr: f32) {
+        let steps = 2f32.powf(p[0].clamp(1.0, 16.0).round() - 1.0);
+        let inc = (p[1] / sr).clamp(0.0, 1.0);
+        let mix = p[2].clamp(0.0, 1.0);
+        for i in 0..l.len() {
+            self.acc += inc;
+            if self.acc >= 1.0 {
+                self.acc -= self.acc.floor();
+                self.held = [(l[i] * steps).round() / steps, (r[i] * steps).round() / steps];
+            }
+            l[i] = l[i] * (1.0 - mix) + self.held[0] * mix;
+            r[i] = r[i] * (1.0 - mix) + self.held[1] * mix;
+        }
+    }
+}
+
+/// A noise gate, keyed by the side chain when there is one. Params:
+/// threshold (dB), attack (s), hold (s), release (s), range (dB, the floor).
+#[derive(Debug, Clone, Default)]
+pub struct Gate {
+    env: f32,
+    gain: f32,
+    held: f32,
+    /// How far the gate is closed (dB, positive) at the end of the last block.
+    pub meter: f32,
+}
+
+impl Gate {
+    /// Processes a block.
+    pub fn process(&mut self, l: &mut [f32], r: &mut [f32], side: Option<(&[f32], &[f32])>, p: &[f32], sr: f32) {
+        let thresh = db_gain(p[0]);
+        let (ca, cr) = (coef(p[1].max(0.0001), sr), coef(p[3].max(0.001), sr));
+        let floor = db_gain(p[4].min(0.0));
+        let det = coef(0.002, sr);
+        for i in 0..l.len() {
+            let key = match side {
+                Some((sl, sr_)) => sl[i].abs().max(sr_[i].abs()),
+                None => l[i].abs().max(r[i].abs()),
+            };
+            self.env = key.max(self.env * det);
+            if self.env > thresh {
+                self.held = p[2].max(0.0) * sr;
+            } else {
+                self.held -= 1.0;
+            }
+            let target = if self.held > 0.0 { 1.0 } else { floor };
+            let c = if target > self.gain { ca } else { cr };
+            self.gain = target + c * (self.gain - target);
+            l[i] *= self.gain;
+            r[i] *= self.gain;
+        }
+        self.meter = -20.0 * self.gain.max(1e-6).log10();
+    }
+}
+
+/// Gain, pan, width and polarity. Params: gain (dB), pan, width, invert
+/// (off, left, right, both).
+#[derive(Debug, Clone, Default)]
+pub struct Utility;
+
+impl Utility {
+    /// Processes a block.
+    pub fn process(&mut self, l: &mut [f32], r: &mut [f32], p: &[f32]) {
+        let g = db_gain(p[0]);
+        let (pl, pr) = crate::pan_gains(p[1]);
+        let w = p[2].clamp(0.0, 2.0);
+        let inv = p[3].round() as i32;
+        let (sl, sr_) = (if inv == 1 || inv == 3 { -1.0 } else { 1.0 }, if inv >= 2 { -1.0 } else { 1.0 });
+        for i in 0..l.len() {
+            let (a, b) = (l[i] * sl, r[i] * sr_);
+            let (mid, side) = ((a + b) * 0.5, (a - b) * 0.5 * w);
+            l[i] = (mid + side) * g * pl;
+            r[i] = (mid - side) * g * pr;
+        }
+    }
+}
+
+/// A ring modulator: the audio times a sine, or times the carrier input when
+/// one is patched. Params: freq (Hz), mix.
+#[derive(Debug, Clone, Default)]
+pub struct RingMod {
+    phase: f32,
+}
+
+impl RingMod {
+    /// Processes a block.
+    pub fn process(&mut self, l: &mut [f32], r: &mut [f32], carrier: Option<(&[f32], &[f32])>, p: &[f32], sr: f32) {
+        let mix = p[1].clamp(0.0, 1.0);
+        for i in 0..l.len() {
+            let (cl, cr) = match carrier {
+                Some((a, b)) => (a[i], b[i]),
+                None => {
+                    self.phase = (self.phase + p[0].max(0.0) / sr).fract();
+                    let s = (2.0 * PI * self.phase).sin();
+                    (s, s)
+                }
+            };
+            l[i] = l[i] * (1.0 - mix) + l[i] * cl * mix;
+            r[i] = r[i] * (1.0 - mix) + r[i] * cr * mix;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,5 +772,81 @@ mod tests {
         // a squashed sine has a higher rms-to-peak ratio than a sine
         let peak = l[4800..].iter().fold(0f32, |a, x| a.max(x.abs()));
         assert!(rms(&l[4800..]) / peak > 0.8, "crest {}", rms(&l[4800..]) / peak);
+    }
+
+    #[test]
+    fn modulation_effects_move_and_stay_bounded() {
+        // chorus and flanger: a dry/wet blend of a moving delay, stereo
+        let mut c = Chorus::new(SR);
+        let (mut l, mut r) = (sine(440.0, 48_000, 0.5), sine(440.0, 48_000, 0.5));
+        c.process(&mut l, &mut r, &[1.0, 0.8, 0.012, 1.0, 0.5], SR);
+        assert_ne!(l, r, "spread makes it stereo");
+        assert!(l.iter().all(|x| x.abs() <= 0.51));
+        let mut f = Flanger::new(SR);
+        let (mut l, mut r) = (vec![0.0f32; 4800], vec![0.0f32; 4800]);
+        l[0] = 1.0;
+        r[0] = 1.0;
+        f.process(&mut l, &mut r, &[0.1, 0.0, 0.002, 0.5, 1.0], SR);
+        // with no sweep the impulse comes back every 2 ms, half as loud each time
+        assert!((l[96] - 1.0).abs() < 1e-3 && (l[192] - 0.5).abs() < 1e-3, "{} {}", l[96], l[192]);
+        // phaser: notches move, so the level of a steady tone wobbles
+        let mut ph = Phaser::default();
+        let (mut l, mut r) = (sine(800.0, 96_000, 0.5), sine(800.0, 96_000, 0.5));
+        ph.process(&mut l, &mut r, &[2.0, 1.0, 800.0, 0.5, 6.0, 1.0], SR);
+        let blocks: Vec<f32> = l.chunks(1200).map(rms).collect();
+        let (lo, hi) = blocks[8..].iter().fold((f32::MAX, 0f32), |(a, b), x| (a.min(*x), b.max(*x)));
+        assert!(hi > lo * 2.0, "{lo} {hi}");
+        assert!(l.iter().all(|x| x.is_finite() && x.abs() < 1.5));
+    }
+
+    #[test]
+    fn tremolo_pans_and_crusher_quantizes() {
+        let mut t = Tremolo::default();
+        let (mut l, mut r) = (vec![1.0f32; 48_000], vec![1.0f32; 48_000]);
+        t.process(&mut l, &mut r, &[1.0, 1.0, 0.0, 1.0], SR);
+        // auto-pan: one side is loud while the other is quiet, never both silent
+        assert!(l.iter().zip(&r).all(|(a, b)| (a + b - 1.0).abs() < 1e-4));
+        assert!(l.iter().fold(0f32, |m, x| m.max(*x)) > 0.99 && l.iter().fold(1f32, |m, x| m.min(*x)) < 0.01);
+        let mut c = Crush::default();
+        let (mut l, mut r) = (sine(100.0, 4800, 0.9), sine(100.0, 4800, 0.9));
+        c.process(&mut l, &mut r, &[2.0, SR, 1.0], SR);
+        // 2 bits: -1, -0.5, 0, 0.5, 1
+        assert!(l.iter().all(|x| (x * 2.0).fract() == 0.0));
+        let mut c = Crush::default();
+        let (mut l, mut r) = (sine(100.0, 4800, 0.9), sine(100.0, 4800, 0.9));
+        c.process(&mut l, &mut r, &[16.0, 4800.0, 1.0], SR);
+        let mut d = l.clone();
+        d.dedup();
+        assert!(d.len() <= 481, "a tenth of the rate: {}", d.len());
+    }
+
+    #[test]
+    fn gate_utility_and_ring_mod() {
+        let mut g = Gate::default();
+        let mut x = sine(200.0, 48_000, 0.5);
+        for v in &mut x[24_000..] {
+            *v *= 0.001;
+        }
+        let (mut l, mut r) = (x.clone(), x.clone());
+        g.process(&mut l, &mut r, None, &[-40.0, 0.001, 0.01, 0.05, -80.0], SR);
+        assert!(rms(&l[2400..20_000]) > 0.3, "open");
+        assert!(rms(&l[40_000..]) < 1e-5, "closed");
+        assert!(g.meter > 60.0);
+        // keyed: a silent side chain keeps a loud signal out
+        let mut g = Gate::default();
+        let (mut l, mut r) = (sine(200.0, 4800, 0.5), sine(200.0, 4800, 0.5));
+        let z = vec![0.0f32; 4800];
+        g.process(&mut l, &mut r, Some((&z, &z)), &[-40.0, 0.001, 0.01, 0.05, -80.0], SR);
+        assert!(rms(&l) < 1e-3);
+        let mut u = Utility;
+        let (mut l, mut r) = (vec![0.5f32; 8], vec![0.25f32; 8]);
+        u.process(&mut l, &mut r, &[6.0, 0.0, 0.0, 2.0]);
+        // right inverted then mono: (0.5 - 0.25) / 2, doubled by +6 dB
+        assert!((l[0] - 0.2493).abs() < 1e-3 && l == r, "{} {}", l[0], r[0]);
+        let mut m = RingMod::default();
+        let (mut l, mut r) = (vec![1.0f32; 4800], vec![1.0f32; 4800]);
+        m.process(&mut l, &mut r, None, &[100.0, 1.0], SR);
+        let ups = l.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count();
+        assert_eq!(ups, 10, "dc times a 100 hz sine");
     }
 }
