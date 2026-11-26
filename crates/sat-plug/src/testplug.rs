@@ -5,6 +5,9 @@
 //! also what the `sat-testplug` library exports as its `clap_entry`, so the
 //! same code is loaded through `dlopen` too.
 //!
+//! It saves and loads its parameter values as its state (three f64, little
+//! endian).
+//!
 //! Parameters: 0 `gain` (dB, -60 to 12), 1 `mode` (0 run, 1 panic, 2 abort,
 //! 3 hang), 2 `leak` (MB to leak per block, 0 to 8).
 
@@ -17,11 +20,13 @@ use clap_sys::events::{
     CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE, clap_event_param_value, clap_input_events, clap_output_events,
 };
 use clap_sys::ext::params::{CLAP_EXT_PARAMS, clap_param_info, clap_plugin_params};
+use clap_sys::ext::state::{CLAP_EXT_STATE, clap_plugin_state};
 use clap_sys::factory::plugin_factory::{CLAP_PLUGIN_FACTORY_ID, clap_plugin_factory};
 use clap_sys::host::clap_host;
 use clap_sys::id::clap_id;
 use clap_sys::plugin::{clap_plugin, clap_plugin_descriptor};
 use clap_sys::process::{CLAP_PROCESS_CONTINUE, CLAP_PROCESS_ERROR, clap_process, clap_process_status};
+use clap_sys::stream::{clap_istream, clap_ostream};
 use clap_sys::version::CLAP_VERSION;
 
 /// The plugin's id.
@@ -82,6 +87,8 @@ static PARAMS: clap_plugin_params = clap_plugin_params {
     text_to_value: None,
     flush: Some(params_flush),
 };
+
+static STATE: clap_plugin_state = clap_plugin_state { save: Some(state_save), load: Some(state_load) };
 
 const INFO: [(&CStr, f64, f64, f64); 3] =
     [(c"gain", -60.0, 12.0, 0.0), (c"mode", 0.0, 3.0, 0.0), (c"leak", 0.0, 8.0, 0.0)];
@@ -181,11 +188,54 @@ unsafe extern "C" fn plugin_noop(_p: *const clap_plugin) {}
 
 unsafe extern "C" fn plugin_extension(_p: *const clap_plugin, id: *const c_char) -> *const c_void {
     // SAFETY: the host passes a nul-terminated id.
-    if !id.is_null() && unsafe { CStr::from_ptr(id) } == CLAP_EXT_PARAMS {
-        &PARAMS as *const _ as *const c_void
-    } else {
-        ptr::null()
+    if id.is_null() {
+        return ptr::null();
     }
+    match unsafe { CStr::from_ptr(id) } {
+        i if i == CLAP_EXT_PARAMS => &PARAMS as *const _ as *const c_void,
+        i if i == CLAP_EXT_STATE => &STATE as *const _ as *const c_void,
+        _ => ptr::null(),
+    }
+}
+
+unsafe extern "C" fn state_save(p: *const clap_plugin, stream: *const clap_ostream) -> bool {
+    // SAFETY: the host's plugin and a valid stream.
+    let (pl, s) = unsafe { (this(p), &*stream) };
+    let Some(write) = s.write else { return false };
+    let bytes: Vec<u8> = pl.values.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let mut at = 0;
+    while at < bytes.len() {
+        // SAFETY: the rest of `bytes`, valid for the call.
+        let n = unsafe { write(stream, bytes[at..].as_ptr() as *const c_void, (bytes.len() - at) as u64) };
+        if n <= 0 {
+            return false;
+        }
+        at += n as usize;
+    }
+    true
+}
+
+unsafe extern "C" fn state_load(p: *const clap_plugin, stream: *const clap_istream) -> bool {
+    // SAFETY: the host's plugin and a valid stream.
+    let (pl, s) = unsafe { (this(p), &*stream) };
+    let Some(read) = s.read else { return false };
+    let mut bytes = [0u8; 24];
+    let mut at = 0;
+    while at < bytes.len() {
+        // SAFETY: room for the rest of `bytes`.
+        let n = unsafe { read(stream, bytes[at..].as_mut_ptr() as *mut c_void, (bytes.len() - at) as u64) };
+        if n <= 0 {
+            return false;
+        }
+        at += n as usize;
+    }
+    for (i, v) in pl.values.iter_mut().enumerate() {
+        let x = f64::from_le_bytes(bytes[i * 8..i * 8 + 8].try_into().unwrap_or_default());
+        let (_, lo, hi, _) = INFO[i];
+        // a saved crash mode would crash again on load: it comes back running
+        *v = if i == MODE as usize { RUN } else { x.clamp(lo, hi) };
+    }
+    true
 }
 
 /// Applies the parameter events in `list`.

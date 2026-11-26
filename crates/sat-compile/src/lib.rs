@@ -621,12 +621,26 @@ pub fn render_range(
     to: Ticks,
     tail: bool,
 ) -> Result<(Vec<f32>, Vec<f32>), CompileError> {
-    let c = compile_with(doc, sample_rate, RENDER_BLOCK, sounds)?;
+    render_range_with(doc, sounds, &NoPlugins, sample_rate, from, to, tail)
+}
+
+/// [`render_range`] with plugin modules running through `plugins` (hosts
+/// started for blocks of [`RENDER_BLOCK`] frames, with offline processors).
+pub fn render_range_with(
+    doc: &Document,
+    sounds: &Sounds,
+    plugins: &dyn Plugins,
+    sample_rate: f64,
+    from: Ticks,
+    to: Ticks,
+    tail: bool,
+) -> Result<(Vec<f32>, Vec<f32>), CompileError> {
+    let c = compile_inner(doc, sample_rate, RENDER_BLOCK, sounds, plugins, None)?;
     Ok(render_compiled(c, sample_rate, from, to, tail))
 }
 
 /// Block size of offline renders (the result does not depend on it).
-const RENDER_BLOCK: usize = 1024;
+pub const RENDER_BLOCK: usize = 1024;
 
 /// Renders one track's sound as its strip receives it (its sources through
 /// its fx, before fader, pan and mute) from the song start to its end plus
@@ -638,6 +652,17 @@ pub fn render_track(
     sample_rate: f64,
     track: TrackId,
 ) -> Result<(Vec<f32>, Vec<f32>), CompileError> {
+    render_track_with(doc, sounds, &NoPlugins, sample_rate, track)
+}
+
+/// [`render_track`] with plugin modules running through `plugins`.
+pub fn render_track_with(
+    doc: &Document,
+    sounds: &Sounds,
+    plugins: &dyn Plugins,
+    sample_rate: f64,
+    track: TrackId,
+) -> Result<(Vec<f32>, Vec<f32>), CompileError> {
     if !doc.tracks.get(&track).is_some_and(|t| t.kind.has_clips()) {
         return Err(CompileError::Silent);
     }
@@ -645,7 +670,7 @@ pub fn render_track(
     if let Some(t) = live.tracks.get_mut(&track) {
         t.frozen = None;
     }
-    let c = compile_inner(&live, sample_rate, RENDER_BLOCK, sounds, &NoPlugins, Some(track))?;
+    let c = compile_inner(&live, sample_rate, RENDER_BLOCK, sounds, plugins, Some(track))?;
     Ok(render_compiled(c, sample_rate, Ticks::ZERO, song_end(&live), true))
 }
 

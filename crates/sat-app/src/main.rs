@@ -100,9 +100,10 @@ struct Playback {
 }
 
 impl Playback {
-    fn start(doc: &Document, pool: sat_disk::Pool) -> Playback {
+    fn start(doc: &Document, pool: sat_disk::Pool, bundle: Option<&Path>) -> Playback {
         let rate = audio::device_rate().unwrap_or(FALLBACK_RATE);
         let mut hosts = plugins::Hosts::default();
+        hosts.set_bundle(bundle);
         hosts.sync(doc, rate, MAX_BLOCK);
         let compiled =
             sat_compile::compile_with_plugins(doc, rate, MAX_BLOCK, pool.sounds(), &hosts).expect("project compiles");
@@ -554,7 +555,7 @@ impl App {
         let path = path.to_string_lossy().into_owned();
         // start the host first, so the first schedule already plays the defaults
         let rate = self.playback.compiled.schedule.sample_rate();
-        self.playback.hosts.start(id, &path, rate, MAX_BLOCK);
+        self.playback.hosts.start(id, &path, rate, MAX_BLOCK, false);
         let mut ops = vec![Op::SetModulePlugin { module: id, plugin: Some(path) }];
         for (i, v) in self.playback.hosts.defaults(id).into_iter().take(7).enumerate() {
             let target = ParamTarget::Module { module: id, param: format!("p{}", i + 1) };
@@ -579,6 +580,7 @@ impl App {
             Ok(doc) => {
                 eprintln!("opened {}", path.display());
                 self.playback.pool = load_sounds(path, &doc);
+                self.playback.hosts.set_bundle(Some(path));
                 self.load(doc);
             }
             Err(e) => eprintln!("cannot open {}: {e}", path.display()),
@@ -590,6 +592,7 @@ impl App {
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
         self.project = Project::new(None, "untitled".into(), 0);
         self.playback.pool = sat_disk::Pool::new();
+        self.playback.hosts.set_bundle(None);
         self.load(Document::new(seed as u64));
     }
 
@@ -610,7 +613,12 @@ impl App {
             self.project.save_as(&path, self.history.doc(), self.playback.pool.sounds(), v)
         };
         match res {
-            Ok(p) => eprintln!("saved {}", p.display()),
+            Ok(p) => {
+                for e in self.playback.hosts.save_states(&p) {
+                    eprintln!("plugin state not saved: {e}");
+                }
+                eprintln!("saved {}", p.display());
+            }
             Err(e) => eprintln!("save failed: {e}"),
         }
         self.update_title();
@@ -627,7 +635,8 @@ impl App {
         let name = format!("{} freeze", tr.name);
         let rate = self.playback.compiled.schedule.sample_rate();
         let t0 = Instant::now();
-        match sat_compile::render_track(doc, self.playback.pool.sounds(), rate, t) {
+        let plugins = self.playback.hosts.render_copy(doc, rate);
+        match sat_compile::render_track_with(doc, self.playback.pool.sounds(), &plugins, rate, t) {
             Ok((l, r)) => {
                 let secs = l.len() as f64 / rate;
                 let file = self.playback.pool.add_frozen(&name, sat_disk::Sample { rate: rate as f32, l, r });
@@ -657,7 +666,8 @@ impl App {
         }
         let Some(path) = dialog.save_file() else { return };
         let rate = self.playback.compiled.schedule.sample_rate();
-        match export::export(self.history.doc(), self.playback.pool.sounds(), rate, span, &path) {
+        let plugins = self.playback.hosts.render_copy(self.history.doc(), rate);
+        match export::export(self.history.doc(), self.playback.pool.sounds(), &plugins, rate, span, &path) {
             Ok(secs) => eprintln!("exported {} ({secs:.1} s)", path.display()),
             Err(e) => eprintln!("export failed: {e}"),
         }
@@ -2005,7 +2015,7 @@ impl App {
                     Some(path) if self.playback.hosts.error(id).is_none() => {
                         if self.playback.hosts.down(id) {
                             let rate = self.playback.compiled.schedule.sample_rate();
-                            self.playback.hosts.start(id, &path, rate, MAX_BLOCK);
+                            self.playback.hosts.start(id, &path, rate, MAX_BLOCK, true);
                             self.playback.recompile(self.history.doc());
                         }
                     }
@@ -2600,7 +2610,8 @@ fn main() {
     if let Some(out) = &args.export {
         let span = args.span.unwrap_or(export::Span::Song);
         let rate = args.rate.unwrap_or(FALLBACK_RATE);
-        match export::export(&doc, pool.sounds(), rate, span, out) {
+        let plugins = plugins::Hosts::for_render(&doc, rate, args.project.as_deref());
+        match export::export(&doc, pool.sounds(), &plugins, rate, span, out) {
             Ok(secs) => eprintln!("exported {} ({secs:.1} s at {rate} Hz)", out.display()),
             Err(e) => {
                 eprintln!("sat: export failed: {e}");
@@ -2609,7 +2620,7 @@ fn main() {
         }
         return;
     }
-    let playback = Playback::start(&doc, pool);
+    let playback = Playback::start(&doc, pool, args.project.as_deref());
     let arrange = ArrangeState {
         selected_clip: selected,
         selected_track: selected.and_then(|c| doc.clips.get(&c)).map(|c| c.track),

@@ -89,10 +89,16 @@ silent, marked "crashed · reload" or "not responding · reload", while the
 rest of the set keeps playing; click it to start a fresh host. The
 `sat-testplug` crate builds a crash-test plugin (a gain that panics,
 aborts, hangs or leaks on request) as a real `.clap` library, and the same
-plugin is built into the host as `builtin:crash-test`. For now each plugin
-module gets its own host process, plugin state is not saved with the
-project (a reload starts from the plugin's defaults), there are no plugin
-editor windows, and export and freeze pass plugin modules through dry. The gate test
+plugin is built into the host as `builtin:crash-test`. Saving the project
+saves each plugin's state (through the CLAP state extension) in the
+bundle's `plugins/` folder; it comes back when the project opens and when
+a crashed plugin is reloaded, and the module's knobs then set the
+parameters they show. Export and freeze render through hosts of their own,
+started for the render with the live plugins' current state, which wait
+for every block instead of dropping late ones, so plugins are in the
+render as they are heard. For now each plugin module gets its own host
+process, autosaves do not include plugin state, and there are no plugin
+editor windows. The gate test
 (`cargo test -p sat-plug --test gate`) plays a set with the crash-test
 plugin on one track, makes it panic and then hang mid-song, and checks that
 every block still arrives on time and the other tracks play on. The arrange view, piano roll and mixer from
