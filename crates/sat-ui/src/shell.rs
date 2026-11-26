@@ -237,6 +237,8 @@ pub struct Frame<'a> {
     pub roll: &'a RollView,
     /// Step editor page.
     pub steps: &'a StepView,
+    /// What the chord builder's editor shows.
+    pub chords: &'a crate::chords::ChordView,
     /// What the main area shows.
     pub view: MainView,
     /// Source grid pan, selection and menu.
@@ -277,6 +279,8 @@ pub struct Drawn {
     pub audio: Option<crate::audio_edit::AudioEditLayout>,
     /// The step editor, when the clip's source is a drum seq or euclid.
     pub steps: Option<StepGeom>,
+    /// The chord builder's editor, when the clip's source is one.
+    pub chords: Option<crate::chords::ChordGeom>,
     /// The source grid, when shown.
     pub grid: Option<GridLayout>,
     /// The inspector's macros, when the right sidebar shows.
@@ -618,6 +622,7 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
     let mut rl = None;
     let mut ae = None;
     let mut sg = None;
+    let mut cg = None;
     let mut mc = None;
     let mut bk = None;
     let mut ol = None;
@@ -646,6 +651,9 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
                     }
                     Some(sat_modules::Editor::Drums | sat_modules::Editor::Euclid | sat_modules::Editor::Turing) => {
                         sg = steps::draw(p, th, f.doc, clip, f.steps, &f.transport, sl.panel)
+                    }
+                    Some(sat_modules::Editor::Chords) => {
+                        cg = crate::chords::draw(p, th, f.doc, clip, f.chords, &f.transport, sl.panel)
                     }
                     _ => rl = piano_roll::draw(p, th, f.doc, clip, f.roll, &f.transport, sl.panel),
                 }
@@ -711,6 +719,7 @@ pub fn draw(scene: &mut Scene, fonts: &mut Fonts, th: &Theme, f: &Frame<'_>, w: 
         roll: rl,
         audio: ae,
         steps: sg,
+        chords: cg,
         grid: gl,
         macros: mc,
         session: ssl,

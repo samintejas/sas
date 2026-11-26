@@ -334,6 +334,37 @@ pub struct Pattern {
     /// Hand-edit layer over a generator.
     #[serde(default, skip_serializing_if = "Overrides::is_empty")]
     pub overrides: Overrides,
+    /// A chord progression (the chord builder's), sorted by start.
+    #[serde(default, skip_serializing_if = "Vector::is_empty")]
+    pub chords: Vector<ChordSlot>,
+}
+
+/// One chord of a progression: where it sits in the clip and which chord it
+/// is, relative to the key, so changing the key transposes it. A diatonic
+/// chord (`stack` > 0) is named by scale degree and follows the key's scale
+/// too; a fixed one (a borrowed or altered chord) keeps its quality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChordSlot {
+    /// Start, relative to the clip.
+    pub start: Ticks,
+    /// Length.
+    pub len: Ticks,
+    /// Root, in semitones above the key's root (0–11); the scale degree
+    /// (0–6) for a diatonic chord.
+    pub root: u8,
+    /// Chord quality, an index into the chord builder's table (unused for a
+    /// diatonic chord).
+    pub quality: u8,
+    /// Thirds stacked on the degree for a diatonic chord (3 a triad, 4 a
+    /// seventh, 5 a ninth), or 0 for a fixed chord.
+    #[serde(default)]
+    pub stack: u8,
+    /// Inversion: how many of the lowest notes move up an octave (0–5).
+    #[serde(default)]
+    pub inversion: u8,
+    /// Octave shift from the builder's octave (-3–3).
+    #[serde(default)]
+    pub octave: i8,
 }
 
 /// A clip: one slot in a track's clip dock.
@@ -498,6 +529,24 @@ pub struct Lane {
     pub target: ParamTarget,
     /// Breakpoints sorted by tick.
     pub points: Vector<Breakpoint>,
+}
+
+/// The project's key: a root pitch class and a scale, indexing
+/// `sat_dsp::scale::ROOTS` and `sat_dsp::scale::NAMES`. The piano roll
+/// highlights and snaps to it; sources can follow it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Key {
+    /// Root pitch class, 0 (c) to 11 (b).
+    pub root: u8,
+    /// Scale index (0 chromatic, 1 major, 2 minor, ...).
+    pub scale: u8,
+}
+
+impl Default for Key {
+    /// C major.
+    fn default() -> Self {
+        Key { root: 0, scale: 1 }
+    }
 }
 
 /// Loop and punch state saved with the project.

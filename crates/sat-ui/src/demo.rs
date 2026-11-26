@@ -629,6 +629,25 @@ pub fn demo() -> Demo {
     b.macro_slot(kg, 1, "release", &[(ADSR, "r", 0.2, 0.9)]);
     let bsrc = b.grid_of(bseq);
     b.macro_slot(bsrc, 0, "density", &[(sat_modules::EUCLID, "hits", 0.02, 0.2)]);
+    // a chord builder beside the pads, in a minor with a charleston rhythm,
+    // playing a session-only clip (added last, so the ids above stay put)
+    let kgrid = b.grid_of(kseq);
+    let cb = ModuleId::new();
+    let mut params = sat_modules::default_params(sat_modules::chords::CHORD_BUILDER);
+    for (k, v) in [("key", 1.0), ("root", 9.0), ("scale", 1.0), ("octave", 3.0), ("rhythm", 5.0), ("strum", 1.0)] {
+        params.insert(k.into(), v);
+    }
+    b.ops.push(Op::AddModule {
+        id: cb,
+        grid: kgrid,
+        kind: sat_modules::chords::CHORD_BUILDER.into(),
+        name: "chord builder".into(),
+        params,
+        pos: (0.0, 190.0),
+    });
+    let k_c = b.clip(keys, cb, "chords", 6, 4, Vec::new(), 0, 0);
+    let prog = sat_modules::chords::lay_out(sat_modules::chords::preset(9), bars(4));
+    b.ops.push(sat_modules::chords::write(cb, k_c, prog.into_iter().collect()));
     let tempo = doc.tempo_lane;
     b.ops.push(Op::SetLanePoints {
         id: tempo,

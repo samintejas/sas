@@ -422,6 +422,11 @@ struct App {
     roll_drag: Option<RollDrag>,
     steps: StepView,
     step_geom: Option<StepGeom>,
+    chords: sat_ui::chords::ChordView,
+    chord_geom: Option<sat_ui::chords::ChordGeom>,
+    /// A chord sounding live: the track and its pitches, and whether a key
+    /// (rather than the mouse) holds it.
+    live_chord: Option<(TrackId, Vec<u8>, bool)>,
     view: MainView,
     /// The view a grid's back button returns to.
     prev_view: MainView,
@@ -764,6 +769,7 @@ impl App {
             edited: self.project.edited(self.history.version()),
             roll: &self.roll,
             steps: &self.steps,
+            chords: &self.chords,
             view: self.view,
             grid: &self.grid,
             learn: self.learn,
@@ -793,6 +799,7 @@ impl App {
         self.roll_geom = drawn.roll;
         self.audio_layout = drawn.audio;
         self.step_geom = drawn.steps;
+        self.chord_geom = drawn.chords;
         if matches!(self.view, MainView::Grid(_)) && drawn.grid.is_none() && drawn.shell.main_shown() {
             // the track went away (undo): back to the arrangement
             self.view = MainView::Arrange;
@@ -1123,6 +1130,7 @@ impl App {
     fn select_clip(&mut self, clip: ClipId) {
         if self.arrange.selected_clip != Some(clip) {
             self.steps.page = 0;
+            self.chords.selected = None;
             self.roll.selected.clear();
             self.roll.lo = None;
         }
@@ -1905,6 +1913,9 @@ impl App {
                 self.audio_drag = Some(AudioDrag::Field { clip, field, from: pt.y, start });
                 return;
             }
+            if self.chord_geom.is_some() {
+                return self.press_chords(pt, double);
+            }
             if self.step_geom.is_some() {
                 return self.press_steps(pt, double);
             }
@@ -1955,6 +1966,171 @@ impl App {
             MacroHit::Pan(t) => self.begin_drag(ParamTarget::Pan(t), Axis::Vertical { travel: KNOB_TRAVEL }, double),
             MacroHit::Fold(bit) => self.macro_folds ^= bit,
             MacroHit::Nothing => {}
+        }
+    }
+
+    /// Plays `step`'s chord live on the edited clip's track until
+    /// [`App::stop_chord`] (`key`: a key holds it rather than the mouse).
+    fn play_chord(&mut self, step: sat_modules::chords::Step, key: bool) {
+        self.stop_chord();
+        let Some(g) = &self.chord_geom else { return };
+        let doc = self.history.doc();
+        let (Some(m), Some(clip)) = (doc.modules.get(&g.module), doc.clips.get(&g.clip)) else { return };
+        let p = sat_modules::chords::Params::in_doc(doc, m);
+        let pitches = sat_modules::chords::live_pitches(&p, step.resolve(p.key), 0);
+        let track = clip.track;
+        for pitch in &pitches {
+            if let Some(cmd) = self.playback.compiled.live(track, *pitch, p.vel.max(0.3), true) {
+                self.playback.send(cmd);
+            }
+        }
+        self.live_chord = Some((track, pitches, key));
+        self.chords.held = Some(step);
+    }
+
+    /// Releases the chord playing live, if one is.
+    fn stop_chord(&mut self) {
+        if let Some((track, pitches, _)) = self.live_chord.take() {
+            for pitch in pitches {
+                if let Some(cmd) = self.playback.compiled.live(track, pitch, 0.0, false) {
+                    self.playback.send(cmd);
+                }
+            }
+        }
+        self.chords.held = None;
+    }
+
+    /// Keys 1–7 play the chord editor's triads (shift: sevenths, alt:
+    /// borrowed) while held. Returns true when the key was taken.
+    fn chord_key(&mut self, event: &winit::event::KeyEvent) -> bool {
+        use winit::keyboard::{KeyCode, PhysicalKey};
+        if self.chord_geom.is_none() || self.palette.is_some() || self.settings.is_some() || self.browser.typing {
+            return false;
+        }
+        if self.mods.control_key() || self.mods.super_key() {
+            return false;
+        }
+        let PhysicalKey::Code(code) = event.physical_key else { return false };
+        let digit = match code {
+            KeyCode::Digit1 => 1,
+            KeyCode::Digit2 => 2,
+            KeyCode::Digit3 => 3,
+            KeyCode::Digit4 => 4,
+            KeyCode::Digit5 => 5,
+            KeyCode::Digit6 => 6,
+            KeyCode::Digit7 => 7,
+            _ => return false,
+        };
+        let row = if self.mods.alt_key() {
+            2
+        } else if self.mods.shift_key() {
+            1
+        } else {
+            0
+        };
+        if event.repeat {
+            return true;
+        }
+        let step = self.chord_geom.as_ref().and_then(|g| g.pad_for_key(row, digit));
+        if event.state == ElementState::Pressed {
+            if let Some(s) = step {
+                self.play_chord(s, true);
+            }
+        } else if self.live_chord.as_ref().is_some_and(|(_, _, key)| *key) {
+            self.stop_chord();
+        }
+        if let Some(g) = &self.gfx {
+            g.window.request_redraw();
+        }
+        true
+    }
+
+    fn press_chords(&mut self, pt: Point, double: bool) {
+        use sat_modules::chords;
+        use sat_ui::chords::ChordHit;
+        let Some(g) = self.chord_geom.clone() else { return };
+        let doc = self.history.doc();
+        let (module, clip) = (g.module, g.clip);
+        let Some(len) = doc.clips.get(&clip).map(|c| c.length) else { return };
+        let prog = chords::progression(doc, module, clip);
+        let sel = self.chords.selected.filter(|i| *i < prog.len());
+        let write = |app: &mut App, label: &str, v: Vec<sat_doc::ChordSlot>| {
+            app.edit(label, vec![chords::write(module, clip, v)]);
+        };
+        match g.hit(pt) {
+            ChordHit::Knob(param) => {
+                let target = ParamTarget::Module { module, param: param.into() };
+                self.begin_drag(target, Axis::Vertical { travel: KNOB_TRAVEL }, double);
+            }
+            ChordHit::Pad(step) => {
+                self.play_chord(step, false);
+                if self.chords.write
+                    && let Some((v, i)) = chords::put(&prog, sel, step, len)
+                {
+                    write(self, "chord", v);
+                    // keep adding after the last when nothing was selected
+                    self.chords.selected = sel.map(|_| i);
+                }
+            }
+            ChordHit::Slot(i) => {
+                self.chords.selected = if sel == Some(i) && !double { None } else { Some(i) };
+                if let Some(s) = prog.get(i) {
+                    self.play_chord(chords::Step::of(s), false);
+                }
+            }
+            ChordHit::Lane => self.chords.selected = None,
+            ChordHit::Preset(d) => {
+                let n = chords::PROGRESSIONS.len() as i32;
+                self.chords.preset = (self.chords.preset as i32 + d).rem_euclid(n) as usize;
+            }
+            ChordHit::Apply => {
+                let v = chords::lay_out(chords::preset(self.chords.preset), len);
+                self.chords.selected = None;
+                write(self, "progression", v.into_iter().collect());
+            }
+            ChordHit::Write => self.chords.write = !self.chords.write,
+            ChordHit::Clear => {
+                self.chords.selected = None;
+                if !prog.is_empty() {
+                    write(self, "clear chords", Vec::new());
+                }
+            }
+            ChordHit::ToRoll => {
+                if let Some((_, ops)) = chords::to_piano_roll(doc, module, clip) {
+                    self.chords.selected = None;
+                    self.edit("to piano roll", ops);
+                }
+            }
+            ChordHit::Invert | ChordHit::Octave(_) | ChordHit::Length(_) | ChordHit::Delete => {
+                let Some(i) = sel else { return };
+                let mut v = prog.clone();
+                let label = match g.hit(pt) {
+                    ChordHit::Invert => {
+                        let n = chords::QUALITIES[(chords::Step::of(&v[i])
+                            .resolve(chords::Params::in_doc(doc, &doc.modules[&module]).key))
+                        .quality as usize]
+                            .intervals
+                            .len() as u8;
+                        v[i].inversion = (v[i].inversion + 1) % n.clamp(1, 6);
+                        "invert"
+                    }
+                    ChordHit::Octave(d) => {
+                        v[i].octave = (v[i].octave + d).clamp(-3, 3);
+                        "chord octave"
+                    }
+                    ChordHit::Length(d) => {
+                        v = chords::stretch(&v, i, d, len);
+                        "chord length"
+                    }
+                    _ => {
+                        v = chords::remove(&v, i);
+                        self.chords.selected = None;
+                        "remove chord"
+                    }
+                };
+                write(self, label, v);
+            }
+            ChordHit::Nothing => {}
         }
     }
 
@@ -2987,6 +3163,9 @@ impl ApplicationHandler for App {
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => match state {
                 ElementState::Pressed => self.press(),
                 ElementState::Released => {
+                    if self.live_chord.as_ref().is_some_and(|(_, _, key)| !key) {
+                        self.stop_chord();
+                    }
                     self.dock_drag = None;
                     if let Some((clip, from)) = self.bank_drag.take()
                         && (self.cursor - from).hypot() > 4.0
@@ -3012,6 +3191,7 @@ impl ApplicationHandler for App {
                     self.open_path(&path);
                 }
             }
+            WindowEvent::KeyboardInput { event, .. } if self.chord_key(&event) => {}
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed && !event.repeat => {
                 self.key(&event.logical_key);
             }
@@ -3178,6 +3358,9 @@ fn main() {
         roll_drag: None,
         steps: StepView::default(),
         step_geom: None,
+        chords: sat_ui::chords::ChordView::default(),
+        chord_geom: None,
+        live_chord: None,
         view: MainView::Arrange,
         prev_view: MainView::Arrange,
         palette: None,

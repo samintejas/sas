@@ -54,6 +54,9 @@ pub struct Document {
     /// The audio pool: sound files the project uses.
     #[serde(default)]
     pub audio: OrdMap<AudioId, AudioFile>,
+    /// The project's key (C major in projects saved before it existed).
+    #[serde(default)]
+    pub key: Key,
 }
 
 impl Document {
@@ -104,6 +107,7 @@ impl Document {
             lanes: OrdMap::unit(tempo_lane, tempo),
             loop_range: LoopRange { start: Ticks::ZERO, end: Ticks::quarters(16), enabled: false },
             audio: OrdMap::new(),
+            key: Key::default(),
         }
     }
 

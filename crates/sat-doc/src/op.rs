@@ -158,6 +158,8 @@ pub enum Op {
     WritePattern { module: ModuleId, clip: ClipId, notes: Vector<Note> },
     /// Replaces the hand-edit layer of a pattern.
     SetOverrides { module: ModuleId, clip: ClipId, overrides: Overrides },
+    /// Replaces the chord progression of a pattern (creating the pattern).
+    WriteChords { module: ModuleId, clip: ClipId, chords: Vector<ChordSlot> },
 
     // --- arrangement and session ---
     /// Places a clip on the arrangement.
@@ -184,6 +186,8 @@ pub enum Op {
     SetMeter { changes: Vector<MeterChange> },
     /// Sets the loop range.
     SetLoop { range: LoopRange },
+    /// Sets the project's key (root 0–11; scale indexes the scale list).
+    SetKey { key: Key },
 }
 
 /// What an applied op changed, so the app knows how to react.
@@ -815,9 +819,32 @@ pub fn apply(d: &mut Document, op: Op) -> Result<Change, OpError> {
             match d.patterns.get_mut(&(module, clip)) {
                 Some(p) => p.notes = notes,
                 None => {
-                    d.patterns.insert((module, clip), crate::model::Pattern { notes, overrides: Overrides::default() });
+                    d.patterns.insert((module, clip), crate::model::Pattern { notes, ..Default::default() });
                 }
             }
+            Pattern { module, clip }
+        }
+        Op::WriteChords { module, clip, mut chords } => {
+            let m = d.modules.get(&module).ok_or_else(|| nf("module", module))?;
+            let c = d.clips.get(&clip).ok_or_else(|| nf("clip", clip))?;
+            if d.grids[&m.grid].kind != GridKind::Source || d.tracks[&c.track].source_grid != Some(m.grid) {
+                return Err(OpError::NotAllowed("patterns belong to source modules on the clip's track"));
+            }
+            for k in chords.iter() {
+                if k.len.0 <= 0
+                    || k.start.0 < 0
+                    || k.root > 11
+                    || k.stack > 5
+                    || k.inversion > 5
+                    || !(-3..=3).contains(&k.octave)
+                {
+                    return Err(OpError::BadValue("chord slot"));
+                }
+            }
+            let mut v: Vec<ChordSlot> = chords.iter().copied().collect();
+            v.sort_by_key(|k| k.start);
+            chords = Vector::from(v);
+            d.patterns.entry((module, clip)).or_default().chords = chords;
             Pattern { module, clip }
         }
         Op::SetOverrides { module, clip, overrides } => {
@@ -935,6 +962,14 @@ pub fn apply(d: &mut Document, op: Op) -> Result<Change, OpError> {
                 return Err(OpError::BadValue("loop end must be after start"));
             }
             d.loop_range = range;
+            Structure
+        }
+        Op::SetKey { key } => {
+            if key.root > 11 {
+                return Err(OpError::BadValue("key root must be 0-11"));
+            }
+            d.key = key;
+            // sources may follow the key, so recompile
             Structure
         }
     })

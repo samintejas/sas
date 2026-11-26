@@ -14,6 +14,7 @@ pub mod audio_edit;
 pub mod automation;
 pub mod bank;
 pub mod browser;
+pub mod chords;
 pub mod controls;
 pub mod demo;
 pub mod dock;

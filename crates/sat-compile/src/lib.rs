@@ -100,6 +100,13 @@ impl Compiled {
         Some(Command::Launch { node, clip: clip.map(clip_key), at })
     }
 
+    /// The command that starts (`on`) or releases a note played live on
+    /// `track`'s instrument.
+    pub fn live(&self, track: TrackId, pitch: u8, velocity: f32, on: bool) -> Option<Command> {
+        let node = *self.players.get(&track)?;
+        Some(Command::Live { node, pitch, velocity, on })
+    }
+
     /// The post-fader peak meter of a track's strip.
     pub fn meter(&self, track: TrackId) -> Option<&Arc<Meter>> {
         self.meters.get(&track)
